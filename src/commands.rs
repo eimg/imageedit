@@ -3,7 +3,19 @@ use gpui::{Action, App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 actions!(
     imageedit,
     [
+        NewImage,
         OpenImage,
+        SaveImage,
+        SaveImageAs,
+        SaveProjectAs,
+        ForegroundColor,
+        BackgroundColor,
+        SwapColors,
+        ResetColors,
+        ZoomIn,
+        ZoomOut,
+        ApplyCrop,
+        CancelCrop,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -23,6 +35,7 @@ actions!(
 pub enum Tool {
     Move,
     Pan,
+    Zoom,
     Eyedropper,
     Crop,
     Rotate,
@@ -56,15 +69,20 @@ impl Tool {
                 "Reposition a layer or selection on the canvas.",
             ),
             Self::Pan => ("Pan", "hand", "Drag the canvas to navigate a zoomed image."),
+            Self::Zoom => (
+                "Zoom",
+                "zoom",
+                "Click to zoom in. Control-click to zoom out.",
+            ),
             Self::Eyedropper => (
-                "Eyedropper",
+                "Color Picker",
                 "eyedropper",
-                "Click the image preview to set the foreground color.",
+                "Click a pixel to set the foreground color.",
             ),
             Self::Crop => (
                 "Crop",
                 "crop",
-                "Trim the edges of an image or choose a new aspect ratio.",
+                "Drag a rectangle, then press Return or choose Apply Crop.",
             ),
             Self::Rotate => ("Rotate", "rotate", "Turn a layer or selection by an angle."),
             Self::Flip => (
@@ -106,7 +124,7 @@ impl Tool {
             Self::BucketFill => (
                 "Bucket Fill",
                 "bucket",
-                "Fill a selection or a region of similar color.",
+                "Click a connected region of matching pixels to fill it with the foreground color.",
             ),
             Self::Gradient => (
                 "Gradient Fill",
@@ -155,7 +173,7 @@ pub const TOOL_GROUPS: &[(&str, &[Tool])] = &[
     ("Paint", PAINT_TOOLS),
     ("Fill", FILL_TOOLS),
     ("Draw", DRAW_TOOLS),
-    ("Utilities", &[Tool::Pan, Tool::Eyedropper]),
+    ("Utilities", &[Tool::Pan, Tool::Zoom, Tool::Eyedropper]),
 ];
 
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -167,7 +185,7 @@ pub struct SelectTool(pub Tool);
 pub enum Zoom {
     #[default]
     Fit,
-    Percent(u16),
+    Percent(f32),
 }
 
 pub const EXPORT_PNG: &str = "Export as PNG…";
@@ -187,7 +205,28 @@ pub fn register(cx: &mut App) {
         "ctrl"
     };
     cx.bind_keys([
+        KeyBinding::new(&format!("{primary}-n"), NewImage, None),
         KeyBinding::new(&format!("{primary}-o"), OpenImage, None),
+        KeyBinding::new(&format!("{primary}-s"), SaveImage, None),
+        KeyBinding::new(&format!("{primary}-shift-s"), SaveImageAs, None),
+        KeyBinding::new(&format!("{primary}-="), ZoomIn, None),
+        KeyBinding::new(&format!("{primary}--"), ZoomOut, None),
+        KeyBinding::new(&format!("{primary}-alt-s"), SaveProjectAs, None),
+        KeyBinding::new(&format!("{primary}-shift-j"), Zoom::Fit, None),
+        KeyBinding::new("shift-=", ZoomIn, None),
+        KeyBinding::new("+", ZoomIn, None),
+        KeyBinding::new("-", ZoomOut, None),
+        KeyBinding::new("1", Zoom::Percent(100.), None),
+        KeyBinding::new("shift-c", SelectTool(Tool::Crop), None),
+        KeyBinding::new("shift-b", SelectTool(Tool::BucketFill), None),
+        KeyBinding::new("o", SelectTool(Tool::Eyedropper), None),
+        KeyBinding::new("z", SelectTool(Tool::Zoom), None),
+        KeyBinding::new("x", SwapColors, None),
+        KeyBinding::new("d", ResetColors, None),
+        KeyBinding::new("alt-o", ForegroundColor, None),
+        KeyBinding::new("alt-shift-o", BackgroundColor, None),
+        KeyBinding::new("enter", ApplyCrop, Some("Crop")),
+        KeyBinding::new("escape", CancelCrop, Some("Crop")),
         KeyBinding::new(&format!("{primary}-w"), CloseTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
@@ -203,7 +242,7 @@ pub fn register(cx: &mut App) {
 
     // Window actions run while GPUI has the active window borrowed.
     cx.on_action(|_: &OpenImage, cx| cx.defer(crate::open_dialog));
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| cx.defer(crate::quit));
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -224,15 +263,16 @@ pub fn register(cx: &mut App) {
         menu(
             "File",
             vec![
-                planned("New Image…"),
+                MenuItem::action("New Image…", NewImage),
                 planned("New from Clipboard"),
                 MenuItem::separator(),
-                MenuItem::action("Open Image…", OpenImage),
+                MenuItem::action("Open…", OpenImage),
                 planned("Open as Layers…"),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::separator(),
-                planned("Save Project"),
-                planned("Save Project As…"),
+                MenuItem::action("Save", SaveImage),
+                MenuItem::action("Save As…", SaveImageAs),
+                MenuItem::action("Save Project As…", SaveProjectAs),
                 MenuItem::separator(),
                 planned(EXPORT_PNG),
                 planned(EXPORT_JPEG),
@@ -282,6 +322,7 @@ pub fn register(cx: &mut App) {
                 planned("Scale Image…"),
                 planned("Canvas Size…"),
                 tool(Tool::Crop),
+                MenuItem::action("Apply Crop", ApplyCrop),
                 planned("Crop to Content"),
             ],
         ),
@@ -325,6 +366,11 @@ pub fn register(cx: &mut App) {
         menu(
             "Colors",
             vec![
+                MenuItem::action("Foreground Color…", ForegroundColor),
+                MenuItem::action("Background Color…", BackgroundColor),
+                MenuItem::action("Swap Foreground and Background", SwapColors),
+                MenuItem::action("Default Colors", ResetColors),
+                MenuItem::separator(),
                 planned("Brightness & Contrast…"),
                 planned("Hue & Saturation…"),
                 planned("Color Balance…"),
@@ -374,12 +420,16 @@ fn transform_menu() -> MenuItem {
 
 fn zoom_menu() -> MenuItem {
     let mut items = vec![
+        MenuItem::action("Zoom In", ZoomIn),
+        MenuItem::action("Zoom Out", ZoomOut),
+        MenuItem::separator(),
         MenuItem::action("Fit Image in Window", Zoom::Fit),
         MenuItem::separator(),
     ];
     items.extend(
-        [25, 50, 100, 200, 400]
-            .map(|percent| MenuItem::action(format!("{percent}%"), Zoom::Percent(percent))),
+        [25_u16, 50, 100, 200, 400].map(|percent| {
+            MenuItem::action(format!("{percent}%"), Zoom::Percent(f32::from(percent)))
+        }),
     );
     MenuItem::submenu(menu("Zoom", items))
 }

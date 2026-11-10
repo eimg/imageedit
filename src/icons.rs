@@ -6,6 +6,9 @@ pub struct Icons;
 
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let (path, stroke) = path
+            .strip_prefix("cursor-outline/")
+            .map_or((path, "1.6"), |path| (path, "4.0"));
         let drawing = match path {
             "image" => {
                 r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m3 17 5-5 3 3 4-5 6 7"/>"#
@@ -13,6 +16,9 @@ impl AssetSource for Icons {
             "crop" => r#"<path d="M7 3v14h14M3 7h14v14M17 7l4-4"/>"#,
             "hand" => {
                 r#"<path d="M8 12V6a1.5 1.5 0 0 1 3 0v4-6a1.5 1.5 0 0 1 3 0v6-5a1.5 1.5 0 0 1 3 0v6-3a1.5 1.5 0 0 1 3 0v7a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7l-4-5.8a1.6 1.6 0 0 1 2.5-2L8 12Z"/>"#
+            }
+            "zoom" => {
+                r#"<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5.5 5.5M7 10h6m-3-3v6"/>"#
             }
             "eyedropper" => {
                 r#"<path d="m13 7 4 4m-2-6 2-2a2 2 0 0 1 3 3l-2 2 1 1-3 3-2-2-8 8-4 1 1-4 8-8-2-2 3-3 3 3Z"/>"#
@@ -60,12 +66,13 @@ impl AssetSource for Icons {
             }
             "close" => r#"<path d="m6 6 12 12M18 6 6 18"/>"#,
             "layers" => r#"<path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/>"#,
+            "swap" => r#"<path d="M3 8h18m-4-4 4 4-4 4m4 4H3m4-4-4 4 4 4"/>"#,
             "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
             "info" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>"#,
             _ => return Ok(None),
         };
         Ok(Some(Cow::Owned(format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{drawing}</svg>"#
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round">{drawing}</svg>"#
         ).into_bytes())))
     }
 

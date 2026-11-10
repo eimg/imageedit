@@ -8,13 +8,12 @@ space and has no top toolbar.
 
 ## Current product scope
 
-This is an editor shell. File opening, tabs, fitted and fixed zoom, pan,
-grid, center guides, and preview color sampling work. The image loader supports
-PNG, JPEG, and WebP. The foreground and background swatches can be swapped or
-reset. Most editing tools display their role in Tool Options. Menu commands for
-image or layer changes, project persistence, clipboard workflows, and export
-are placeholders. The Layers panel displays the open image as a source preview.
-Use the next user request to decide which editing behavior to implement.
+ImageEdit supports single-layer raster editing. Open or create an image,
+crop it, sample or set swatches, and fill connected regions. Tabs retain zoom
+and pan. The canvas supports a grid and center guides. Save and Save As handle
+ImageEdit projects, PNG, JPEG, and WebP. A version 1 project stores a named
+layer with lossless pixels. Layer management, clipboard workflows, undo, and
+separate export commands are placeholders.
 
 ## Code map
 
@@ -23,15 +22,18 @@ Use the next user request to decide which editing behavior to implement.
 - `src/commands.rs` defines actions, shortcuts, native menus, and toolbox
   metadata. Reuse those actions for UI entry points. A `Planned` menu action
   stays disabled until there is a real handler.
-- `src/document.rs` decodes source files and applies EXIF orientation. It keeps
-  original dimensions and a bounded BGRA preview for GPUI. Preview pixels are
-  presentation data and can be downsampled.
-- `src/workspace.rs` owns tabs, view state, and the asynchronous image loader.
-  The canonical source path identifies an already open file. Tab state follows
-  the document when switching tabs.
-- `src/workspace/view.rs` lays out the shell and paints the canvas. Panning,
-  overlays, and sampling share the preview geometry. The Eyedropper samples
-  the preview and sets the foreground swatch.
+- `src/document.rs` decodes raster files, applies EXIF orientation, edits
+  full-resolution RGBA pixels, and builds a bounded BGRA preview for GPUI.
+- `src/project.rs` reads and writes the versioned ImageEdit project container.
+- `src/workspace.rs` owns tabs, view state, and background open and edit jobs.
+  The canonical path identifies an already open file.
+- `src/workspace/files.rs` handles native file dialogs, background saving,
+  and unsaved-change confirmation.
+- `src/workspace/dialogs.rs` renders the canvas dimensions and color dialogs.
+  `src/workspace/color.rs` handles the HSV wheel and brightness slider.
+- `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
+  pixels. `src/workspace/view.rs` lays out the shell and paints the canvas
+  using the same geometry.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including
@@ -50,7 +52,9 @@ Run `./scripts/bundle-macos.sh` and open `dist/ImageEdit.app` for native smoke
 checks. Test a valid image and an unsupported file, switch and close tabs, and
 try Finder's **Open With** after rebuilding packaging changes. For canvas work,
 test fit, fixed zoom, pan at a zoom that clips the image, and sampling after
-panning. Confirm a planned action stays visibly disabled until implemented.
+panning. Create an image with custom dimensions, fill and crop it, then save
+and reopen a project and a raster image. Confirm a planned action stays
+visibly disabled until implemented.
 
 Keep local build output in `target/` and `dist/`. Use temporary directories
 for test images. Keep machine-specific settings and credentials out of source.

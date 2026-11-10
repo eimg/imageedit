@@ -1,5 +1,5 @@
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSImage};
+use objc2_app_kit::{NSApplication, NSCursor, NSImage};
 use objc2_foundation::NSData;
 
 pub fn set_dock_icon() {
@@ -12,5 +12,13 @@ pub fn set_dock_icon() {
         unsafe {
             NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&icon))
         };
+    }
+}
+
+pub fn set_cursor_visible(visible: bool) {
+    if visible {
+        NSCursor::unhide();
+    } else {
+        NSCursor::hide();
     }
 }

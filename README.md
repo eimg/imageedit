@@ -4,7 +4,7 @@
 
 ImageEdit is a lightweight desktop image editor in development. It uses Rust
 and [GPUI](https://gpui.rs/) with a GIMP-inspired workspace and native macOS
-menus. The current milestone is the editor shell and image preview workflow.
+menus. The current milestone supports single-layer image editing.
 
 ## Try it on macOS
 
@@ -20,27 +20,47 @@ The script builds an ad hoc signed local app with the ImageEdit icon and
 Finder file associations. You can also run `cargo run --locked` for
 development. Use the app bundle to test Finder integration and app identity.
 
-## What's working
+## Editing and saving
 
-- Open PNG, JPEG, and WebP images from **File → Open Image**, by dropping files
-  onto the canvas, or through Finder's **Open With** menu.
-- Open several images in tabs. Reopening a file focuses its existing tab.
-- Fit an image to the window or choose a zoom preset. Use **Pan** to drag a
-  zoomed preview and toggle the grid or center guides from **View**.
-- Use **Eyedropper** to sample the preview into the foreground swatch. Swap or
-  reset the foreground and background swatches in the toolbox.
+- **File → New Image** accepts pixel dimensions and creates a transparent
+  canvas or fills it with the background swatch.
+- **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
+  also drop files onto the canvas or use Finder’s **Open With** menu.
+  Reopening the same file focuses its existing tab.
+- **Save** updates the current file. New canvases default to an
+  `.imageedit` project. **Save As** adopts the new filename and uses
+  its extension to choose the format. **Save Project As** suggests
+  `.imageedit` when converting an opened image to a project.
+- Projects preserve the canvas dimensions, pixel transparency, and one layer
+  with its name. PNG and lossless WebP preserve transparency. JPEG saves
+  against white. The working pixel format is 8-bit RGBA.
+- Drag a rectangle with **Crop** and press Return to apply it or Escape to
+  cancel. **Bucket Fill** uses the foreground color on connected pixels with
+  matching RGBA values. **Color Picker** samples the image at full resolution.
+  Click either color swatch for the hue and saturation wheel, brightness
+  slider, and hex input. The last 12 distinct colors set or sampled in the
+  workspace are available in Recent Colors. Use **Swap FG/BG** or press X
+  to flip the foreground and background.
+- Use the Zoom tool, View menu, or status bar to zoom. Control-scroll zooms
+  around the pointer. Scroll or use a middle-button drag to pan a zoomed
+  image. Pan is also available from the toolbox for left-button dragging.
+  The cursor shows the selected tool beside the canvas crosshair.
 
-| Action | Shortcut |
+| Action | macOS shortcut |
 | --- | --- |
-| Open Image | ⌘O |
+| New / Open | ⌘N / ⌘O |
+| Save / Save As / Save Project As | ⌘S / ⌘⇧S / ⌘⌥S |
 | Close Tab | ⌘W |
-| Next Tab | Control-Tab |
-| Previous Tab | Control-Shift-Tab |
+| Next / Previous Tab | Control-Tab / Control-Shift-Tab |
+| Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
+| Foreground / Background color dialog | ⌥O / ⌥⇧O |
+| Swap / Reset colors | X / D |
+| Zoom tool / Zoom In / Zoom Out | Z / + / − |
+| Actual pixels / Fit | 1 / ⌘⇧J |
 
-The menus and toolbox also show planned editing features, including crop, text,
-layers, color adjustments, filters, undo, project saving, and PNG/JPEG export.
-Planned tools can be selected to inspect their place in the workspace. Commands
-that require the editing engine appear disabled. Windows is a future target.
+Menus and the toolbox still show planned features such as multiple layers,
+text, color adjustments, filters, and undo. Commands without handlers appear
+disabled. Windows is a future target.
 
 ## Development
 

@@ -18,13 +18,32 @@
     <string>1</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.imageedit.project</string>
+            <key>UTTypeDescription</key>
+            <string>ImageEdit Project</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.content</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>imageedit</string></array>
+            </dict>
+        </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
             <key>CFBundleTypeName</key>
             <string>Raster Image</string>
             <key>CFBundleTypeRole</key>
-            <string>Viewer</string>
+            <string>Editor</string>
             <key>LSHandlerRank</key>
             <string>Alternate</string>
             <key>LSItemContentTypes</key>
@@ -33,6 +52,16 @@
                 <string>public.jpeg</string>
                 <string>org.webmproject.webp</string>
             </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>ImageEdit Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array><string>com.imageedit.project</string></array>
         </dict>
     </array>
 </dict>

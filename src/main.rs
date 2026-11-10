@@ -8,6 +8,7 @@ mod document;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
+mod project;
 mod workspace;
 
 use std::path::PathBuf;
@@ -105,4 +106,20 @@ fn open_dialog(cx: &mut App) {
     if let Err(error) = result {
         eprintln!("Could not open the file picker: {error:#}");
     }
+}
+
+fn quit(cx: &mut App) {
+    let Some(handle) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<Workspace>())
+    else {
+        cx.quit();
+        return;
+    };
+    let _ = handle.update(cx, |workspace, window, cx| {
+        if workspace.request_exit(true, window, cx) {
+            cx.quit();
+        }
+    });
 }

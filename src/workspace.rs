@@ -1,20 +1,44 @@
+mod canvas_tools;
+mod color;
+mod cursor;
+mod dialogs;
+mod files;
 mod view;
 
 use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use futures::{StreamExt, channel::mpsc};
-use gpui::{Bounds, Context, FocusHandle, PathPromptOptions, Pixels, Point, ScrollHandle, Window};
+use gpui::{Bounds, Context, FocusHandle, Pixels, Point, ScrollHandle, Window};
+use image::RgbaImage;
 
 use crate::commands::{Tool, Zoom};
-use crate::document::{Document, file_name};
+use crate::document::{CropRect, Document, file_name, render_preview};
+
+use self::{cursor::CanvasCursor, dialogs::Form};
 
 const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
+const RECENT_COLOR_LIMIT: usize = 12;
 
 struct Tab {
     id: usize,
     document: Document,
     zoom: Zoom,
     pan: Point<Pixels>,
+    dirty: bool,
+    editing: bool,
+    saving: Option<PathBuf>,
+}
+
+impl Tab {
+    fn busy(&self) -> bool {
+        self.editing || self.saving.is_some()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CropDrag {
+    origin: Point<Pixels>,
+    start: (u32, u32),
 }
 
 pub struct Workspace {
@@ -25,11 +49,18 @@ pub struct Workspace {
     next_id: usize,
     tool: Tool,
     colors: [u32; 2],
+    recent_colors: Vec<u32>,
     show_grid: bool,
     show_guides: bool,
     viewport: Rc<Cell<Bounds<Pixels>>>,
-    pan_drag: Option<Point<Pixels>>,
+    canvas_cursor: Rc<CanvasCursor>,
+    pan_drag: Option<(gpui::MouseButton, Point<Pixels>)>,
+    crop_drag: Option<CropDrag>,
+    crop: Option<CropRect>,
     dialog_open: bool,
+    form: Option<Form>,
+    creating: bool,
+    next_untitled: usize,
     loader: mpsc::UnboundedSender<PathBuf>,
     pending: usize,
     errors: Vec<String>,
@@ -37,6 +68,21 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let entity = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            entity
+                .update(cx, |workspace, cx| {
+                    workspace.request_exit(false, window, cx)
+                })
+                .unwrap_or(true)
+        });
+        cx.observe_window_activation(window, |workspace, window, cx| {
+            if !window.is_window_active() {
+                workspace.canvas_cursor.leave();
+            }
+            cx.notify();
+        })
+        .detach();
         let focus = cx.focus_handle();
         focus.focus(window);
         let (loader, mut requests) = mpsc::unbounded::<PathBuf>();
@@ -70,46 +116,29 @@ impl Workspace {
             next_id: 0,
             tool: Tool::Move,
             colors: DEFAULT_COLORS,
+            recent_colors: Vec::new(),
             show_grid: false,
             show_guides: false,
             viewport: Rc::default(),
+            canvas_cursor: Rc::default(),
             pan_drag: None,
+            crop_drag: None,
+            crop: None,
             dialog_open: false,
+            form: None,
+            creating: false,
+            next_untitled: 1,
             loader,
             pending: 0,
             errors: Vec::new(),
         }
     }
 
-    pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open {
-            return;
-        }
-        self.dialog_open = true;
-        let prompt = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Open".into()),
-        });
-        cx.spawn_in(window, async move |workspace, cx| {
-            let result = prompt.await;
-            let _ = workspace.update_in(cx, |workspace, _, cx| {
-                workspace.dialog_open = false;
-                match result {
-                    Ok(Ok(Some(paths))) => workspace.open_paths(paths, cx),
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => workspace
-                        .errors
-                        .push(format!("Could not open the file picker: {error}")),
-                    Err(_) => workspace
-                        .errors
-                        .push("The file picker closed unexpectedly.".into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    fn set_color(&mut self, swatch: usize, color: u32) {
+        self.colors[swatch] = color;
+        self.recent_colors.retain(|&recent| recent != color);
+        self.recent_colors.insert(0, color);
+        self.recent_colors.truncate(RECENT_COLOR_LIMIT);
     }
 
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -125,21 +154,25 @@ impl Workspace {
     }
 
     fn show_document(&mut self, document: Document, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.document.path == document.path)
-        {
-            self.select_tab(index, window, cx);
-            return;
+        let dirty = document.path.is_none();
+        if let Some(path) = &document.path {
+            if let Some(index) = self.tabs.iter().position(|tab| {
+                tab.document.path.as_ref() == Some(path) || tab.saving.as_ref() == Some(path)
+            }) {
+                cx.drop_image(document.preview.image, Some(window));
+                self.select_tab(index, window, cx);
+                return;
+            }
+            cx.add_recent_document(path);
         }
-
-        cx.add_recent_document(&document.path);
         self.tabs.push(Tab {
             id: self.next_id,
             document,
             zoom: Zoom::default(),
             pan: Point::default(),
+            dirty,
+            editing: false,
+            saving: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -158,6 +191,9 @@ impl Workspace {
     }
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active != Some(index) {
+            self.clear_crop();
+        }
         self.active = Some(index);
         self.pan_drag = None;
         self.tab_scroll.scroll_to_item(index);
@@ -175,8 +211,11 @@ impl Workspace {
 
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.pan_drag = None;
+        if self.active == Some(index) {
+            self.clear_crop();
+        }
         let removed = self.tabs.remove(index);
-        cx.drop_image(removed.document.preview, Some(window));
+        cx.drop_image(removed.document.preview.image, Some(window));
 
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
@@ -191,11 +230,66 @@ impl Workspace {
         cx.notify();
     }
 
+    fn clear_crop(&mut self) {
+        self.crop = None;
+        self.crop_drag = None;
+    }
+
+    fn edit_pixels(
+        &mut self,
+        reset_view: bool,
+        edit: impl FnOnce(&RgbaImage) -> Option<RgbaImage> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
+            return;
+        };
+        if tab.busy() {
+            return;
+        }
+        tab.editing = true;
+        let id = tab.id;
+        let source = tab.document.pixels.clone();
+        let job = cx.background_executor().spawn(async move {
+            let pixels = edit(&source)?;
+            let preview = render_preview(&pixels);
+            Some((pixels, preview))
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = job.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                let Some(index) = workspace.tab_index(id) else {
+                    return;
+                };
+                let tab = &mut workspace.tabs[index];
+                tab.editing = false;
+                if let Some((pixels, preview)) = result {
+                    tab.document.pixels = pixels.into();
+                    let old = std::mem::replace(&mut tab.document.preview, preview);
+                    cx.drop_image(old.image, Some(window));
+                    tab.dirty = true;
+                    if reset_view {
+                        tab.pan = Point::default();
+                    }
+                    workspace.update_title(window);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn update_title(&self, window: &mut Window) {
-        let title = self.active_document().map_or_else(
+        let title = self.active_tab().map_or_else(
             || "ImageEdit".to_owned(),
-            |document| format!("{} — ImageEdit", document.name),
+            |tab| {
+                let marker = if tab.dirty { " •" } else { "" };
+                format!("{}{marker} — ImageEdit", tab.document.name)
+            },
         );
         window.set_window_title(&title);
+        window.set_window_edited(self.active_tab().is_some_and(|tab| tab.dirty));
     }
 }
