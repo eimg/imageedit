@@ -522,4 +522,44 @@ mod tests {
         );
         assert!(!session.history.is_dirty());
     }
+
+    #[test]
+    fn undoing_a_canvas_resize_restores_the_saved_document() {
+        let mut session = Session::new(true, 4);
+        session.current.selection = Selection::Rect(crate::preview::PixelRect::new(0, 0, 2, 1));
+        session.edit(
+            |content| {
+                content
+                    .resize_canvas(6, 4, crate::transform::Anchor::East)
+                    .is_some()
+            },
+            &LIMITS,
+        );
+        assert_eq!(session.current.content.size(), (6, 4));
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(session.current.active_layer)
+                .unwrap()
+                .offset,
+            (2, 0)
+        );
+        assert!(session.undo());
+        assert_eq!(session.current.content.size(), (4, 4));
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(session.current.active_layer)
+                .unwrap()
+                .offset,
+            (0, 0)
+        );
+        assert_eq!(
+            session.current.selection,
+            Selection::Rect(crate::preview::PixelRect::new(0, 0, 2, 1))
+        );
+        assert!(!session.history.is_dirty());
+    }
 }

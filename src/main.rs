@@ -12,6 +12,7 @@ mod macos;
 mod preview;
 mod project;
 mod selection;
+mod transform;
 mod workspace;
 
 use std::path::PathBuf;

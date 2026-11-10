@@ -62,6 +62,20 @@ impl Selection {
         (bounds.width < width || bounds.height < height).then_some(bounds)
     }
 
+    // Moves a rectangle or its hole onto a new canvas. Full and unrestricted stay as they are.
+    pub fn moved_box(self, rect: PixelRect, width: u32, height: u32) -> Self {
+        match self {
+            Self::Unrestricted | Self::Empty => self,
+            Self::Full => Self::Full,
+            Self::Rect(_) => Self::from_rect(rect, width, height),
+            Self::Inverse(_) => match clip(rect, width, height) {
+                Some(hole) if covers_canvas(hole, width, height) => Self::Empty,
+                Some(hole) => Self::Inverse(hole),
+                None => Self::Full,
+            },
+        }
+    }
+
     pub fn rebase(self, origin_x: i64, origin_y: i64, width: u32, height: u32) -> Self {
         match self {
             Self::Unrestricted | Self::Empty => self,

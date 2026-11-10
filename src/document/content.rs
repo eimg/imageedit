@@ -50,6 +50,7 @@ impl RasterLayer {
 pub struct DocumentContent {
     pub(super) width: u32,
     pub(super) height: u32,
+    mode: crate::transform::ColorMode,
     // Bottom to top. Constructors and edits keep at least one layer.
     pub(super) layers: Vec<RasterLayer>,
 }
@@ -60,6 +61,7 @@ impl DocumentContent {
         Self {
             width,
             height,
+            mode: crate::transform::ColorMode::Rgb,
             layers: vec![RasterLayer {
                 id: LayerId(0),
                 name,
@@ -87,8 +89,32 @@ impl DocumentContent {
         Ok(Self {
             width,
             height,
+            mode: crate::transform::ColorMode::Rgb,
             layers,
         })
+    }
+
+    pub fn mode(&self) -> crate::transform::ColorMode {
+        self.mode
+    }
+
+    pub(crate) fn set_stored_mode(&mut self, mode: crate::transform::ColorMode) {
+        self.mode = mode;
+    }
+
+    pub fn set_color_mode(&mut self, mode: crate::transform::ColorMode) -> Dirty {
+        if self.mode == mode {
+            return Dirty::None;
+        }
+        self.mode = mode;
+        if mode == crate::transform::ColorMode::Grayscale {
+            for layer in &mut self.layers {
+                layer.pixels = Arc::new(crate::transform::grayscale((*layer.pixels).clone()));
+            }
+            Dirty::Canvas
+        } else {
+            Dirty::Unpainted
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -240,6 +266,7 @@ impl DocumentContent {
         let index = self
             .layer_index(above)
             .map_or(self.layers.len(), |index| index + 1);
+        let fill = self.mode.constrain(fill);
         self.layers.insert(
             index,
             RasterLayer {
@@ -327,12 +354,13 @@ impl DocumentContent {
         let index = self
             .layer_index(above)
             .map_or(self.layers.len(), |index| index + 1);
+        let pixels = self.mode.constrain_image(layer.pixels);
         self.layers.insert(
             index,
             RasterLayer {
                 id,
                 name: limited_name(&layer.name),
-                pixels: Arc::new(layer.pixels),
+                pixels: Arc::new(pixels),
                 offset,
                 visible: true,
                 opacity: 255,
@@ -477,6 +505,7 @@ impl DocumentContent {
         if !selection.covers(i64::from(x), i64::from(y), self.width, self.height) {
             return None;
         }
+        let color = self.mode.constrain(color);
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
         let local_x = i64::from(x) - i64::from(layer.offset.0);
         let local_y = i64::from(y) - i64::from(layer.offset.1);
@@ -681,6 +710,182 @@ impl DocumentContent {
             composite(&self.layers[..index]),
             composite(&self.layers[index + 1..]),
         )
+    }
+
+    pub fn turn_image(&mut self, turn: crate::transform::Turn) -> bool {
+        let canvas = self.size();
+        let mut planned = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            let Some(offset) = crate::transform::turned_offset(
+                layer.offset,
+                layer.pixels.dimensions(),
+                canvas,
+                turn,
+            ) else {
+                return false;
+            };
+            planned.push((crate::transform::turn_pixels(&layer.pixels, turn), offset));
+        }
+        for (layer, (pixels, offset)) in self.layers.iter_mut().zip(planned) {
+            layer.pixels = Arc::new(pixels);
+            layer.offset = offset;
+        }
+        (self.width, self.height) = crate::transform::turned_size(canvas.0, canvas.1, turn);
+        true
+    }
+
+    pub fn mirror_image(&mut self, mirror: crate::transform::Mirror) -> bool {
+        let canvas = self.size();
+        let mut planned = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            let Some(offset) = crate::transform::mirrored_offset(
+                layer.offset,
+                layer.pixels.dimensions(),
+                canvas,
+                mirror,
+            ) else {
+                return false;
+            };
+            planned.push((
+                crate::transform::mirror_pixels(&layer.pixels, mirror),
+                offset,
+            ));
+        }
+        for (layer, (pixels, offset)) in self.layers.iter_mut().zip(planned) {
+            layer.pixels = Arc::new(pixels);
+            layer.offset = offset;
+        }
+        true
+    }
+
+    pub fn turn_layer(&mut self, id: LayerId, turn: crate::transform::Turn) -> bool {
+        let Some(index) = self.layer_index(id) else {
+            return false;
+        };
+        let offset = self.layers[index].offset;
+        let old = self.layers[index].pixels.dimensions();
+        let pixels = crate::transform::turn_pixels(&self.layers[index].pixels, turn);
+        self.layers[index].offset =
+            crate::transform::centered_offset(offset, old, pixels.dimensions());
+        self.layers[index].pixels = Arc::new(pixels);
+        true
+    }
+
+    pub fn mirror_layer(&mut self, id: LayerId, mirror: crate::transform::Mirror) -> bool {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return false;
+        };
+        layer.pixels = Arc::new(crate::transform::mirror_pixels(&layer.pixels, mirror));
+        true
+    }
+
+    pub fn scale_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        resample: crate::transform::Resample,
+    ) -> bool {
+        let old = self.size();
+        if (width, height) == old || !crate::transform::canvas_allowed(width, height) {
+            return false;
+        }
+        let mut plan = Vec::with_capacity(self.layers.len());
+        let mut total = 0u64;
+        for layer in &self.layers {
+            let Some((offset, size)) = crate::transform::scale_placement(
+                layer.offset,
+                layer.pixels.dimensions(),
+                old,
+                (width, height),
+            ) else {
+                return false;
+            };
+            let Some(bytes) = u64::from(size.0)
+                .checked_mul(u64::from(size.1))
+                .and_then(|pixels| pixels.checked_mul(4))
+            else {
+                return false;
+            };
+            if bytes > MAX_IMAGE_BYTES {
+                return false;
+            }
+            total = total.saturating_add(bytes);
+            plan.push((offset, size));
+        }
+        if !self.fits_stack(self.stack_bytes(), total) {
+            return false;
+        }
+        for (layer, (offset, size)) in self.layers.iter_mut().zip(plan) {
+            layer.pixels = Arc::new(crate::transform::scale_pixels(
+                &layer.pixels,
+                size.0,
+                size.1,
+                resample,
+            ));
+            layer.offset = offset;
+        }
+        self.width = width;
+        self.height = height;
+        true
+    }
+
+    pub fn scale_layer(
+        &mut self,
+        id: LayerId,
+        width: u32,
+        height: u32,
+        resample: crate::transform::Resample,
+    ) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let Some(index) = self.layer_index(id) else {
+            return false;
+        };
+        let old = self.layers[index].pixels.dimensions();
+        if (width, height) == old {
+            return false;
+        }
+        let Some(bytes) = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return false;
+        };
+        let removed = image_bytes(&self.layers[index].pixels).unwrap_or(u64::MAX);
+        if !self.fits_stack(removed, bytes) {
+            return false;
+        }
+        let offset =
+            crate::transform::centered_offset(self.layers[index].offset, old, (width, height));
+        let pixels =
+            crate::transform::scale_pixels(&self.layers[index].pixels, width, height, resample);
+        self.layers[index].offset = offset;
+        self.layers[index].pixels = Arc::new(pixels);
+        true
+    }
+
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        anchor: crate::transform::Anchor,
+    ) -> Option<(i32, i32)> {
+        if (width, height) == self.size() || !crate::transform::canvas_allowed(width, height) {
+            return None;
+        }
+        let delta = crate::transform::anchor_delta(self.size(), (width, height), anchor);
+        for layer in &self.layers {
+            i32::try_from(i64::from(layer.offset.0) + i64::from(delta.0)).ok()?;
+            i32::try_from(i64::from(layer.offset.1) + i64::from(delta.1)).ok()?;
+        }
+        for layer in &mut self.layers {
+            layer.offset.0 += delta.0;
+            layer.offset.1 += delta.1;
+        }
+        self.width = width;
+        self.height = height;
+        Some(delta)
     }
 }
 
@@ -1328,5 +1533,39 @@ mod tests {
                 .room_for(0, MAX_STACK_BYTES, &RgbaImage::new(1, 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn grayscale_constrains_later_color_and_keeps_alpha() {
+        let mut content = DocumentContent::single_layer(
+            "Image".into(),
+            RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 200])),
+        );
+        assert!(matches!(
+            content.set_color_mode(crate::transform::ColorMode::Grayscale),
+            Dirty::Canvas
+        ));
+        let converted = content.layers()[0].pixels.get_pixel(0, 0).0;
+        assert_eq!(converted[0], converted[1]);
+        assert_eq!(converted[3], 200);
+        content
+            .fill(
+                content.top_layer_id(),
+                0,
+                0,
+                Rgba([255, 0, 0, 128]),
+                &Selection::Unrestricted,
+            )
+            .unwrap();
+        let filled = content.layers()[0].pixels.get_pixel(0, 0).0;
+        assert_eq!(filled[0], filled[1]);
+        assert_eq!(filled[1], filled[2]);
+        assert_eq!(filled[3], 128);
+        assert!(matches!(
+            content.set_color_mode(crate::transform::ColorMode::Rgb),
+            Dirty::Unpainted
+        ));
+        assert_eq!(content.layers()[0].pixels.get_pixel(0, 0).0, filled);
+        assert_eq!(content.mode(), crate::transform::ColorMode::Rgb);
     }
 }

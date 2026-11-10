@@ -45,6 +45,11 @@ actions!(
         CopyImage,
         PasteImage,
         PasteAsLayer,
+        ScaleImage,
+        ScaleLayer,
+        CanvasSize,
+        SetRgb,
+        SetGrayscale,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -217,6 +222,26 @@ pub enum AlignLayer {
     Both,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
+#[action(namespace = imageedit, no_json)]
+pub enum ImageAdjust {
+    RotateLeft,
+    RotateRight,
+    RotateHalf,
+    FlipHorizontal,
+    FlipVertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
+#[action(namespace = imageedit, no_json)]
+pub enum LayerAdjust {
+    RotateLeft,
+    RotateRight,
+    RotateHalf,
+    FlipHorizontal,
+    FlipVertical,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Action)]
 #[action(namespace = imageedit, no_json)]
 pub enum Zoom {
@@ -372,11 +397,17 @@ pub fn register(cx: &mut App) {
         menu(
             "Image",
             vec![
-                MenuItem::submenu(menu("Mode", vec![planned("RGB"), planned("Grayscale")])),
-                transform_menu(),
+                MenuItem::submenu(menu(
+                    "Mode",
+                    vec![
+                        MenuItem::action("RGB", SetRgb),
+                        MenuItem::action("Grayscale", SetGrayscale),
+                    ],
+                )),
+                image_transform_menu(),
                 MenuItem::separator(),
-                planned("Scale Image…"),
-                planned("Canvas Size…"),
+                MenuItem::action("Scale Image…", ScaleImage),
+                MenuItem::action("Canvas Size…", CanvasSize),
                 tool(Tool::Crop),
                 MenuItem::action("Apply Crop", ApplyCrop),
                 MenuItem::action("Crop to Selection", CropToSelection),
@@ -397,7 +428,7 @@ pub fn register(cx: &mut App) {
                 MenuItem::action("Raise Layer", RaiseLayer),
                 MenuItem::action("Lower Layer", LowerLayer),
                 MenuItem::separator(),
-                transform_menu(),
+                layer_transform_menu(),
                 MenuItem::submenu(menu(
                     "Align",
                     vec![
@@ -406,7 +437,7 @@ pub fn register(cx: &mut App) {
                         MenuItem::action("Center in Image", AlignLayer::Both),
                     ],
                 )),
-                planned("Scale Layer…"),
+                MenuItem::action("Scale Layer…", ScaleLayer),
                 MenuItem::action("Layer to Image Size", LayerToImageSize),
                 MenuItem::action("Crop to Content", CropLayerToContent),
             ],
@@ -459,16 +490,32 @@ pub fn register(cx: &mut App) {
     ]);
 }
 
-fn transform_menu() -> MenuItem {
+fn image_transform_menu() -> MenuItem {
     MenuItem::submenu(menu(
         "Transform",
         vec![
-            planned("Rotate 90° Left"),
-            planned("Rotate 90° Right"),
-            planned("Rotate 180°"),
+            MenuItem::action("Rotate 90° Left", ImageAdjust::RotateLeft),
+            MenuItem::action("Rotate 90° Right", ImageAdjust::RotateRight),
+            MenuItem::action("Rotate 180°", ImageAdjust::RotateHalf),
             MenuItem::separator(),
-            planned("Flip Horizontally"),
-            planned("Flip Vertically"),
+            MenuItem::action("Flip Horizontally", ImageAdjust::FlipHorizontal),
+            MenuItem::action("Flip Vertically", ImageAdjust::FlipVertical),
+            MenuItem::separator(),
+            tool(Tool::Perspective),
+        ],
+    ))
+}
+
+fn layer_transform_menu() -> MenuItem {
+    MenuItem::submenu(menu(
+        "Transform",
+        vec![
+            MenuItem::action("Rotate 90° Left", LayerAdjust::RotateLeft),
+            MenuItem::action("Rotate 90° Right", LayerAdjust::RotateRight),
+            MenuItem::action("Rotate 180°", LayerAdjust::RotateHalf),
+            MenuItem::separator(),
+            MenuItem::action("Flip Horizontally", LayerAdjust::FlipHorizontal),
+            MenuItem::action("Flip Vertically", LayerAdjust::FlipVertical),
             MenuItem::separator(),
             tool(Tool::Perspective),
         ],

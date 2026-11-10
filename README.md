@@ -70,6 +70,14 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   image. **Open as Layers** adds PNG, JPEG, and WebP files above the active
   layer. A file that cannot be read is reported, and the others are still
   added.
+  **Image → Transform** rotates or flips the whole image, and the selection
+  moves with it. **Layer → Transform** does the same to the active layer and
+  leaves the selection where it is. **Scale Image** and **Scale Layer** resize
+  with nearest, bilinear, or bicubic sampling and an optional aspect lock.
+  **Canvas Size** grows or shrinks the canvas from one of nine anchors and
+  keeps pixels that fall outside it. **Image → Mode** can make the document
+  grayscale. Grayscale images save as projects; Export still writes a flattened
+  copy. Switching back to RGB keeps the gray pixels and allows color again.
   Click either color swatch for the hue and saturation wheel, brightness
   slider, and hex input. The last 12 distinct colors set or sampled in the
   workspace are available in Recent Colors. Click the swap icon between the

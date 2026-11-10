@@ -2,6 +2,17 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
+## Latest handoff · P11
+
+P11 adds fixed transforms, scaling, canvas size, and image mode on branch `p11-transform`, which starts from the P02–P09 follow-up on `main`.
+
+- Image → Transform rotates or flips every layer and the selection together. Layer → Transform changes only the active layer and keeps the selection in canvas coordinates. A quarter-turn keeps that layer's center as close as integer offsets allow. Off-canvas pixels move with the layer.
+- Scale Image and Scale Layer share nearest, bilinear, and bicubic resampling. Bilinear and bicubic weight color by alpha. Aspect lock derives the other edge from the field being edited. Canvas Size uses a nine-point anchor, slides every layer by that anchor, and keeps pixels that land outside the canvas. The selection moves with an image scale or a canvas resize.
+- Grayscale converts existing pixels, keeps alpha, and stores RGBA. Later fills, new layers, and pasted images are written in gray. RGB leaves those pixels as they are and allows color again. The mode is project version 3. A grayscale document saves as a project and can still be exported. Version 2 projects no longer open.
+- Formatting, Clippy and locked tests passed. The follow-up ended with 74 tests and P11 ends with 83, plus the ignored release benchmark.
+- The menus were not driven in the app.
+- **Next is P12**, advanced selection.
+
 ## P02–P09 follow-up
 
 Reviewed the P02–P09 acceptance criteria on top of the P10 checkout (`64e0360`).
@@ -112,7 +123,7 @@ P03 added per-tab undo/redo history and save identity on branch `p03-history`, w
 
 P02 replaced the project format with the v2 layer-stack format on branch `p02-project-v2`. ImageEdit has no released users, so v1 support was dropped by product decision: v1 files and any other version are rejected. No menu, shortcut or tab behavior changed.
 
-- `fixtures/projects/v2-two-layers.imageedit` is a P02-written stack with non-sequential IDs, a non-ASCII name, a negative offset, a hidden layer, opacity 77 and translucent pixels. Tests read it to catch accidental format drift. Regenerate it only when the format intentionally changes.
+- `fixtures/projects/v3-two-layers.imageedit` is the golden stack with non-sequential IDs, a non-ASCII name, a negative offset, a hidden layer, opacity 77, translucent pixels, and RGB mode. Tests read it to catch accidental format drift. Regenerate it only when the format intentionally changes.
 - `src/project.rs` reads and writes only v2, as specified under *Project v2 wire format*, and rejects any other `version`. The manifest and layer entries reject unknown fields. One `check_limits` function enforces the canvas, layer count, per-layer and total decoded size caps, and unique IDs for both reads and writes before any pixel buffer is allocated. The reader rejects a payload length that is zero or exceeds the remaining file, enforces the 768 MiB encoded total, checks PNG dimensions against the manifest, and rejects trailing bytes. The writer encodes one layer at a time into a reused buffer.
 - `src/document/content.rs` adds `DocumentContent::from_layers`, which requires a non-empty canvas, at least one layer, non-empty layer pixels and unique IDs. It also adds the read-only `size()` and `layers()` accessors. `src/document.rs` exports `BlendMode`, `RasterLayer` and `MAX_IMAGE_BYTES`, and its save adapter writes every project through `project::write`. The v1 full-canvas restriction is gone. Atomic same-directory replacement and recent-document handling are unchanged.
 - Formatting, Clippy and locked tests passed before and after the change. The baseline had 12 tests and the final run had 18. New tests cover v2 round-trips against the writer and the golden file, 17 malformed manifests, 12 malformed payload or framing cases, writer limits, a failed save that leaves the original file reopenable with no leftover temporary file, a truncated project failing `Document::open`, and the constructor's validation. A malformed file fails in `Document::open` before a tab exists, so no tab can be mutated.
@@ -172,12 +183,12 @@ A single raster layer is eligible for raster Save only if its rendered canvas pr
 
 ### Project v2 wire format
 
-Retain the current `IMGEDIT\0` magic and little-endian `u32` JSON manifest length. The manifest contains `version: 2`, canvas `width` and `height`, and a bottom-to-top `layers` array. Each raster layer entry stores `id`, `name`, signed `x` and `y`, `width`, `height`, `visible`, `opacity` as a byte, and `blend_mode: "normal"`. Each layer’s payload immediately follows in manifest order, prefixed by a little-endian `u64` encoded PNG length.
+Retain the current `IMGEDIT\0` magic and little-endian `u32` JSON manifest length. The manifest contains `version: 3`, `mode` (`rgb` or `grayscale`), canvas `width` and `height`, and a bottom-to-top `layers` array. Each raster layer entry stores `id`, `name`, signed `x` and `y`, `width`, `height`, `visible`, `opacity` as a byte, and `blend_mode: "normal"`. Each layer’s payload immediately follows in manifest order, prefixed by a little-endian `u64` encoded PNG length.
 
-- v1 is not supported. ImageEdit had no released users when v2 replaced it, so a v1 file fails to open like any other unsupported version.
+- Versions other than 3 are not supported. ImageEdit had no released users when v3 replaced v2, so a v2 file fails to open like any other unsupported version.
 - Start with the existing 64 KiB manifest limit and 256 MiB decoded canvas limit. Limit v2 to 128 layers, 512 MiB total decoded layer pixels and 768 MiB total encoded payload. Apply the same caps to reading and writing. Check manifest lengths and aggregate dimensions before allocating pixel buffers.
 - Reject unknown versions, invalid metadata, duplicate IDs, unsupported blend modes, truncated or oversized chunks, extra payloads and PNG dimensions that disagree with their layer. Bound reads to each payload. Encode one layer at a time and use the existing same-directory temporary-file replacement on save.
-- Reserve v3 for image mode in P11, v4 for paths in P19, and v5 for editable text in P21. Treat v2 as RGB. Choose each new payload layout in its owning pass. An older reader must reject a project it cannot fully represent instead of opening a reduced version that can later overwrite the source. Until the first release, a format change may replace the previous version and its fixture outright. After release, keep readers and fixtures for every shipped version. Omit transient previews, selections and history from saved projects.
+- Reserve v4 for paths in P19 and v5 for editable text in P21. Choose each new payload layout in its owning pass. An older reader must reject a project it cannot fully represent instead of opening a reduced version that can later overwrite the source. Until the first release, a format change may replace the previous version and its fixture outright. After release, keep readers and fixtures for every shipped version. Omit transient previews, selections and history from saved projects.
 
 ## Execution and handoff
 

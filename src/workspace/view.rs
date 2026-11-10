@@ -61,6 +61,7 @@ impl Render for Workspace {
                 let root = self.bind_geometry_actions(root, cx);
                 let root = self.bind_selection_actions(root, cx);
                 let root = self.bind_clipboard_actions(root, cx);
+                let root = self.bind_transform_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;

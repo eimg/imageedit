@@ -15,7 +15,7 @@ use crate::document::{
 
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 
@@ -23,6 +23,7 @@ const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
+    mode: crate::transform::ColorMode,
     width: u32,
     height: u32,
     // Bottom to top, in payload order.
@@ -147,13 +148,16 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         remaining == 0,
         "Project contains unexpected data after its layers"
     );
-    DocumentContent::from_layers(manifest.width, manifest.height, layers)
+    let mut content = DocumentContent::from_layers(manifest.width, manifest.height, layers)?;
+    content.set_stored_mode(manifest.mode);
+    Ok(content)
 }
 
 pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
     let (width, height) = content.size();
     let manifest = Manifest {
         version: VERSION,
+        mode: content.mode(),
         width,
         height,
         layers: content
@@ -242,7 +246,7 @@ mod tests {
 
     const V2_GOLDEN: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/projects/v2-two-layers.imageedit"
+        "/fixtures/projects/v3-two-layers.imageedit"
     ));
 
     fn read_bytes(bytes: &[u8]) -> Result<DocumentContent> {
@@ -284,6 +288,7 @@ mod tests {
     }
 
     fn assert_same(actual: &DocumentContent, expected: &DocumentContent) {
+        assert_eq!(actual.mode(), expected.mode());
         assert_eq!(actual.size(), expected.size());
         assert_eq!(actual.layers().len(), expected.layers().len());
         for (actual, expected) in actual.layers().iter().zip(expected.layers()) {
@@ -348,8 +353,12 @@ mod tests {
         let valid = write_bytes(&two_layers()).unwrap();
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
-        let edits: [Edit; 16] = [
-            ("unknown version", &|m| m["version"] = json!(3)),
+        let edits: [Edit; 18] = [
+            ("unknown version", &|m| m["version"] = json!(4)),
+            ("missing mode", &|m| {
+                m.as_object_mut().unwrap().remove("mode");
+            }),
+            ("unknown mode", &|m| m["mode"] = json!("cmyk")),
             ("version zero", &|m| m["version"] = json!(0)),
             ("missing version", &|m| {
                 m.as_object_mut().unwrap().remove("version");

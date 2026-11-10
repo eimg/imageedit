@@ -7,6 +7,7 @@ mod files;
 mod history;
 mod layers;
 mod selection;
+mod transform_ui;
 mod view;
 
 use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};

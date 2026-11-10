@@ -9,6 +9,7 @@ use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
 use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
 use crate::preview::Dirty;
+use crate::transform::{Anchor, Resample};
 
 pub(super) struct Form {
     focus: FocusHandle,
@@ -42,6 +43,21 @@ enum FormKind {
     LayerOpacity {
         id: LayerId,
         percent: Field,
+    },
+    Scale {
+        width: Field,
+        height: Field,
+        source: (u32, u32),
+        layer: bool,
+        lock: bool,
+        active: usize,
+        resample: Resample,
+    },
+    Canvas {
+        width: Field,
+        height: Field,
+        active: usize,
+        anchor: Anchor,
     },
 }
 
@@ -312,6 +328,64 @@ impl Workspace {
         );
     }
 
+    pub(super) fn scale_image_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((width, height)) = self.active_tab().map(|tab| tab.document.content.size()) else {
+            return;
+        };
+        self.scale_form(width, height, false, window, cx);
+    }
+
+    pub(super) fn scale_layer_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((width, height)) = self.active_tab().and_then(|tab| {
+            tab.document
+                .content
+                .layer(tab.active_layer)
+                .map(|layer| layer.pixels.dimensions())
+        }) else {
+            return;
+        };
+        self.scale_form(width, height, true, window, cx);
+    }
+
+    fn scale_form(
+        &mut self,
+        width: u32,
+        height: u32,
+        layer: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_form(
+            FormKind::Scale {
+                width: Field::new(width.to_string()),
+                height: Field::new(height.to_string()),
+                source: (width, height),
+                layer,
+                lock: true,
+                active: 0,
+                resample: Resample::Bilinear,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn canvas_size_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((width, height)) = self.active_tab().map(|tab| tab.document.content.size()) else {
+            return;
+        };
+        self.show_form(
+            FormKind::Canvas {
+                width: Field::new(width.to_string()),
+                height: Field::new(height.to_string()),
+                active: 0,
+                anchor: Anchor::Center,
+            },
+            window,
+            cx,
+        );
+    }
+
     fn show_form(&mut self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open || self.form.is_some() {
             return;
@@ -442,6 +516,52 @@ impl Workspace {
                     cx,
                 );
             }
+            FormKind::Scale {
+                width,
+                height,
+                source,
+                layer,
+                lock,
+                active,
+                resample,
+            } => {
+                let entered = [width, height]
+                    .each_ref()
+                    .map(|field| field.text.parse::<u32>().unwrap_or(0));
+                let (mut width, mut height) = (entered[0], entered[1]);
+                if *lock {
+                    if *active == 0 {
+                        height = locked_edge(width, source.1, source.0);
+                    } else {
+                        width = locked_edge(height, source.0, source.1);
+                    }
+                }
+                if let Err(error) = Document::validate_size(width, height) {
+                    form.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
+                let (layer, resample) = (*layer, *resample);
+                self.dismiss_form(window, cx);
+                self.apply_scale(width, height, resample, layer, window, cx);
+            }
+            FormKind::Canvas {
+                width,
+                height,
+                anchor,
+                ..
+            } => {
+                let width = width.text.parse().unwrap_or(0);
+                let height = height.text.parse().unwrap_or(0);
+                if let Err(error) = Document::validate_size(width, height) {
+                    form.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
+                let anchor = *anchor;
+                self.dismiss_form(window, cx);
+                self.apply_canvas_size(width, height, anchor, window, cx);
+            }
             FormKind::LayerOpacity { id, percent } => {
                 let Some(percent) = percent
                     .text
@@ -497,6 +617,26 @@ impl Workspace {
                     }
                     FormKind::LayerOpacity { percent, .. } => {
                         percent.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
+                    FormKind::Scale {
+                        width,
+                        height,
+                        active,
+                        ..
+                    }
+                    | FormKind::Canvas {
+                        width,
+                        height,
+                        active,
+                        ..
+                    } => {
+                        if key == "tab" {
+                            *active = 1 - *active;
+                        } else if *active == 0 {
+                            width.handle_key(event, FieldMode::Digits { max: 5 }, cx);
+                        } else {
+                            height.handle_key(event, FieldMode::Digits { max: 5 }, cx);
+                        }
                     }
                     FormKind::Color { hex, hsv, .. } => {
                         let previous = hex.color();
@@ -792,6 +932,53 @@ impl Workspace {
                             .child(recent),
                     )
                 }
+                FormKind::Scale {
+                    width,
+                    height,
+                    layer,
+                    lock,
+                    active,
+                    resample,
+                    ..
+                } => (
+                    if *layer { "Scale Layer" } else { "Scale Image" },
+                    "Scale",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(size_fields(width, height, *active, cx))
+                        .child(
+                            form_button("Lock aspect ratio", *lock).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(Form {
+                                        kind: FormKind::Scale { lock, .. },
+                                        ..
+                                    }) = &mut this.form
+                                    {
+                                        *lock = !*lock;
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                        )
+                        .child(resample_choices(*resample, cx)),
+                ),
+                FormKind::Canvas {
+                    width,
+                    height,
+                    active,
+                    anchor,
+                } => (
+                    "Canvas Size",
+                    "Resize",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(size_fields(width, height, *active, cx))
+                        .child(anchor_choices(*anchor, cx)),
+                ),
             };
 
         Some(
@@ -867,4 +1054,124 @@ pub(super) fn form_button(label: &'static str, primary: bool) -> gpui::Stateful<
         .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
         .cursor_pointer()
         .child(label)
+}
+
+fn locked_edge(edited: u32, other: u32, source: u32) -> u32 {
+    if edited == 0 || source == 0 {
+        return 1;
+    }
+    ((u64::from(edited) * u64::from(other) + u64::from(source) / 2) / u64::from(source)).max(1)
+        as u32
+}
+
+fn size_fields(width: &Field, height: &Field, active: usize, cx: &Context<Workspace>) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .child(dimension_field("Width (px)", width, active == 0, 0, cx))
+        .child(dimension_field("Height (px)", height, active == 1, 1, cx))
+}
+
+fn dimension_field(
+    label: &'static str,
+    field: &Field,
+    selected: bool,
+    index: usize,
+    cx: &Context<Workspace>,
+) -> Div {
+    div()
+        .flex_1()
+        .child(label)
+        .child(field.view(selected).id(label).mt_1().on_click(cx.listener(
+            move |this, _, _, cx| {
+                let Some(form) = &mut this.form else {
+                    return;
+                };
+                let (active, width, height) = match &mut form.kind {
+                    FormKind::Scale {
+                        active,
+                        width,
+                        height,
+                        ..
+                    }
+                    | FormKind::Canvas {
+                        active,
+                        width,
+                        height,
+                        ..
+                    } => (active, width, height),
+                    _ => return,
+                };
+                *active = index;
+                if index == 0 {
+                    width.selected = true;
+                } else {
+                    height.selected = true;
+                }
+                cx.notify();
+            },
+        )))
+}
+
+fn resample_choices(current: Resample, cx: &Context<Workspace>) -> Div {
+    div().flex().gap_2().children(
+        [
+            (Resample::Nearest, "Nearest"),
+            (Resample::Bilinear, "Bilinear"),
+            (Resample::Bicubic, "Bicubic"),
+        ]
+        .map(|(value, label)| {
+            form_button(label, current == value).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(Form {
+                    kind: FormKind::Scale { resample, .. },
+                    ..
+                }) = &mut this.form
+                {
+                    *resample = value;
+                    cx.notify();
+                }
+            }))
+        }),
+    )
+}
+
+fn anchor_choices(current: Anchor, cx: &Context<Workspace>) -> Div {
+    let anchors = [
+        Anchor::NorthWest,
+        Anchor::North,
+        Anchor::NorthEast,
+        Anchor::West,
+        Anchor::Center,
+        Anchor::East,
+        Anchor::SouthWest,
+        Anchor::South,
+        Anchor::SouthEast,
+    ];
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_1()
+        .children(anchors.map(|anchor| {
+            let label = match anchor {
+                Anchor::NorthWest => "Top left",
+                Anchor::North => "Top",
+                Anchor::NorthEast => "Top right",
+                Anchor::West => "Left",
+                Anchor::Center => "Center",
+                Anchor::East => "Right",
+                Anchor::SouthWest => "Bottom left",
+                Anchor::South => "Bottom",
+                Anchor::SouthEast => "Bottom right",
+            };
+            form_button(label, current == anchor).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(Form {
+                    kind: FormKind::Canvas { anchor: chosen, .. },
+                    ..
+                }) = &mut this.form
+                {
+                    *chosen = anchor;
+                    cx.notify();
+                }
+            }))
+        }))
 }

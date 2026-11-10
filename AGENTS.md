@@ -16,7 +16,9 @@ sample or set swatches, and fill connected regions on the active layer. Rectangl
 selection limits fill and Clear to Transparency, and Crop to Selection uses its
 bounds. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
-does the same for the canvas. Copy and Cut use the active layer inside the
+does the same for the canvas. Image and Layer transforms rotate and flip,
+and the Image menu can scale the canvas, resize it from a nine-point anchor,
+or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. Each tab can undo and redo crops, fills, selections and
 layer changes. Selection changes preserve the saved revision, and undoing
@@ -47,17 +49,19 @@ document is a single plain layer.
   clears it on a click outside. Over the box the painted crosshair gives way
   to a hand or resize cursor. The outline is a dashed contour. Shift-add
   waits for the mask in P12.
+- `src/transform.rs` turns, mirrors, scales, and anchors layer pixels. Grayscale
+  keeps alpha and is stored in the version 3 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
   It handles crop, layer-local bucket fill, layer offsets, and content crops.
   `src/document/composite.rs` blends visible layers for display, sampling, and
   raster output.
-- `src/project.rs` reads and writes the version 2 project format and applies
+- `src/project.rs` reads and writes the version 3 project format and applies
  the same size limits in both directions. ImageEdit has not shipped, so older
  project versions are not supported. `fixtures/projects/` holds a golden
  project that the reader must keep opening. Regenerate it only when the
- format intentionally changes.
+ format intentionally changes. The current fixture is version 3.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it

@@ -493,7 +493,9 @@ impl Document {
 
     // Raster Save is allowed only while the format can hold everything the user edited.
     pub fn can_save_as_raster(&self) -> bool {
-        self.format != FileFormat::Project && self.content.is_plain_raster()
+        self.format != FileFormat::Project
+            && self.content.mode() == crate::transform::ColorMode::Rgb
+            && self.content.is_plain_raster()
     }
 
     pub fn from_pixels(name: String, pixels: RgbaImage) -> Self {
@@ -976,7 +978,7 @@ mod tests {
         let project = directory.path().join("layers.imageedit");
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/projects/v2-two-layers.imageedit"
+            "/fixtures/projects/v3-two-layers.imageedit"
         );
         std::fs::copy(fixture, &project).unwrap();
         let project_bytes = std::fs::read(&project).unwrap();
