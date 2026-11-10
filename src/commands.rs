@@ -8,6 +8,9 @@ actions!(
         SaveImage,
         SaveImageAs,
         SaveProjectAs,
+        ExportPng,
+        ExportJpeg,
+        ExportWebp,
         Undo,
         Redo,
         ForegroundColor,
@@ -190,8 +193,6 @@ pub enum Zoom {
     Percent(f32),
 }
 
-pub const EXPORT_PNG: &str = "Export as PNG…";
-pub const EXPORT_JPEG: &str = "Export as JPEG…";
 pub const ADD_LAYER: &str = "New Layer…";
 
 pub const OPEN_HINT: &str = if cfg!(target_os = "macos") {
@@ -214,6 +215,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new(&format!("{primary}-="), ZoomIn, None),
         KeyBinding::new(&format!("{primary}--"), ZoomOut, None),
         KeyBinding::new(&format!("{primary}-alt-s"), SaveProjectAs, None),
+        KeyBinding::new(&format!("{primary}-shift-e"), ExportPng, None),
         KeyBinding::new(&format!("{primary}-shift-j"), Zoom::Fit, None),
         KeyBinding::new("shift-=", ZoomIn, None),
         KeyBinding::new("+", ZoomIn, None),
@@ -283,8 +285,9 @@ pub fn register(cx: &mut App) {
                 MenuItem::action("Save As…", SaveImageAs),
                 MenuItem::action("Save Project As…", SaveProjectAs),
                 MenuItem::separator(),
-                planned(EXPORT_PNG),
-                planned(EXPORT_JPEG),
+                MenuItem::action("Export as PNG…", ExportPng),
+                MenuItem::action("Export as JPEG…", ExportJpeg),
+                MenuItem::action("Export as WebP…", ExportWebp),
             ],
         ),
         menu(

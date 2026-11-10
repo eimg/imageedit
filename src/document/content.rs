@@ -5,6 +5,8 @@ use image::{Rgba, RgbaImage, imageops};
 
 use super::composite;
 
+pub const IMPORTED_LAYER_NAME: &str = "Image";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u64);
 
@@ -111,6 +113,12 @@ impl DocumentContent {
             && layer.offset == (0, 0)
             && layer.pixels.dimensions() == (self.width, self.height))
             .then_some(layer)
+    }
+
+    // One full-canvas layer with default properties and its import name.
+    pub fn is_plain_raster(&self) -> bool {
+        self.full_canvas_layer()
+            .is_some_and(|layer| layer.name == IMPORTED_LAYER_NAME)
     }
 
     pub fn composite(&self) -> Arc<RgbaImage> {

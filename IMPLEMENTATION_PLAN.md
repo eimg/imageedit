@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P03
+## Latest handoff · P04
+
+P04 added raster export and Save routing on branch `p04-export`, which starts from P03's branch `p03-history`.
+
+- `src/document.rs` adds `export_image` with an explicit JPEG quality and `DEFAULT_JPEG_QUALITY` (92), used by raster Save. `save_image` and `export_image` share `write_atomically`, the existing same-directory temporary write and replacement. `Document::can_save_as_raster` requires a non-project format and `DocumentContent::is_plain_raster`: one visible Normal layer at `(0, 0)` with opacity 255, canvas-sized and named `IMPORTED_LAYER_NAME` ("Image").
+- `src/workspace/files.rs` routes Save through the pure `save_route`. Save overwrites a project-backed tab or an eligible raster tab. Otherwise it prompts for an `.imageedit` destination. Save As offers raster formats only to eligible raster tabs. Untitled documents are projects and use Export for raster copies. `prepare_destination` rejects a raster extension where a project is required before anything is written, so the source file, tab path and saved revision stay intact.
+- Export as PNG (`⌘⇧E`), JPEG and WebP are in the File menu. JPEG first shows a quality form (1–100), remembered for the session. `prepare_export` requires the extension of the chosen format (`.jpg` or `.jpeg` for JPEG). `write_file` handles Save and Export, rejects a destination owned by another tab or an in-flight write, and on export success leaves path, format, name and saved revision unchanged. The status bar shows "Exporting…" and then "Exported name" until the next edit or write. The macOS save panel asks before replacing an existing file.
+- Formatting, Clippy and locked tests passed before and after the change. P03 ended with 25 tests and P04 ends with 29. The new tests cover the routing table, destination and export extension checks (including a missing folder), export of the v2 fixture with transparent and translucent pixels in all three formats (PNG and WebP pixel-exact, JPEG opaque and within 6 levels of the composite over white at quality 100), an unchanged project file, a rejected project-format export, a failed write leaving no file or temporary file, and raster-Save eligibility after fill, crop, opacity and rename changes.
+- No native UI smoke test ran. Computer Use still lacked Accessibility and Screen Recording permission.
+- The P02 gap where Save As flattened a layered tab is fixed by routing. The hidden-active-layer gap remains for P05.
+- **Next is P05.** P06 can also start in an isolated worktree.
+
+## Previous handoff · P03
 
 P03 added per-tab undo/redo history and save identity on branch `p03-history`, which starts from P02's branch `p02-project-v2`.
 
@@ -12,9 +24,8 @@ P03 added per-tab undo/redo history and save identity on branch `p03-history`, w
 - `src/commands.rs` adds `Undo` and `Redo` in the Edit menu, bound to `⌘Z`/`⌘⇧Z` on macOS and `Ctrl+Z`/`Ctrl+Y` elsewhere. `src/workspace/view.rs` registers each handler only when no form or dialog is open, the tab is idle and a target exists, so the menu items disable themselves otherwise. Undo and Redo clear an in-progress crop rectangle. Menu labels do not name the step yet.
 - Formatting, Clippy and locked tests passed before and after the change. P02 ended with 18 tests and P03 ends with 25. The new tests cover undo and redo of a crop then a fill back to a clean saved revision, saving after undo and branching by editing, a no-op edit, the entry cap with saved identity kept after eviction, shared-buffer byte accounting with an over-budget entry, app-wide eviction across tabs, and generation change on undo. The workspace's generation comparison itself has no GPUI test harness.
 - The release bundle built and passed `codesign --verify --strict` and launched with the v2 fixture. Computer Use still lacked Accessibility and Screen Recording permission, so Undo/Redo through the menu and shortcuts, the disabled menu state, and the unsaved marker were not exercised in the native UI.
-- **Next is P04.** P06 can also start in an isolated worktree now that P03 is ready.
 
-## Previous handoff · P02
+## Earlier handoff · P02
 
 P02 replaced the project format with the v2 layer-stack format on branch `p02-project-v2`. ImageEdit has no released users, so v1 support was dropped by product decision: v1 files and any other version are rejected. No menu, shortcut or tab behavior changed.
 

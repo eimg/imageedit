@@ -19,10 +19,13 @@ use tempfile::NamedTempFile;
 
 use crate::project;
 
-pub use content::{BlendMode, CropRect, DocumentContent, LayerId, RasterLayer};
+pub use content::{
+    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerId, RasterLayer,
+};
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_NEW_EDGE: u32 = 16_384;
+pub const DEFAULT_JPEG_QUALITY: u8 = 92;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileFormat {
@@ -99,7 +102,8 @@ impl Document {
             let orientation = decoder.orientation().context("Invalid image metadata")?;
             let mut image = decode_image(decoder)?;
             image.apply_orientation(orientation);
-            let content = DocumentContent::single_layer("Image".to_owned(), image.into_rgba8());
+            let content =
+                DocumentContent::single_layer(IMPORTED_LAYER_NAME.to_owned(), image.into_rgba8());
             (format, content)
         };
         Ok(Self {
@@ -122,6 +126,11 @@ impl Document {
             MAX_IMAGE_BYTES / 4
         );
         Ok(())
+    }
+
+    // Raster Save is allowed only while the format can hold everything the user edited.
+    pub fn can_save_as_raster(&self) -> bool {
+        self.format != FileFormat::Project && self.content.is_plain_raster()
     }
 
     pub fn blank(name: String, width: u32, height: u32, background: Rgba<u8>) -> Self {
@@ -207,17 +216,38 @@ pub fn save_format(path: &Path) -> Result<FileFormat> {
 }
 
 pub fn save_image(content: &DocumentContent, path: &Path, format: FileFormat) -> Result<()> {
+    write_atomically(path, |writer| match format {
+        FileFormat::Project => project::write(writer, content),
+        _ => write_raster(writer, &content.composite(), format, DEFAULT_JPEG_QUALITY),
+    })
+}
+
+pub fn export_image(
+    content: &DocumentContent,
+    path: &Path,
+    format: FileFormat,
+    jpeg_quality: u8,
+) -> Result<()> {
+    ensure!(
+        format != FileFormat::Project,
+        "Export writes PNG, JPEG, or WebP images."
+    );
+    write_atomically(path, |writer| {
+        write_raster(writer, &content.composite(), format, jpeg_quality)
+    })
+}
+
+// Writes beside the destination and replaces it only after a complete, synced write.
+fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<&mut File>) -> Result<()>,
+) -> Result<()> {
     let parent = path.parent().context("Choose a destination folder")?;
     let mut temporary =
         NamedTempFile::new_in(parent).context("Could not create the output file")?;
     {
         let mut writer = BufWriter::new(temporary.as_file_mut());
-        if format == FileFormat::Project {
-            project::write(&mut writer, content)?;
-        } else {
-            let pixels = content.composite();
-            write_raster(&mut writer, &pixels, format)?;
-        }
+        write(&mut writer)?;
         writer.flush()?;
     }
     if let Ok(existing) = path.metadata() {
@@ -232,7 +262,12 @@ pub fn save_image(content: &DocumentContent, path: &Path, format: FileFormat) ->
     Ok(())
 }
 
-fn write_raster(writer: impl Write, pixels: &RgbaImage, format: FileFormat) -> Result<()> {
+fn write_raster(
+    writer: impl Write,
+    pixels: &RgbaImage,
+    format: FileFormat,
+    jpeg_quality: u8,
+) -> Result<()> {
     let (width, height) = pixels.dimensions();
     let rgba = ExtendedColorType::Rgba8;
     match format {
@@ -257,7 +292,7 @@ fn write_raster(writer: impl Write, pixels: &RgbaImage, format: FileFormat) -> R
                     ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
                 }))
             });
-            codecs::jpeg::JpegEncoder::new_with_quality(writer, 92).write_image(
+            codecs::jpeg::JpegEncoder::new_with_quality(writer, jpeg_quality).write_image(
                 rgb.as_raw(),
                 width,
                 height,
@@ -388,6 +423,83 @@ mod tests {
         assert_eq!(reopened.format, FileFormat::Project);
         assert_eq!(reopened.content.layers()[0].offset, (1, 0));
         assert_eq!(*reopened.canvas.pixels, *opened.canvas.pixels);
+    }
+
+    #[test]
+    fn export_flattens_a_layered_project_without_touching_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("layers.imageedit");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/projects/v2-two-layers.imageedit"
+        );
+        std::fs::copy(fixture, &project).unwrap();
+        let project_bytes = std::fs::read(&project).unwrap();
+        let mut document = Document::open(&project).unwrap();
+        document.content.layers[0].visible = false;
+        document.content.layers[1].visible = true;
+        let composite = document.content.composite();
+        assert!(composite.pixels().any(|pixel| pixel.0[3] == 0));
+        assert!(
+            composite
+                .pixels()
+                .any(|pixel| (1..255).contains(&pixel.0[3]))
+        );
+
+        for format in [FileFormat::Png, FileFormat::WebP, FileFormat::Jpeg] {
+            let path = directory
+                .path()
+                .join(format!("export.{}", format.extension()));
+            export_image(&document.content, &path, format, 100).unwrap();
+            let exported = Document::open(&path).unwrap();
+            assert_eq!(exported.format, format);
+            assert_eq!(exported.content.layers().len(), 1);
+            let pixels = exported.canvas.pixels;
+            if format == FileFormat::Jpeg {
+                for (actual, expected) in pixels.pixels().zip(composite.pixels()) {
+                    let [r, g, b, a] = expected.0.map(u16::from);
+                    let over_white = [r, g, b].map(|c| (c * a + 255 * (255 - a) + 127) / 255);
+                    assert_eq!(actual.0[3], 255);
+                    for (actual, expected) in actual.0.iter().zip(over_white) {
+                        assert!(u16::from(*actual).abs_diff(expected) <= 6);
+                    }
+                }
+            } else {
+                assert_eq!(*pixels, *composite);
+            }
+        }
+        assert_eq!(std::fs::read(&project).unwrap(), project_bytes);
+        assert!(export_image(&document.content, &project, FileFormat::Project, 92).is_err());
+        let missing = directory.path().join("missing/export.png");
+        assert!(export_image(&document.content, &missing, FileFormat::Png, 92).is_err());
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn only_plain_raster_documents_can_save_as_raster() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plain.png");
+        let content = DocumentContent::single_layer("Image".into(), RgbaImage::new(2, 2));
+        save_image(&content, &path, FileFormat::Png).unwrap();
+        let mut document = Document::open(&path).unwrap();
+        assert!(document.can_save_as_raster());
+        let layer = document.content.top_layer_id();
+        assert!(document.content.fill(layer, 0, 0, solid_color(0x123456)));
+        assert!(document.content.crop(CropRect::between((0, 0), (0, 1))));
+        assert!(document.can_save_as_raster());
+
+        document.content.layers[0].opacity = 254;
+        assert!(!document.can_save_as_raster());
+        document.content.layers[0].opacity = 255;
+        document.content.layers[0].name = "Renamed".into();
+        assert!(!document.can_save_as_raster());
+
+        let blank = Document::blank("Untitled".into(), 2, 2, Rgba([0; 4]));
+        assert!(!blank.can_save_as_raster());
+        let project = directory.path().join("plain.imageedit");
+        save_image(&content, &project, FileFormat::Project).unwrap();
+        assert!(!Document::open(&project).unwrap().can_save_as_raster());
     }
 
     #[test]

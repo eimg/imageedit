@@ -12,7 +12,9 @@ use futures::{StreamExt, channel::mpsc};
 use gpui::{Bounds, Context, FocusHandle, Pixels, Point, ScrollHandle, Window};
 
 use crate::commands::{Tool, Zoom};
-use crate::document::{CropRect, Document, DocumentContent, LayerId, RenderedCanvas, file_name};
+use crate::document::{
+    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, LayerId, RenderedCanvas, file_name,
+};
 
 use self::{
     cursor::CanvasCursor,
@@ -32,6 +34,8 @@ struct Tab {
     history: History,
     editing: bool,
     saving: Option<PathBuf>,
+    exporting: bool,
+    notice: Option<String>,
 }
 
 impl Tab {
@@ -88,6 +92,7 @@ pub struct Workspace {
     pending: usize,
     errors: Vec<String>,
     history_clock: u64,
+    jpeg_quality: u8,
 }
 
 impl Workspace {
@@ -156,6 +161,7 @@ impl Workspace {
             pending: 0,
             errors: Vec::new(),
             history_clock: 0,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
         }
     }
 
@@ -199,6 +205,8 @@ impl Workspace {
             history,
             editing: false,
             saving: None,
+            exporting: false,
+            notice: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -310,6 +318,7 @@ impl Workspace {
             return;
         };
         tab.editing = true;
+        tab.notice = None;
         let id = tab.id;
         let generation = tab.history.generation();
         let job = cx.background_executor().spawn(async move {

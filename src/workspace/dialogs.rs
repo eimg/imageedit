@@ -6,7 +6,7 @@ use gpui::{
 use super::Workspace;
 use super::color::{ColorControl, Hsv, control};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
-use crate::document::{Document, solid_color};
+use crate::document::{Document, FileFormat, solid_color};
 
 pub(super) struct Form {
     focus: FocusHandle,
@@ -25,6 +25,9 @@ enum FormKind {
         hex: Field,
         hsv: Hsv,
         drag: Option<ColorControl>,
+    },
+    JpegQuality {
+        quality: Field,
     },
 }
 
@@ -194,6 +197,13 @@ impl Workspace {
         );
     }
 
+    pub(super) fn jpeg_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_some_and(|tab| !tab.busy()) {
+            let quality = Field::new(self.jpeg_quality.to_string());
+            self.show_form(FormKind::JpegQuality { quality }, window, cx);
+        }
+    }
+
     fn show_form(&mut self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open || self.form.is_some() {
             return;
@@ -250,6 +260,17 @@ impl Workspace {
                 self.set_color(swatch, color);
                 self.dismiss_form(window, cx);
             }
+            FormKind::JpegQuality { quality } => {
+                let Some(quality) = quality.text.parse().ok().filter(|q| (1..=100).contains(q))
+                else {
+                    form.error = Some("Enter a quality from 1 to 100.".into());
+                    cx.notify();
+                    return;
+                };
+                self.jpeg_quality = quality;
+                self.dismiss_form(window, cx);
+                self.export(FileFormat::Jpeg, quality, window, cx);
+            }
         }
     }
 
@@ -271,6 +292,7 @@ impl Workspace {
                             fields[*active].handle_key(event, false, cx);
                         }
                     }
+                    FormKind::JpegQuality { quality } => quality.handle_key(event, false, cx),
                     FormKind::Color { hex, hsv, .. } => {
                         let previous = hex.color();
                         hex.handle_key(event, true, cx);
@@ -390,6 +412,22 @@ impl Workspace {
                             .child(div().child("Canvas background").child(background.mt_1())),
                     )
                 }
+                FormKind::JpegQuality { quality } => (
+                    "Export as JPEG",
+                    "Choose File…",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child("Quality (1–100)")
+                        .child(quality.view(true))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child("Higher values keep more detail and make larger files. Transparent areas become white."),
+                        ),
+                ),
                 FormKind::Color {
                     swatch, hex, hsv, ..
                 } => {

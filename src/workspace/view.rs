@@ -7,12 +7,12 @@ use gpui::{
 };
 
 use crate::commands::{
-    ADD_LAYER, ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ForegroundColor, MinimizeWindow,
-    NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage,
-    SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
-    Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    ADD_LAYER, ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ExportJpeg, ExportPng, ExportWebp,
+    ForegroundColor, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo,
+    ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS,
+    ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
-use crate::document::CropRect;
+use crate::document::{CropRect, FileFormat};
 
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
@@ -93,6 +93,15 @@ impl Render for Workspace {
                     }))
                     .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
                         this.save(SaveMode::ProjectAs, window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &ExportPng, window, cx| {
+                        this.export(FileFormat::Png, 0, window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &ExportJpeg, window, cx| this.jpeg_form(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &ExportWebp, window, cx| {
+                        this.export(FileFormat::WebP, 0, window, cx)
                     }))
                     .when(self.tool == Tool::Crop, |root| {
                         root.key_context("Crop")
@@ -753,11 +762,15 @@ impl Workspace {
                 |tab| {
                     let document = &tab.document;
                     let state = if tab.editing {
-                        "  ·  Editing…"
+                        "  ·  Editing…".to_owned()
+                    } else if tab.exporting {
+                        "  ·  Exporting…".to_owned()
                     } else if tab.saving.is_some() {
-                        "  ·  Saving…"
+                        "  ·  Saving…".to_owned()
+                    } else if let Some(notice) = &tab.notice {
+                        format!("  ·  {notice}")
                     } else {
-                        ""
+                        String::new()
                     };
                     format!(
                         "{}  ·  {} × {} px{state}",

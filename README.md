@@ -27,10 +27,16 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
   also drop files onto the canvas or use Finder’s **Open With** menu.
   Reopening the same file focuses its existing tab.
-- **Save** updates the current file. New canvases default to an
-  `.imageedit` project. **Save As** adopts the new filename and uses
-  its extension to choose the format. **Save Project As** suggests
+- **Save** updates the current file. New canvases are saved as `.imageedit`
+  projects. An opened PNG, JPEG, or WebP keeps saving to its own format while
+  it is still a single plain layer. **Save As** adopts the new filename and
+  uses its extension to choose the format. Projects, new canvases, and layered
+  documents can only be saved as `.imageedit`. **Save Project As** suggests
   `.imageedit` when converting an opened image to a project.
+- **File → Export as PNG, JPEG, or WebP** writes a flattened copy of the
+  visible image. Exporting does not change the tab's file or its unsaved
+  marker. PNG and WebP keep transparency. JPEG asks for a quality from 1 to
+  100 (default 92) and places transparent areas on white.
 - Projects preserve the canvas dimensions and the layer stack: each layer's
   order, name, position, visibility, opacity, and lossless pixels with
   transparency. PNG and lossless WebP preserve transparency. JPEG saves
@@ -56,6 +62,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | --- | --- |
 | New / Open | ⌘N / ⌘O |
 | Save / Save As / Save Project As | ⌘S / ⌘⇧S / ⌘⌥S |
+| Export as PNG | ⌘⇧E |
 | Undo / Redo | ⌘Z / ⌘⇧Z |
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |

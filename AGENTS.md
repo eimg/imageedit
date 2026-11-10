@@ -17,8 +17,10 @@ and redo crops and fills, and undoing back to the saved state clears the
 unsaved marker. Tabs retain zoom
 and pan. The canvas supports a grid and center guides. Save and Save As handle
 ImageEdit projects, PNG, JPEG, and WebP. A project stores the layer stack with
-lossless pixels. The UI does not create layers yet. Layer management, clipboard
-workflows, and separate export commands are placeholders.
+lossless pixels. Export writes flattened PNG, JPEG, or WebP copies without
+changing the tab's file. Raster Save is offered only while a document is a
+single plain layer. The UI does not create layers yet. Layer management and
+clipboard workflows are placeholders.
 
 ## Code map
 
@@ -43,8 +45,8 @@ workflows, and separate export commands are placeholders.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.
-- `src/workspace/files.rs` handles native file dialogs, background saving,
-  and unsaved-change confirmation.
+- `src/workspace/files.rs` handles native file dialogs, Save routing,
+  background saving and export, and unsaved-change confirmation.
 - `src/workspace/dialogs.rs` renders the canvas dimensions and color dialogs.
   `src/workspace/color.rs` handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
