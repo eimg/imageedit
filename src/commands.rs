@@ -13,6 +13,15 @@ actions!(
         ExportWebp,
         Undo,
         Redo,
+        NewLayer,
+        DuplicateLayer,
+        RenameLayer,
+        MergeDown,
+        DeleteLayer,
+        ToggleLayerVisibility,
+        LayerOpacity,
+        RaiseLayer,
+        LowerLayer,
         ForegroundColor,
         BackgroundColor,
         SwapColors,
@@ -193,8 +202,6 @@ pub enum Zoom {
     Percent(f32),
 }
 
-pub const ADD_LAYER: &str = "New Layer…";
-
 pub const OPEN_HINT: &str = if cfg!(target_os = "macos") {
     "⌘O"
 } else {
@@ -216,6 +223,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new(&format!("{primary}--"), ZoomOut, None),
         KeyBinding::new(&format!("{primary}-alt-s"), SaveProjectAs, None),
         KeyBinding::new(&format!("{primary}-shift-e"), ExportPng, None),
+        KeyBinding::new(&format!("{primary}-shift-n"), NewLayer, None),
+        KeyBinding::new(&format!("{primary}-shift-d"), DuplicateLayer, None),
         KeyBinding::new(&format!("{primary}-shift-j"), Zoom::Fit, None),
         KeyBinding::new("shift-=", ZoomIn, None),
         KeyBinding::new("+", ZoomIn, None),
@@ -341,16 +350,16 @@ pub fn register(cx: &mut App) {
         menu(
             "Layer",
             vec![
-                planned(ADD_LAYER),
-                planned("Duplicate Layer"),
-                planned("Rename Layer…"),
-                planned("Merge Down"),
-                planned("Delete Layer"),
+                MenuItem::action("New Layer…", NewLayer),
+                MenuItem::action("Duplicate Layer", DuplicateLayer),
+                MenuItem::action("Rename Layer…", RenameLayer),
+                MenuItem::action("Merge Down", MergeDown),
+                MenuItem::action("Delete Layer", DeleteLayer),
                 MenuItem::separator(),
-                planned("Toggle Layer Visibility"),
-                planned("Layer Opacity…"),
-                planned("Raise Layer"),
-                planned("Lower Layer"),
+                MenuItem::action("Toggle Layer Visibility", ToggleLayerVisibility),
+                MenuItem::action("Layer Opacity…", LayerOpacity),
+                MenuItem::action("Raise Layer", RaiseLayer),
+                MenuItem::action("Lower Layer", LowerLayer),
                 MenuItem::separator(),
                 transform_menu(),
                 MenuItem::submenu(menu(

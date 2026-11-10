@@ -9,14 +9,13 @@ use image::{ExtendedColorType, ImageDecoder, ImageEncoder, codecs::png};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    BlendMode, DocumentContent, LayerId, MAX_IMAGE_BYTES, RasterLayer, decode_image,
+    BlendMode, DocumentContent, LayerId, MAX_IMAGE_BYTES, MAX_LAYERS, RasterLayer, decode_image,
 };
 
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
 const VERSION: u32 = 2;
 const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
-const MAX_LAYERS: usize = 128;
 const MAX_LAYER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 

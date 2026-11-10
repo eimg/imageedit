@@ -2,12 +2,12 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, Corners, CursorStyle, Div, ExternalPaths,
-    MouseButton, ObjectFit, Pixels, Point, Transformation, TransformationMatrix, Window, canvas,
-    div, fill, img, percentage, point, prelude::*, px, rgb, rgba, size, svg,
+    MouseButton, Pixels, Point, Transformation, TransformationMatrix, Window, canvas, div, fill,
+    percentage, point, prelude::*, px, rgb, rgba, size, svg,
 };
 
 use crate::commands::{
-    ADD_LAYER, ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ExportJpeg, ExportPng, ExportWebp,
+    ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ExportJpeg, ExportPng, ExportWebp,
     ForegroundColor, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo,
     ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS,
     ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
@@ -26,7 +26,7 @@ pub(super) const CANVAS: u32 = 0x11141a;
 pub(super) const BORDER: u32 = 0x303640;
 pub(super) const TEXT: u32 = 0xe9edf4;
 pub(super) const MUTED: u32 = 0xa3adbd;
-const DISABLED: u32 = 0x767f8d;
+pub(super) const DISABLED: u32 = 0x767f8d;
 pub(super) const HOVER: u32 = 0x2b323d;
 pub(super) const ACCENT: u32 = 0xacc6ff;
 pub(super) const SELECTED: u32 = 0x2c3a54;
@@ -49,6 +49,7 @@ impl Render for Workspace {
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
+                let root = self.bind_layer_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, _, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;
@@ -179,7 +180,7 @@ impl Render for Workspace {
                             })
                             .child(self.canvas(interactive && window.is_window_hovered(), cx)),
                     )
-                    .child(self.inspector()),
+                    .child(self.inspector(cx)),
             )
             .child(self.status_bar())
             .children(self.form_overlay(cx))
@@ -572,7 +573,7 @@ impl Workspace {
             })
     }
 
-    fn inspector(&self) -> Div {
+    fn inspector(&self, cx: &Context<Self>) -> Div {
         let tool = self.tool.info();
         div()
             .w(px(232.))
@@ -655,101 +656,7 @@ impl Workspace {
                                 },
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .p_4()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(section_label("LAYERS"))
-                                    .child(icon_button("layers")),
-                            )
-                            .when_else(
-                                self.active_tab().is_some(),
-                                |panel| {
-                                    let tab = self.active_tab().unwrap();
-                                    let document = &tab.document;
-                                    let layer = document
-                                        .content
-                                        .layer(tab.active_layer)
-                                        .expect("the active layer belongs to the document");
-                                    panel
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .rounded_md()
-                                                .p_2()
-                                                .border_1()
-                                                .border_color(rgb(BORDER))
-                                                .bg(rgb(CHROME))
-                                                .child(
-                                                    img(document.canvas.preview.image.clone())
-                                                        .size(px(34.))
-                                                        .flex_shrink_0()
-                                                        .rounded_sm()
-                                                        .bg(rgb(CANVAS))
-                                                        .object_fit(ObjectFit::Contain),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .text_ellipsis()
-                                                        .child(layer.name.clone()),
-                                                )
-                                                .child(
-                                                    icon_button("eye").text_color(rgb(DISABLED)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .justify_between()
-                                                .text_color(rgb(DISABLED))
-                                                .child("Opacity")
-                                                .child("100%"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap_1()
-                                                .text_xs()
-                                                .text_color(rgb(DISABLED))
-                                                .children(["Rename…", "Raise", "Lower"].map(
-                                                    |label| {
-                                                        div()
-                                                            .flex()
-                                                            .flex_1()
-                                                            .justify_center()
-                                                            .py_1()
-                                                            .rounded_sm()
-                                                            .bg(rgb(CHROME))
-                                                            .child(label)
-                                                    },
-                                                )),
-                                        )
-                                },
-                                |panel| {
-                                    panel.child(
-                                        div()
-                                            .rounded_md()
-                                            .p_3()
-                                            .border_1()
-                                            .border_color(rgb(BORDER))
-                                            .text_color(rgb(MUTED))
-                                            .child("Open or create an image to see its layer."),
-                                    )
-                                },
-                            )
-                            .child(button("plus", ADD_LAYER).text_color(rgb(DISABLED))),
-                    ),
+                    .child(self.layers_panel(cx)),
             )
     }
 
@@ -979,7 +886,7 @@ fn icon_button(symbol: &'static str) -> Div {
         .child(icon(symbol, 14.))
 }
 
-fn section_label(text: &'static str) -> Div {
+pub(super) fn section_label(text: &'static str) -> Div {
     div()
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -988,7 +895,7 @@ fn section_label(text: &'static str) -> Div {
 }
 
 #[derive(IntoElement)]
-struct Icon {
+pub(super) struct Icon {
     path: &'static str,
     edge: f32,
 }
@@ -1003,7 +910,7 @@ impl RenderOnce for Icon {
     }
 }
 
-fn icon(path: &'static str, edge: f32) -> Icon {
+pub(super) fn icon(path: &'static str, edge: f32) -> Icon {
     Icon { path, edge }
 }
 

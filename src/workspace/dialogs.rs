@@ -5,8 +5,9 @@ use gpui::{
 
 use super::Workspace;
 use super::color::{ColorControl, Hsv, control};
+use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
-use crate::document::{Document, FileFormat, solid_color};
+use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
 
 pub(super) struct Form {
     focus: FocusHandle,
@@ -29,6 +30,32 @@ enum FormKind {
     JpegQuality {
         quality: Field,
     },
+    NewLayer {
+        name: Field,
+        fill: LayerFill,
+    },
+    RenameLayer {
+        id: LayerId,
+        name: Field,
+    },
+    LayerOpacity {
+        id: LayerId,
+        percent: Field,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayerFill {
+    Transparent,
+    Foreground,
+    Background,
+}
+
+#[derive(Clone, Copy)]
+enum FieldMode {
+    Digits { max: usize },
+    Hex,
+    Name,
 }
 
 struct Field {
@@ -46,17 +73,30 @@ impl Field {
         }
     }
 
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn byte_at(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len())
+    }
+
     fn replace(&mut self, text: &str) {
         if self.selected {
             self.text.clear();
             self.cursor = 0;
             self.selected = false;
         }
-        self.text.insert_str(self.cursor, text);
-        self.cursor += text.len();
+        let at = self.byte_at(self.cursor);
+        self.text.insert_str(at, text);
+        self.cursor += text.chars().count();
     }
 
-    fn handle_key(&mut self, event: &KeyDownEvent, hex: bool, cx: &mut Context<Workspace>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, mode: FieldMode, cx: &mut Context<Workspace>) {
         let key = &event.keystroke;
         if key.modifiers.secondary() {
             match key.key.as_str() {
@@ -69,7 +109,7 @@ impl Field {
                 }
                 "v" => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.insert(text.trim(), hex);
+                        self.insert(text.trim(), mode);
                     }
                 }
                 _ => {}
@@ -79,10 +119,14 @@ impl Field {
                 "backspace" | "delete" if self.selected => self.replace(""),
                 "backspace" if self.cursor > 0 => {
                     self.cursor -= 1;
-                    self.text.remove(self.cursor);
+                    let start = self.byte_at(self.cursor);
+                    let end = self.byte_at(self.cursor + 1);
+                    self.text.replace_range(start..end, "");
                 }
-                "delete" if self.cursor < self.text.len() => {
-                    self.text.remove(self.cursor);
+                "delete" if self.cursor < self.len() => {
+                    let start = self.byte_at(self.cursor);
+                    let end = self.byte_at(self.cursor + 1);
+                    self.text.replace_range(start..end, "");
                 }
                 "left" | "home" => {
                     self.cursor = if self.selected || key.key == "home" {
@@ -94,35 +138,34 @@ impl Field {
                 }
                 "right" | "end" => {
                     self.cursor = if self.selected || key.key == "end" {
-                        self.text.len()
+                        self.len()
                     } else {
-                        (self.cursor + 1).min(self.text.len())
+                        (self.cursor + 1).min(self.len())
                     };
                     self.selected = false;
                 }
-                _ => self.insert(key.key_char.as_deref().unwrap_or(&key.key), hex),
+                _ => self.insert(key.key_char.as_deref().unwrap_or(&key.key), mode),
             }
         }
     }
 
-    fn insert(&mut self, text: &str, hex: bool) {
-        let text = if hex {
-            text.trim_start_matches('#')
-        } else {
-            text
+    fn insert(&mut self, text: &str, mode: FieldMode) {
+        let text = match mode {
+            FieldMode::Hex => text.trim_start_matches('#'),
+            _ => text,
         };
-        let existing = if self.selected { 0 } else { self.text.len() };
-        let allowed = if hex { 6 } else { 5 };
-        if !text.is_empty()
-            && existing + text.len() <= allowed
-            && text.bytes().all(|byte| {
-                if hex {
-                    byte.is_ascii_hexdigit()
-                } else {
-                    byte.is_ascii_digit()
-                }
-            })
-        {
+        let existing = if self.selected { 0 } else { self.len() };
+        let allowed = match mode {
+            FieldMode::Digits { max } => max,
+            FieldMode::Hex => 6,
+            FieldMode::Name => MAX_LAYER_NAME_CHARS,
+        };
+        let ok = match mode {
+            FieldMode::Digits { .. } => text.bytes().all(|byte| byte.is_ascii_digit()),
+            FieldMode::Hex => text.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            FieldMode::Name => text.chars().all(|ch| !ch.is_control()),
+        };
+        if !text.is_empty() && existing + text.chars().count() <= allowed && ok {
             self.replace(text);
         }
     }
@@ -154,10 +197,11 @@ impl Field {
                     .child(self.text.clone()),
             )
         } else {
+            let at = self.byte_at(self.cursor);
             field = field
-                .child(self.text[..self.cursor].to_owned())
+                .child(self.text[..at].to_owned())
                 .child(div().w(px(1.)).h(px(16.)).bg(rgb(ACCENT)))
-                .child(self.text[self.cursor..].to_owned());
+                .child(self.text[at..].to_owned());
             field
         }
     }
@@ -202,6 +246,69 @@ impl Workspace {
             let quality = Field::new(self.jpeg_quality.to_string());
             self.show_form(FormKind::JpegQuality { quality }, window, cx);
         }
+    }
+
+    pub(super) fn new_layer_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            return;
+        };
+        let next = tab.document.content.layers().len() + 1;
+        self.show_form(
+            FormKind::NewLayer {
+                name: Field::new(format!("Layer {next}")),
+                fill: LayerFill::Transparent,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn rename_layer_form(
+        &mut self,
+        id: LayerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .active_tab()
+            .filter(|tab| !tab.busy())
+            .and_then(|tab| tab.document.content.layer(id))
+            .map(|layer| layer.name.clone())
+        else {
+            return;
+        };
+        self.show_form(
+            FormKind::RenameLayer {
+                id,
+                name: Field::new(name),
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn layer_opacity_form(
+        &mut self,
+        id: LayerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(opacity) = self
+            .active_tab()
+            .filter(|tab| !tab.busy())
+            .and_then(|tab| tab.document.content.layer(id))
+            .map(|layer| layer.opacity)
+        else {
+            return;
+        };
+        self.show_form(
+            FormKind::LayerOpacity {
+                id,
+                percent: Field::new(opacity_percent(opacity).to_string()),
+            },
+            window,
+            cx,
+        );
     }
 
     fn show_form(&mut self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -271,6 +378,77 @@ impl Workspace {
                 self.dismiss_form(window, cx);
                 self.export(FileFormat::Jpeg, quality, window, cx);
             }
+            FormKind::NewLayer { name, fill } => {
+                let name = name.text.trim();
+                if name.is_empty() {
+                    form.error = Some("Enter a layer name.".into());
+                    cx.notify();
+                    return;
+                }
+                if name.chars().count() > MAX_LAYER_NAME_CHARS {
+                    form.error = Some(format!("Use at most {MAX_LAYER_NAME_CHARS} characters."));
+                    cx.notify();
+                    return;
+                }
+                let name = name.to_owned();
+                let fill = match *fill {
+                    LayerFill::Transparent => image::Rgba([0; 4]),
+                    LayerFill::Foreground => solid_color(self.colors[0]),
+                    LayerFill::Background => solid_color(self.colors[1]),
+                };
+                let above = self.active_tab().map(|tab| tab.active_layer);
+                self.dismiss_form(window, cx);
+                let Some(above) = above else {
+                    return;
+                };
+                self.edit_content(
+                    move |content, active| {
+                        content
+                            .add_layer(above, name, fill)
+                            .map(|id| *active = id)
+                            .is_some()
+                    },
+                    window,
+                    cx,
+                );
+            }
+            FormKind::RenameLayer { id, name } => {
+                let name = name.text.trim();
+                if name.is_empty() {
+                    form.error = Some("Enter a layer name.".into());
+                    cx.notify();
+                    return;
+                }
+                if name.chars().count() > MAX_LAYER_NAME_CHARS {
+                    form.error = Some(format!("Use at most {MAX_LAYER_NAME_CHARS} characters."));
+                    cx.notify();
+                    return;
+                }
+                let id = *id;
+                let name = name.to_owned();
+                self.dismiss_form(window, cx);
+                self.edit_content(move |content, _| content.rename_layer(id, name), window, cx);
+            }
+            FormKind::LayerOpacity { id, percent } => {
+                let Some(percent) = percent
+                    .text
+                    .parse()
+                    .ok()
+                    .filter(|percent: &u32| *percent <= 100)
+                else {
+                    form.error = Some("Enter an opacity from 0 to 100.".into());
+                    cx.notify();
+                    return;
+                };
+                let id = *id;
+                let opacity = opacity_from_percent(percent);
+                self.dismiss_form(window, cx);
+                self.edit_content(
+                    move |content, _| content.set_opacity(id, opacity),
+                    window,
+                    cx,
+                );
+            }
         }
     }
 
@@ -289,13 +467,21 @@ impl Workspace {
                             *active = 1 - *active;
                             fields[*active].selected = true;
                         } else {
-                            fields[*active].handle_key(event, false, cx);
+                            fields[*active].handle_key(event, FieldMode::Digits { max: 5 }, cx);
                         }
                     }
-                    FormKind::JpegQuality { quality } => quality.handle_key(event, false, cx),
+                    FormKind::JpegQuality { quality } => {
+                        quality.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
+                    FormKind::NewLayer { name, .. } | FormKind::RenameLayer { name, .. } => {
+                        name.handle_key(event, FieldMode::Name, cx)
+                    }
+                    FormKind::LayerOpacity { percent, .. } => {
+                        percent.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
                     FormKind::Color { hex, hsv, .. } => {
                         let previous = hex.color();
-                        hex.handle_key(event, true, cx);
+                        hex.handle_key(event, FieldMode::Hex, cx);
                         if let Some(color) = hex.color().filter(|color| Some(*color) != previous) {
                             *hsv = Hsv::from_rgb(color);
                         }
@@ -427,6 +613,60 @@ impl Workspace {
                                 .text_color(rgb(MUTED))
                                 .child("Higher values keep more detail and make larger files. Transparent areas become white."),
                         ),
+                ),
+                FormKind::NewLayer { name, fill } => {
+                    let fills = div().flex().gap_2().children(
+                        [
+                            ("Transparent", LayerFill::Transparent),
+                            ("Foreground", LayerFill::Foreground),
+                            ("Background", LayerFill::Background),
+                        ]
+                        .into_iter()
+                        .map(|(label, value)| {
+                            form_button(label, *fill == value).on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Some(Form {
+                                        kind: FormKind::NewLayer { fill, .. },
+                                        ..
+                                    }) = &mut this.form
+                                    {
+                                        *fill = value;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                        }),
+                    );
+                    (
+                        "New Layer",
+                        "Create",
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(div().child("Name").child(name.view(true).mt_1()))
+                            .child(div().child("Fill").child(fills.mt_1())),
+                    )
+                }
+                FormKind::RenameLayer { name, .. } => (
+                    "Rename Layer",
+                    "Rename",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child("Name")
+                        .child(name.view(true)),
+                ),
+                FormKind::LayerOpacity { percent, .. } => (
+                    "Layer Opacity",
+                    "Set Opacity",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child("Opacity (0–100%)")
+                        .child(percent.view(true)),
                 ),
                 FormKind::Color {
                     swatch, hex, hsv, ..

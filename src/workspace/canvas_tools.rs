@@ -151,7 +151,7 @@ impl Workspace {
             return;
         };
         self.crop_drag = None;
-        self.edit_content(move |content| content.crop(crop), window, cx);
+        self.edit_content(move |content, _| content.crop(crop), window, cx);
         cx.notify();
     }
 
@@ -164,11 +164,26 @@ impl Workspace {
         let Some((x, y)) = self.canvas_pixel(position, window.scale_factor(), false) else {
             return;
         };
-        let Some(layer) = self.active_tab().map(|tab| tab.active_layer) else {
+        let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
             return;
         };
+        let layer = tab.active_layer;
+        if tab
+            .document
+            .content
+            .layer(layer)
+            .is_some_and(|layer| !layer.visible)
+        {
+            tab.notice = Some("The active layer is hidden. Show it before filling.".into());
+            cx.notify();
+            return;
+        }
         let color = solid_color(self.colors[0]);
-        self.edit_content(move |content| content.fill(layer, x, y, color), window, cx);
+        self.edit_content(
+            move |content, _| content.fill(layer, x, y, color),
+            window,
+            cx,
+        );
     }
 
     pub(super) fn pick_color(

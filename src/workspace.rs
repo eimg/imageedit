@@ -4,6 +4,7 @@ mod cursor;
 mod dialogs;
 mod files;
 mod history;
+mod layers;
 mod view;
 
 use std::{cell::Cell, path::PathBuf, rc::Rc};
@@ -93,6 +94,7 @@ pub struct Workspace {
     errors: Vec<String>,
     history_clock: u64,
     jpeg_quality: u8,
+    opacity_drag: Option<(LayerId, u8)>,
 }
 
 impl Workspace {
@@ -162,6 +164,7 @@ impl Workspace {
             errors: Vec::new(),
             history_clock: 0,
             jpeg_quality: DEFAULT_JPEG_QUALITY,
+            opacity_drag: None,
         }
     }
 
@@ -190,7 +193,7 @@ impl Workspace {
             if let Some(index) = self.tabs.iter().position(|tab| {
                 tab.document.path.as_ref() == Some(path) || tab.saving.as_ref() == Some(path)
             }) {
-                cx.drop_image(document.canvas.preview.image, Some(window));
+                drop_canvas(document.canvas, window, cx);
                 self.select_tab(index, window, cx);
                 return;
             }
@@ -198,7 +201,7 @@ impl Workspace {
         }
         self.tabs.push(Tab {
             id: self.next_id,
-            active_layer: document.content.top_layer_id(),
+            active_layer: document.content.preferred_active_layer(),
             document,
             zoom: Zoom::default(),
             pan: Point::default(),
@@ -227,6 +230,7 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.active != Some(index) {
             self.clear_crop();
+            self.opacity_drag = None;
         }
         self.active = Some(index);
         self.pan_drag = None;
@@ -249,7 +253,7 @@ impl Workspace {
             self.clear_crop();
         }
         let removed = self.tabs.remove(index);
-        cx.drop_image(removed.document.canvas.preview.image, Some(window));
+        drop_canvas(removed.document.canvas, window, cx);
 
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
@@ -269,9 +273,10 @@ impl Workspace {
         self.crop_drag = None;
     }
 
+    // The edit may also choose a new active layer.
     fn edit_content(
         &mut self,
-        edit: impl FnOnce(&mut DocumentContent) -> bool + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> bool + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -292,14 +297,14 @@ impl Workspace {
     fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_step_history(change) {
             self.clear_crop();
-            self.start_change(change, |_| true, window, cx);
+            self.start_change(change, |_, _| true, window, cx);
         }
     }
 
     fn start_change(
         &mut self,
         change: Change,
-        edit: impl FnOnce(&mut DocumentContent) -> bool + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> bool + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -321,10 +326,11 @@ impl Workspace {
         tab.notice = None;
         let id = tab.id;
         let generation = tab.history.generation();
+        let mut active_layer = tab.active_layer;
         let job = cx.background_executor().spawn(async move {
-            edit(&mut content).then(|| {
+            edit(&mut content, &mut active_layer).then(|| {
                 let canvas = RenderedCanvas::new(&content);
-                (content, canvas)
+                (content, active_layer, canvas)
             })
         });
         cx.spawn_in(window, async move |workspace, cx| {
@@ -344,7 +350,7 @@ impl Workspace {
         id: usize,
         generation: u64,
         change: Change,
-        result: Option<(DocumentContent, RenderedCanvas)>,
+        result: Option<(DocumentContent, LayerId, RenderedCanvas)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -355,18 +361,18 @@ impl Workspace {
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];
         tab.editing = false;
-        let Some((content, canvas)) = result else {
+        let Some((content, edited_layer, canvas)) = result else {
             return;
         };
         if tab.history.generation() != generation {
-            cx.drop_image(canvas.preview.image, Some(window));
+            drop_canvas(canvas, window, cx);
             return;
         }
         let current = tab.state();
         let (content, active_layer) = match change {
             Change::Edit => {
                 tab.history.commit(current, stamp);
-                (content, tab.active_layer)
+                (content, edited_layer)
             }
             Change::Undo | Change::Redo => {
                 let state = if matches!(change, Change::Undo) {
@@ -388,7 +394,7 @@ impl Workspace {
         }
         tab.document.content = content;
         let old = std::mem::replace(&mut tab.document.canvas, canvas);
-        cx.drop_image(old.preview.image, Some(window));
+        drop_canvas(old, window, cx);
         tab.history
             .enforce_tab_limits(&tab.document.content, &LIMITS);
         history::enforce_app_budget(
@@ -410,5 +416,11 @@ impl Workspace {
         );
         window.set_window_title(&title);
         window.set_window_edited(self.active_tab().is_some_and(|tab| tab.dirty()));
+    }
+}
+
+fn drop_canvas(canvas: RenderedCanvas, window: &mut Window, cx: &mut Context<Workspace>) {
+    for image in canvas.into_images() {
+        cx.drop_image(image, Some(window));
     }
 }

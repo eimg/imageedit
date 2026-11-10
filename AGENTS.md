@@ -11,16 +11,15 @@ and the latest pass handoff.
 
 ## Current product scope
 
-ImageEdit supports single-layer raster editing. Open or create an image,
-crop it, sample or set swatches, and fill connected regions. Each tab can undo
-and redo crops and fills, and undoing back to the saved state clears the
-unsaved marker. Tabs retain zoom
-and pan. The canvas supports a grid and center guides. Save and Save As handle
-ImageEdit projects, PNG, JPEG, and WebP. A project stores the layer stack with
-lossless pixels. Export writes flattened PNG, JPEG, or WebP copies without
-changing the tab's file. Raster Save is offered only while a document is a
-single plain layer. The UI does not create layers yet. Layer management and
-clipboard workflows are placeholders.
+ImageEdit supports layered raster editing. Open or create an image, crop it,
+sample or set swatches, and fill connected regions on the active layer. Each
+tab can undo and redo crops, fills and layer changes, and undoing back to the
+saved state clears the unsaved marker. Tabs retain zoom and pan. The canvas
+supports a grid and center guides. Save and Save As handle ImageEdit projects,
+PNG, JPEG, and WebP. A project stores the layer stack with lossless pixels.
+Export writes flattened PNG, JPEG, or WebP copies without changing the tab's
+file. Raster Save is offered only while a document is a single plain layer.
+Clipboard workflows are placeholders.
 
 ## Code map
 
@@ -47,8 +46,10 @@ clipboard workflows are placeholders.
   share layer pixels, and each shared buffer counts once toward the limits.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation.
-- `src/workspace/dialogs.rs` renders the canvas dimensions and color dialogs.
-  `src/workspace/color.rs` handles the HSV wheel and brightness slider.
+- `src/workspace/layers.rs` owns the Layers panel, layer commands and opacity
+  drag coalescing. `src/workspace/dialogs.rs` renders the canvas dimensions,
+  color, JPEG quality and layer dialogs. `src/workspace/color.rs` handles the
+  HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels. `src/workspace/view.rs` lays out the shell and paints the canvas
   using the same geometry.

@@ -3,9 +3,12 @@ use std::{collections::HashSet, sync::Arc};
 use anyhow::{Result, ensure};
 use image::{Rgba, RgbaImage, imageops};
 
-use super::composite;
+use super::{MAX_IMAGE_BYTES, composite};
 
 pub const IMPORTED_LAYER_NAME: &str = "Image";
+pub const MAX_LAYERS: usize = 128;
+// Keeps a full stack's names within the project manifest limit.
+pub const MAX_LAYER_NAME_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u64);
@@ -103,6 +106,16 @@ impl DocumentContent {
             .id
     }
 
+    // Prefer the top visible layer so tools edit something the user can see.
+    pub fn preferred_active_layer(&self) -> LayerId {
+        self.layers
+            .iter()
+            .rev()
+            .find(|layer| layer.visible)
+            .map(|layer| layer.id)
+            .unwrap_or_else(|| self.top_layer_id())
+    }
+
     pub(super) fn full_canvas_layer(&self) -> Option<&RasterLayer> {
         let [layer] = self.layers.as_slice() else {
             return None;
@@ -167,6 +180,142 @@ impl DocumentContent {
         true
     }
 
+    pub fn layer_index(&self, id: LayerId) -> Option<usize> {
+        self.layers.iter().position(|layer| layer.id == id)
+    }
+
+    fn next_layer_id(&self) -> Option<LayerId> {
+        let max = self.layers.iter().map(|layer| layer.id.0).max()?;
+        max.checked_add(1).map(LayerId)
+    }
+
+    pub fn can_add_layer(&self) -> bool {
+        self.layers.len() < MAX_LAYERS
+    }
+
+    // Inserts a canvas-sized layer above `above`, or at the top if it is missing.
+    pub fn add_layer(&mut self, above: LayerId, name: String, fill: Rgba<u8>) -> Option<LayerId> {
+        if !self.can_add_layer() {
+            return None;
+        }
+        let id = self.next_layer_id()?;
+        let index = self
+            .layer_index(above)
+            .map_or(self.layers.len(), |index| index + 1);
+        self.layers.insert(
+            index,
+            RasterLayer {
+                id,
+                name,
+                pixels: Arc::new(RgbaImage::from_pixel(self.width, self.height, fill)),
+                offset: (0, 0),
+                visible: true,
+                opacity: 255,
+                blend_mode: BlendMode::Normal,
+            },
+        );
+        Some(id)
+    }
+
+    pub fn duplicate_layer(&mut self, id: LayerId) -> Option<LayerId> {
+        if !self.can_add_layer() {
+            return None;
+        }
+        let index = self.layer_index(id)?;
+        let mut copy = self.layers[index].clone();
+        copy.id = self.next_layer_id()?;
+        copy.name = copy_name(&copy.name);
+        let copy_id = copy.id;
+        self.layers.insert(index + 1, copy);
+        Some(copy_id)
+    }
+
+    pub fn rename_layer(&mut self, id: LayerId, name: String) -> bool {
+        match self.layers.iter_mut().find(|layer| layer.id == id) {
+            Some(layer) if layer.name != name => {
+                layer.name = name;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // Returns the layer that takes over: the one below, or else the one above.
+    pub fn delete_layer(&mut self, id: LayerId) -> Option<LayerId> {
+        if self.layers.len() < 2 {
+            return None;
+        }
+        let index = self.layer_index(id)?;
+        self.layers.remove(index);
+        Some(self.layers[index.saturating_sub(1)].id)
+    }
+
+    pub fn set_visible(&mut self, id: LayerId, visible: bool) -> bool {
+        match self.layers.iter_mut().find(|layer| layer.id == id) {
+            Some(layer) if layer.visible != visible => {
+                layer.visible = visible;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn set_opacity(&mut self, id: LayerId, opacity: u8) -> bool {
+        match self.layers.iter_mut().find(|layer| layer.id == id) {
+            Some(layer) if layer.opacity != opacity => {
+                layer.opacity = opacity;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // Moves a layer to `index` in the bottom-to-top stack.
+    pub fn move_layer(&mut self, id: LayerId, index: usize) -> bool {
+        let Some(from) = self.layer_index(id) else {
+            return false;
+        };
+        if from == index || index >= self.layers.len() {
+            return false;
+        }
+        let layer = self.layers.remove(from);
+        self.layers.insert(index, layer);
+        true
+    }
+
+    pub fn can_merge_down(&self, id: LayerId) -> bool {
+        self.merge_bounds(id).is_some()
+    }
+
+    fn merge_bounds(&self, id: LayerId) -> Option<(usize, PixelBounds)> {
+        let index = self.layer_index(id)?.checked_sub(1)?;
+        let [lower, upper] = [&self.layers[index], &self.layers[index + 1]];
+        if !lower.visible || !upper.visible {
+            return None;
+        }
+        let union = lower.bounds().union(upper.bounds());
+        let (width, height) = (union.right - union.left, union.bottom - union.top);
+        let bytes = u64::try_from(width)
+            .ok()?
+            .checked_mul(u64::try_from(height).ok()?)?;
+        (bytes.checked_mul(4)? <= MAX_IMAGE_BYTES).then_some((index, union))
+    }
+
+    // Replaces a layer and the one below it with their composite, keeping the lower ID and name.
+    pub fn merge_down(&mut self, id: LayerId) -> Option<LayerId> {
+        let (index, union) = self.merge_bounds(id)?;
+        let pixels = composite::flatten_region(&self.layers[index..=index + 1], union);
+        self.layers.remove(index + 1);
+        let merged = &mut self.layers[index];
+        merged.pixels = Arc::new(pixels);
+        // Both bounds start at i32 offsets, so their minimum does too.
+        merged.offset = (union.left as i32, union.top as i32);
+        merged.visible = true;
+        merged.opacity = 255;
+        merged.blend_mode = BlendMode::Normal;
+        Some(merged.id)
+    }
+
     pub fn fill(&mut self, id: LayerId, x: u32, y: u32, color: Rgba<u8>) -> bool {
         if x >= self.width || y >= self.height {
             return false;
@@ -198,6 +347,15 @@ pub(super) struct PixelBounds {
 }
 
 impl PixelBounds {
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            left: self.left.min(other.left),
+            top: self.top.min(other.top),
+            right: self.right.max(other.right),
+            bottom: self.bottom.max(other.bottom),
+        }
+    }
+
     pub fn intersect(self, other: Self) -> Option<Self> {
         let overlap = Self {
             left: self.left.max(other.left),
@@ -249,6 +407,14 @@ impl CropRect {
             bottom: i64::from(self.y.checked_add(self.height)?),
         })
     }
+}
+
+fn copy_name(name: &str) -> String {
+    const SUFFIX: &str = " copy";
+    let keep = MAX_LAYER_NAME_CHARS - SUFFIX.chars().count();
+    let mut copy: String = name.chars().take(keep).collect();
+    copy.push_str(SUFFIX);
+    copy
 }
 
 fn bucket_fill(source: &RgbaImage, x: u32, y: u32, color: Rgba<u8>) -> Option<RgbaImage> {
@@ -358,6 +524,104 @@ mod tests {
         assert!(DocumentContent::from_layers(2, 2, vec![layer.clone(), layer.clone()]).is_err());
         other.pixels = Arc::new(RgbaImage::new(0, 3));
         assert!(DocumentContent::from_layers(2, 2, vec![layer, other]).is_err());
+    }
+
+    fn ids(content: &DocumentContent) -> Vec<u64> {
+        content.layers.iter().map(|layer| layer.id.0).collect()
+    }
+
+    #[test]
+    fn layer_commands_keep_ids_order_and_a_remaining_layer() {
+        let mut content = DocumentContent::single_layer("Image".into(), RgbaImage::new(3, 2));
+        let red = Rgba([255, 0, 0, 255]);
+        let added = content.add_layer(LayerId(0), "Layer".into(), red).unwrap();
+        assert_eq!(added, LayerId(1));
+        assert_eq!(content.layers[1].pixels.dimensions(), (3, 2));
+        assert_eq!(*content.layers[1].pixels.get_pixel(2, 1), red);
+        let copy = content.duplicate_layer(LayerId(0)).unwrap();
+        assert_eq!(ids(&content), [0, 2, 1]);
+        assert_eq!(content.layer(copy).unwrap().name, "Image copy");
+        assert!(Arc::ptr_eq(
+            &content.layers[0].pixels,
+            &content.layers[1].pixels
+        ));
+
+        assert!(content.move_layer(LayerId(0), 2));
+        assert_eq!(ids(&content), [2, 1, 0]);
+        assert!(!content.move_layer(LayerId(0), 2));
+        assert!(!content.move_layer(LayerId(0), 3));
+        assert!(content.rename_layer(LayerId(1), "Ink".into()));
+        assert!(!content.rename_layer(LayerId(1), "Ink".into()));
+        assert!(content.set_visible(LayerId(1), false));
+        assert!(!content.set_visible(LayerId(1), false));
+        assert!(content.set_opacity(LayerId(2), 10));
+        assert!(!content.set_opacity(LayerId(2), 10));
+
+        assert_eq!(content.delete_layer(LayerId(1)), Some(LayerId(2)));
+        assert_eq!(content.delete_layer(LayerId(2)), Some(LayerId(0)));
+        assert_eq!(content.delete_layer(LayerId(0)), None);
+        assert_eq!(ids(&content), [0]);
+        assert_eq!(
+            content.add_layer(LayerId(0), "Next".into(), red),
+            Some(LayerId(1))
+        );
+
+        let long = "x".repeat(MAX_LAYER_NAME_CHARS);
+        assert!(content.rename_layer(LayerId(1), long));
+        let copy = content.duplicate_layer(LayerId(1)).unwrap();
+        let name = &content.layer(copy).unwrap().name;
+        assert_eq!(name.chars().count(), MAX_LAYER_NAME_CHARS);
+        assert!(name.ends_with(" copy"));
+
+        while content.can_add_layer() {
+            content.add_layer(LayerId(0), "Layer".into(), red).unwrap();
+        }
+        assert_eq!(content.layers.len(), MAX_LAYERS);
+        assert!(content.add_layer(LayerId(0), "Layer".into(), red).is_none());
+        assert!(content.duplicate_layer(LayerId(0)).is_none());
+    }
+
+    #[test]
+    fn merge_down_preserves_the_composite_over_the_union() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_fn(5, 4, |x, y| Rgba([40 * x as u8, 60 * y as u8, 90, 200])),
+        );
+        let lower = content
+            .add_layer(LayerId(0), "Lower".into(), Rgba([0; 4]))
+            .unwrap();
+        let upper = content
+            .add_layer(lower, "Upper".into(), Rgba([0; 4]))
+            .unwrap();
+        content.layers[1].pixels = Arc::new(RgbaImage::from_fn(3, 3, |x, y| {
+            Rgba([200, 30 * x as u8, 10, 60 + 60 * y as u8])
+        }));
+        content.layers[1].offset = (-1, 2);
+        content.layers[1].opacity = 180;
+        content.layers[2].pixels = Arc::new(RgbaImage::from_fn(2, 4, |x, _| {
+            Rgba([10, 220, 30 * x as u8, 128])
+        }));
+        content.layers[2].offset = (4, -1);
+        content.layers[2].opacity = 77;
+        let before = content.composite();
+
+        content.layers[1].visible = false;
+        assert!(!content.can_merge_down(upper));
+        content.layers[1].visible = true;
+        assert!(!content.can_merge_down(LayerId(0)));
+        assert_eq!(content.merge_down(upper), Some(lower));
+
+        assert_eq!(ids(&content), [0, 1]);
+        let merged = &content.layers[1];
+        assert_eq!(merged.name, "Lower");
+        assert_eq!(merged.offset, (-1, -1));
+        assert_eq!(merged.pixels.dimensions(), (7, 6));
+        assert_eq!((merged.opacity, merged.visible), (255, true));
+        for (after, before) in content.composite().pixels().zip(before.pixels()) {
+            for (after, before) in after.0.iter().zip(before.0) {
+                assert!(after.abs_diff(before) <= 1, "{after} vs {before}");
+            }
+        }
     }
 
     #[test]

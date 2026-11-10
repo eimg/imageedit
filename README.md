@@ -4,7 +4,7 @@
 
 ImageEdit is a lightweight desktop image editor in development. It uses Rust
 and [GPUI](https://gpui.rs/) with a GIMP-inspired workspace and native macOS
-menus. The current milestone supports single-layer image editing.
+menus. The current milestone supports layered image editing.
 
 ## Try it on macOS
 
@@ -53,16 +53,23 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   around the pointer. Scroll or use a middle-button drag to pan a zoomed
   image. Pan is also available from the toolbox for left-button dragging.
   The cursor shows the selected tool beside the canvas crosshair.
-- **Edit → Undo** and **Redo** step through crops and fills in the current
-  tab. Undoing back to the last save clears the unsaved marker. Each tab keeps
-  up to 100 steps, and the oldest steps are dropped first when history uses
-  too much memory.
+- **Edit → Undo** and **Redo** step through crops, fills and layer changes in
+  the current tab. Undoing back to the last save clears the unsaved marker.
+  Each tab keeps up to 100 steps, and the oldest steps are dropped first when
+  history uses too much memory.
+- The **Layers** panel lists layers top to bottom with thumbnails. Click a
+  layer to select it, double-click to rename it, or use the eye button to hide
+  it. Drag a row to reorder. The opacity slider and the Layer menu cover New,
+  Duplicate, Rename, Merge Down, Delete, Raise and Lower. New Layer can start
+  transparent or filled with the foreground or background color. Merge Down
+  stays disabled when either layer is hidden.
 
 | Action | macOS shortcut |
 | --- | --- |
 | New / Open | ⌘N / ⌘O |
 | Save / Save As / Save Project As | ⌘S / ⌘⇧S / ⌘⌥S |
 | Export as PNG | ⌘⇧E |
+| New Layer / Duplicate Layer | ⌘⇧N / ⌘⇧D |
 | Undo / Redo | ⌘Z / ⌘⇧Z |
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
@@ -72,8 +79,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Menus and the toolbox still show planned features such as multiple layers,
-text, color adjustments, and filters. Commands without handlers appear
+Menus and the toolbox still show planned features such as text, color
+adjustments, and filters. Commands without handlers appear
 disabled. Windows is a future target.
 
 ## Development

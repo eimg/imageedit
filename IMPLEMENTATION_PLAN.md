@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P04
+## Latest handoff · P05
+
+P05 added the Layers panel and layer commands on branch `p05-layers`, which starts from P04's branch `p04-export`.
+
+- `src/document/content.rs` adds New, Duplicate, Rename, Delete, Raise/Lower (`move_layer`), visibility, opacity and Merge Down. New layers are canvas-sized, visible, Normal and full opacity. Duplicate shares pixel buffers until edited and appends ` copy`, truncated to `MAX_LAYER_NAME_CHARS` (64). Delete refuses the last layer and selects the neighbor below, or else the one above. Merge Down requires a visible lower neighbor, composites both into their checked union with `composite::flatten_region`, keeps the lower ID and name, and becomes a visible Normal layer at opacity 255. `MAX_LAYERS` (128) is shared with the project codec. Opening a document selects `preferred_active_layer`, the topmost visible layer.
+- `src/workspace/layers.rs` owns the panel (top-to-bottom rows, thumbnails, visibility, drag reorder, opacity slider and command buttons) and menu enablement. An opacity drag updates a temporary value and commits one history entry on release. Layer actions register only while enabled, so the native menu disables itself. Bucket Fill now refuses a hidden active layer and shows a status notice instead of editing invisible pixels.
+- `src/workspace/dialogs.rs` adds New Layer (name plus Transparent/Foreground/Background fill), Rename Layer and Layer Opacity (0–100%). Field editing uses character indices so non-ASCII names work. `RenderedCanvas` builds a 64 px thumbnail per layer and `drop_canvas` releases every GPUI image a canvas owns.
+- `src/commands.rs` enables the Layer menu items and binds New Layer to `⌘⇧N` and Duplicate to `⌘⇧D`.
+- Formatting, Clippy and locked tests passed. P04 ended with 29 tests and P05 ends with 32. New tests cover layer stack mutations and caps, Merge Down composite preservation within 1 level on an alpha fixture, and opacity percent round-trips.
+- No native UI smoke test ran. Computer Use still lacked Accessibility and Screen Recording permission.
+- **Next is P06** for preview feasibility, or continue with later passes that depend on layers.
+
+## Previous handoff · P04
 
 P04 added raster export and Save routing on branch `p04-export`, which starts from P03's branch `p03-history`.
 
@@ -12,9 +24,8 @@ P04 added raster export and Save routing on branch `p04-export`, which starts fr
 - Formatting, Clippy and locked tests passed before and after the change. P03 ended with 25 tests and P04 ends with 29. The new tests cover the routing table, destination and export extension checks (including a missing folder), export of the v2 fixture with transparent and translucent pixels in all three formats (PNG and WebP pixel-exact, JPEG opaque and within 6 levels of the composite over white at quality 100), an unchanged project file, a rejected project-format export, a failed write leaving no file or temporary file, and raster-Save eligibility after fill, crop, opacity and rename changes.
 - No native UI smoke test ran. Computer Use still lacked Accessibility and Screen Recording permission.
 - The P02 gap where Save As flattened a layered tab is fixed by routing. The hidden-active-layer gap remains for P05.
-- **Next is P05.** P06 can also start in an isolated worktree.
 
-## Previous handoff · P03
+## Earlier handoff · P03
 
 P03 added per-tab undo/redo history and save identity on branch `p03-history`, which starts from P02's branch `p02-project-v2`.
 

@@ -20,7 +20,8 @@ use tempfile::NamedTempFile;
 use crate::project;
 
 pub use content::{
-    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerId, RasterLayer,
+    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerId, MAX_LAYER_NAME_CHARS,
+    MAX_LAYERS, RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -66,13 +67,35 @@ pub struct Document {
 pub struct RenderedCanvas {
     pub pixels: Arc<RgbaImage>,
     pub preview: Preview,
+    pub thumbnails: Vec<(LayerId, Arc<RenderImage>)>,
 }
 
 impl RenderedCanvas {
     pub fn new(content: &DocumentContent) -> Self {
         let pixels = content.composite();
         let preview = render_preview(&pixels);
-        Self { pixels, preview }
+        let thumbnails = content
+            .layers()
+            .iter()
+            .map(|layer| (layer.id, render_thumbnail(&layer.pixels)))
+            .collect();
+        Self {
+            pixels,
+            preview,
+            thumbnails,
+        }
+    }
+
+    pub fn thumbnail(&self, id: LayerId) -> Option<&Arc<RenderImage>> {
+        self.thumbnails
+            .iter()
+            .find_map(|(layer, image)| (*layer == id).then_some(image))
+    }
+
+    // Every GPU image this canvas owns, for release when it is replaced or closed.
+    pub fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
+        std::iter::once(self.preview.image)
+            .chain(self.thumbnails.into_iter().map(|(_, image)| image))
     }
 }
 
@@ -166,6 +189,23 @@ pub fn decode_image(decoder: impl ImageDecoder) -> Result<DynamicImage> {
         "Invalid image dimensions or image is too large to open"
     );
     DynamicImage::from_decoder(decoder).context("Invalid image data")
+}
+
+fn render_thumbnail(image: &RgbaImage) -> Arc<RenderImage> {
+    const EDGE: u32 = 64;
+    let (width, height) = image.dimensions();
+    let scale = |length: u32| {
+        ((u64::from(length) * u64::from(EDGE) / u64::from(width.max(height))) as u32).max(1)
+    };
+    let mut pixels = if width.max(height) > EDGE {
+        imageops::thumbnail(image, scale(width), scale(height))
+    } else {
+        image.clone()
+    };
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(smallvec![Frame::new(pixels)]))
 }
 
 fn render_preview(image: &RgbaImage) -> Preview {

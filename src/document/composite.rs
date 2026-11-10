@@ -1,16 +1,25 @@
 use image::{Rgba, RgbaImage};
 
-use super::content::{BlendMode, DocumentContent, PixelBounds};
+use super::content::{BlendMode, DocumentContent, PixelBounds, RasterLayer};
 
 pub(super) fn flatten(content: &DocumentContent) -> RgbaImage {
-    let mut canvas = RgbaImage::new(content.width, content.height);
     let bounds = PixelBounds {
         left: 0,
         top: 0,
         right: i64::from(content.width),
         bottom: i64::from(content.height),
     };
-    for layer in &content.layers {
+    flatten_region(&content.layers, bounds)
+}
+
+// Composites layers bottom to top into an image covering `bounds` in canvas coordinates.
+pub(super) fn flatten_region<'a>(
+    layers: impl IntoIterator<Item = &'a RasterLayer>,
+    bounds: PixelBounds,
+) -> RgbaImage {
+    let (width, height) = bounds.dimensions();
+    let mut canvas = RgbaImage::new(width, height);
+    for layer in layers {
         if !layer.visible || layer.opacity == 0 {
             continue;
         }

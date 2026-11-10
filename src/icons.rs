@@ -26,6 +26,16 @@ impl AssetSource for Icons {
             "eye" => {
                 r#"<path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>"#
             }
+            "eye-off" => {
+                r#"<path d="M4 4l16 16M10 6.2A9 9 0 0 1 12 6c6 0 10 6 10 6a17 17 0 0 1-3 3.4M6.5 7.6A17 17 0 0 0 2 12s4 6 10 6a9 9 0 0 0 4-1"/>"#
+            }
+            "duplicate" => {
+                r#"<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>"#
+            }
+            "arrow-up" => r#"<path d="M12 19V5m-6 6 6-6 6 6"/>"#,
+            "arrow-down" => r#"<path d="M12 5v14m-6-6 6 6 6-6"/>"#,
+            "merge" => r#"<path d="m12 4 8 4-8 4-8-4 8-4ZM12 15v6m-3-3 3 3 3-3"/>"#,
+            "trash" => r#"<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>"#,
             "text" => r#"<path d="M4 7V4h16v3M12 4v16m-4 0h8"/>"#,
             "gradient" => {
                 r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8v8m4-8v8m4-8v8m3-8v8" opacity=".6"/>"#
