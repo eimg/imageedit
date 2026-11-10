@@ -8,6 +8,7 @@ mod document;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
+mod preview;
 mod project;
 mod workspace;
 

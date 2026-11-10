@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P05
+## Latest handoff · P06
+
+P06 measured a tiled preview on branch `p06-preview` and left the canvas renderer unchanged. `main` was fast-forwarded through P05 before this branch.
+
+- **Choice: 256 px tiles.** A 64 × 64 interior edit rebuilds one tile. The same edit on a 512 px grid rebuilds a tile four times larger and costs about four times as much. A full refresh costs the same either way, because both walk every canvas pixel. 256 px also matches the invalidation the next pass wants. A live overlay is not needed.
+- Release benchmark on an 8192 × 8192 RGBA canvas, 2 warmup runs and 20 timed interior samples (`cargo test --release --locked preview_benchmark -- --ignored --nocapture`). Machine: macOS 27.3 (26C5035r), Apple M3 Pro, 11 cores, 18 GB, built-in Liquid Retina XDR at 3024 × 1964 (scale 2). 256 px: interior p95 **85 µs** (1 tile), boundary p95 **373 µs** (4 tiles), full refresh **113 ms** (1024 tiles). 512 px: interior p95 **323 µs** (1 tile), boundary p95 **1534 µs** (4 tiles), full refresh **113 ms** (256 tiles). The current full-preview triangle resize to 4096 took **640 ms**. The 8 ms interior target is met.
+- `src/preview.rs` keeps a one-pixel apron because GPUI's Metal shaders sample atlas textures with a linear filter (`mag_filter::linear` in `gpui-0.2.2` `shaders.metal`). The apron test checks that a 50% blend across a tile edge matches the composite. Tiles without an apron stop at the edge. Unchanged tiles keep the same `Arc`, which is the stand-in for texture reuse; a future painter should call `drop_image` only on the replaced images. `fit_level_shift(8192, 1600)` is 2, so Fit uses a 2048 px source. Visible-tile counts are tested for a pan that crosses a tile edge.
+- `DocumentContent::composite_rect` composites one canvas rectangle for those tiles. Nothing in the window calls it yet.
+- Formatting, Clippy and locked tests passed. P05 ended with 32 tests and P06 ends with 37, plus the ignored release benchmark.
+- The native zoom and pan seam was not checked in the app, because this pass does not paint tiles. The seam check above is the CPU equivalent of the linear sample.
+- **Next is P07.** It should paint 256 px tiles, drop replaced images, and keep the Fit level from this pass.
+
+## Previous handoff · P05
 
 P05 added the Layers panel and layer commands on branch `p05-layers`, which starts from P04's branch `p04-export`.
 
@@ -12,9 +24,8 @@ P05 added the Layers panel and layer commands on branch `p05-layers`, which star
 - `src/commands.rs` enables the Layer menu items and binds New Layer to `⌘⇧N` and Duplicate to `⌘⇧D`.
 - Formatting, Clippy and locked tests passed. P04 ended with 29 tests and P05 ends with 32. New tests cover layer stack mutations and caps, Merge Down composite preservation within 1 level on an alpha fixture, and opacity percent round-trips.
 - No native UI smoke test ran. Computer Use still lacked Accessibility and Screen Recording permission.
-- **Next is P06** for preview feasibility, or continue with later passes that depend on layers.
 
-## Previous handoff · P04
+## Earlier handoff · P04
 
 P04 added raster export and Save routing on branch `p04-export`, which starts from P03's branch `p03-history`.
 

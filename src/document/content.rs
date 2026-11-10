@@ -141,6 +141,19 @@ impl DocumentContent {
         Arc::new(composite::flatten(self))
     }
 
+    // Composites a canvas-space rectangle. Coordinates may extend outside the canvas.
+    // The tiled preview prototype is the only caller until P07 paints these tiles.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn composite_rect(&self, x: i64, y: i64, width: u32, height: u32) -> RgbaImage {
+        let bounds = PixelBounds {
+            left: x,
+            top: y,
+            right: x.saturating_add(i64::from(width)),
+            bottom: y.saturating_add(i64::from(height)),
+        };
+        composite::flatten_region(&self.layers, bounds)
+    }
+
     pub fn crop(&mut self, crop: CropRect) -> bool {
         let Some(bounds) = crop.bounds() else {
             return false;

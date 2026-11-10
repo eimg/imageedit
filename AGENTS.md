@@ -30,6 +30,8 @@ Clipboard workflows are placeholders.
   stays disabled until there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite and bounded BGRA preview for GPUI.
+- `src/preview.rs` measures tiled preview updates. The canvas still paints
+  one image; the next preview pass owns the switch.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
   It handles crop and layer-local bucket fill. `src/document/composite.rs`
   blends visible layers for display, sampling, and raster output.
