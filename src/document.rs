@@ -3,7 +3,7 @@ mod content;
 
 use std::{
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Cursor, Seek, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -21,8 +21,8 @@ use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
 pub use content::{
-    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerGeometry, LayerId,
-    MAX_LAYER_NAME_CHARS, MAX_LAYERS, RasterLayer,
+    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, ImageLayer, InsertStop,
+    LayerGeometry, LayerId, MAX_LAYER_NAME_CHARS, MAX_LAYERS, MAX_STACK_BYTES, RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -491,6 +491,17 @@ impl Document {
         self.format != FileFormat::Project && self.content.is_plain_raster()
     }
 
+    pub fn from_pixels(name: String, pixels: RgbaImage) -> Self {
+        let content = DocumentContent::single_layer(IMPORTED_LAYER_NAME.to_owned(), pixels);
+        Self {
+            path: None,
+            name,
+            format: FileFormat::Project,
+            canvas: RenderedCanvas::new(&content),
+            content,
+        }
+    }
+
     pub fn blank(name: String, width: u32, height: u32, background: Rgba<u8>) -> Self {
         let content = DocumentContent::single_layer(
             "Background".to_owned(),
@@ -512,6 +523,45 @@ impl Document {
     pub fn height(&self) -> u32 {
         self.content.height
     }
+}
+
+pub(crate) fn encode_png(pixels: &RgbaImage) -> Result<Vec<u8>> {
+    let mut bytes = Cursor::new(Vec::new());
+    write_raster(&mut bytes, pixels, FileFormat::Png, 0)?;
+    Ok(bytes.into_inner())
+}
+
+pub(crate) fn decode_raster_bytes(bytes: &[u8]) -> Result<RgbaImage> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .context("The image could not be read")?;
+    rgba_from_reader(reader)
+}
+
+pub fn read_raster(path: &Path) -> Result<RgbaImage> {
+    let path = path.canonicalize().context("The file could not be found")?;
+    ensure!(path.is_file(), "Choose an image file");
+    let mut reader = BufReader::new(File::open(&path).context("The file could not be opened")?);
+    ensure!(
+        !reader.fill_buf()?.starts_with(project::MAGIC),
+        "Choose a PNG, JPEG, or WebP image"
+    );
+    let reader = ImageReader::new(reader)
+        .with_guessed_format()
+        .context("The file type could not be read")?;
+    rgba_from_reader(reader)
+}
+
+fn rgba_from_reader(reader: ImageReader<impl BufRead + Seek>) -> Result<RgbaImage> {
+    match reader.format() {
+        Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) => {}
+        _ => anyhow::bail!("Choose a PNG, JPEG, or WebP image"),
+    }
+    let mut decoder = reader.into_decoder().context("Invalid image data")?;
+    let orientation = decoder.orientation().context("Invalid image metadata")?;
+    let mut image = decode_image(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(image.into_rgba8())
 }
 
 pub fn decode_image(decoder: impl ImageDecoder) -> Result<DynamicImage> {

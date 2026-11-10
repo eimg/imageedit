@@ -2,7 +2,18 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P09
+## Latest handoff · P10
+
+P10 adds clipboard images and Open as Layers on branch `p10-clipboard`, which starts from P09's commit on `p09-geometry`.
+
+- Copy (`⌘C`) writes the active layer, clipped to the selection, as a PNG clipboard image. Transparent pixels are kept. An unrestricted selection copies the whole layer, including pixels that sit off the canvas. An empty selection, or one that misses the layer, writes nothing. The write is accepted only when reading the clipboard back returns the same pixels. Cut (`⌘X`) does that first, then clears those pixels in one history entry. A hidden layer can be copied and cannot be cut. If the document changes while the PNG is encoding, Cut leaves the pixels in place.
+- Paste (`⌘V`) and Paste as New Layer (`⌘⇧V`) each add one centered layer named Pasted Layer. There is no floating paste, so the two commands do the same thing. New from Clipboard makes an unsaved canvas the size of the clipboard image. Open as Layers places PNG, JPEG, and WebP files above the active layer in picker order, centered, in one history entry. A project or other file is reported and skipped; the rest of the batch is still added. A full stack or an image past the pixel budget is reported too.
+- These commands are not registered while a dialog or form is open, so the color field keeps its own text copy, cut, and paste. The project format is unchanged.
+- Formatting, Clippy and locked tests passed. P09 ended with 59 tests and P10 ends with 65, plus the ignored release benchmark. The tests cover a translucent pixel through PNG, an inverse hole, centered insertion, a full stack, a failed project import, and an undo that removes a pasted layer from a saved document.
+- Copy into Preview or GIMP, and paste from another app, were not driven in the app.
+- **Next is P11**, fixed transforms and sizing. It depends on the layer geometry from P09.
+
+## Previous handoff · P09
 
 P09 adds layer movement and geometry on branch `p09-geometry`, which starts from P08's commit on `p08-selection`.
 

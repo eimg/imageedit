@@ -16,7 +16,9 @@ sample or set swatches, and fill connected regions on the active layer. Rectangl
 selection limits fill and Clear to Transparency, and Crop to Selection uses its
 bounds. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
-does the same for the canvas. Each tab can undo and redo crops, fills and
+does the same for the canvas. Copy and Cut use the active layer inside the
+selection, Paste adds a centered layer, and Open as Layers imports images
+the same way. Each tab can undo and redo crops, fills and
 layer changes, and undoing back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
@@ -25,7 +27,6 @@ ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies without changing the tab's
 file. Raster Save is offered only while a document is a single plain layer.
-Clipboard workflows are placeholders.
 
 ## Code map
 
@@ -63,6 +64,8 @@ Clipboard workflows are placeholders.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.
+- `src/workspace/clipboard.rs` copies the selected part of the active layer,
+  pastes a centered layer, and imports rasters above the active layer.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity

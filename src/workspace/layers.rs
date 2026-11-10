@@ -795,7 +795,7 @@ impl Workspace {
         })
     }
 
-    fn notice(&mut self, message: &str, cx: &mut Context<Self>) {
+    pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {
         if let Some(index) = self.active {
             self.tabs[index].notice = Some(message.into());
             cx.notify();

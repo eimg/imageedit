@@ -1,4 +1,5 @@
 mod canvas_tools;
+mod clipboard;
 mod color;
 mod cursor;
 mod dialogs;
@@ -98,6 +99,8 @@ pub struct Workspace {
     move_overlay: Option<layers::MoveOverlay>,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
+    copy_token: u64,
+    paste_token: u64,
     dialog_open: bool,
     form: Option<Form>,
     creating: bool,
@@ -174,6 +177,8 @@ impl Workspace {
             move_overlay: None,
             move_settled: None,
             move_token: 0,
+            copy_token: 0,
+            paste_token: 0,
             dialog_open: false,
             form: None,
             creating: false,

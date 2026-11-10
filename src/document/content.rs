@@ -11,6 +11,8 @@ pub const IMPORTED_LAYER_NAME: &str = "Image";
 pub const MAX_LAYERS: usize = 128;
 // Keeps a full stack's names within the project manifest limit.
 pub const MAX_LAYER_NAME_CHARS: usize = 64;
+// Matches the project reader's total decoded-pixel budget.
+pub const MAX_STACK_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u64);
@@ -240,6 +242,99 @@ impl DocumentContent {
             },
         );
         Some(id)
+    }
+
+    // How many of `layers` fit above `above`, in the given order. Each one is centered.
+    pub fn insert_centered_layers(
+        &mut self,
+        above: LayerId,
+        layers: Vec<ImageLayer>,
+    ) -> InsertedLayers {
+        let mut above = above;
+        let mut added = 0;
+        let mut top = None;
+        for layer in layers {
+            if let Err(stop) = self.room_for(0, 0, &layer.pixels) {
+                return InsertedLayers {
+                    added,
+                    top,
+                    stopped: Some(stop),
+                };
+            }
+            let Some(id) = self.insert_centered_layer(above, layer) else {
+                return InsertedLayers {
+                    added,
+                    top,
+                    stopped: Some(InsertStop::Full),
+                };
+            };
+            above = id;
+            top = Some(id);
+            added += 1;
+        }
+        InsertedLayers {
+            added,
+            top,
+            stopped: None,
+        }
+    }
+
+    // `extra_layers` and `extra_bytes` are images accepted in this batch but not inserted yet.
+    pub fn room_for(
+        &self,
+        extra_layers: usize,
+        extra_bytes: u64,
+        pixels: &RgbaImage,
+    ) -> Result<(), InsertStop> {
+        if self.layers.len().saturating_add(extra_layers) >= MAX_LAYERS {
+            return Err(InsertStop::Full);
+        }
+        let Some(bytes) = image_bytes(pixels) else {
+            return Err(InsertStop::TooLarge);
+        };
+        if bytes == 0 || bytes > MAX_IMAGE_BYTES {
+            return Err(InsertStop::TooLarge);
+        }
+        let used = self.stack_bytes().saturating_add(extra_bytes);
+        if used.saturating_add(bytes) > MAX_STACK_BYTES {
+            Err(InsertStop::TooLarge)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn insert_centered_layer(&mut self, above: LayerId, layer: ImageLayer) -> Option<LayerId> {
+        let id = self.next_layer_id()?;
+        let offset = crate::geometry::centered_offset(
+            (0, 0),
+            layer.pixels.width(),
+            layer.pixels.height(),
+            self.width,
+            self.height,
+            crate::geometry::Axis::Both,
+        );
+        let index = self
+            .layer_index(above)
+            .map_or(self.layers.len(), |index| index + 1);
+        self.layers.insert(
+            index,
+            RasterLayer {
+                id,
+                name: limited_name(&layer.name),
+                pixels: Arc::new(layer.pixels),
+                offset,
+                visible: true,
+                opacity: 255,
+                blend_mode: BlendMode::Normal,
+            },
+        );
+        Some(id)
+    }
+
+    fn stack_bytes(&self) -> u64 {
+        self.layers.iter().fold(0, |total, layer| {
+            total.saturating_add(image_bytes(&layer.pixels).unwrap_or(u64::MAX))
+        })
     }
 
     pub fn duplicate_layer(&mut self, id: LayerId) -> Option<LayerId> {
@@ -625,6 +720,36 @@ impl CropRect {
             bottom: i64::from(self.y.checked_add(self.height)?),
         })
     }
+}
+
+pub struct ImageLayer {
+    pub name: String,
+    pub pixels: RgbaImage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertStop {
+    Full,
+    TooLarge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsertedLayers {
+    pub added: usize,
+    pub top: Option<LayerId>,
+    pub stopped: Option<InsertStop>,
+}
+
+pub(crate) fn image_bytes(pixels: &RgbaImage) -> Option<u64> {
+    u64::from(pixels.width())
+        .checked_mul(u64::from(pixels.height()))?
+        .checked_mul(4)
+}
+
+fn limited_name(name: &str) -> String {
+    let name = name.trim();
+    let name = if name.is_empty() { "Layer" } else { name };
+    name.chars().take(MAX_LAYER_NAME_CHARS).collect()
 }
 
 fn copy_name(name: &str) -> String {
@@ -1037,5 +1162,64 @@ mod tests {
             LayerGeometry::Empty
         ));
         assert_eq!(clear.size(), (4, 4));
+    }
+
+    #[test]
+    fn inserted_layers_are_centered_above_the_active_layer_until_the_stack_is_full() {
+        let mut content = DocumentContent::single_layer("Image".into(), RgbaImage::new(4, 4));
+        let base = content.top_layer_id();
+        let inserted = content.insert_centered_layers(
+            base,
+            vec![
+                ImageLayer {
+                    name: "  One  ".into(),
+                    pixels: RgbaImage::from_pixel(2, 2, Rgba([9, 0, 0, 128])),
+                },
+                ImageLayer {
+                    name: "N".repeat(MAX_LAYER_NAME_CHARS + 4),
+                    pixels: RgbaImage::new(1, 1),
+                },
+            ],
+        );
+        assert_eq!(
+            inserted,
+            InsertedLayers {
+                added: 2,
+                top: content.top_layer_id().into(),
+                stopped: None,
+            }
+        );
+        assert_eq!(content.layers()[1].name, "One");
+        assert_eq!(content.layers()[1].offset, (1, 1));
+        assert_eq!(content.layers()[1].pixels.get_pixel(0, 0).0, [9, 0, 0, 128]);
+        assert_eq!(
+            content.layers()[2].name.chars().count(),
+            MAX_LAYER_NAME_CHARS
+        );
+        assert_eq!(content.layers()[2].offset, (1, 1));
+        assert_eq!(
+            content.room_for(0, MAX_STACK_BYTES, &RgbaImage::new(1, 1)),
+            Err(InsertStop::TooLarge)
+        );
+
+        while content.can_add_layer() {
+            content
+                .add_layer(content.top_layer_id(), "Fill".into(), Rgba([0; 4]))
+                .unwrap();
+        }
+        let full = content.insert_centered_layers(
+            content.top_layer_id(),
+            vec![ImageLayer {
+                name: "Extra".into(),
+                pixels: RgbaImage::new(1, 1),
+            }],
+        );
+        assert_eq!(full.added, 0);
+        assert_eq!(full.stopped, Some(InsertStop::Full));
+        assert!(
+            content
+                .room_for(0, MAX_STACK_BYTES, &RgbaImage::new(1, 1))
+                .is_err()
+        );
     }
 }

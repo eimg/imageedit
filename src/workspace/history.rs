@@ -474,4 +474,36 @@ mod tests {
         );
         assert!(!session.history.is_dirty());
     }
+
+    #[test]
+    fn undoing_a_pasted_layer_restores_a_saved_document() {
+        let mut session = Session::new(true, 4);
+        let id = session.current.active_layer;
+        session.current.selection = Selection::Rect(crate::preview::PixelRect::new(0, 0, 2, 2));
+        session.edit(
+            |content| {
+                content
+                    .insert_centered_layers(
+                        id,
+                        vec![crate::document::ImageLayer {
+                            name: "Pasted Layer".into(),
+                            pixels: image::RgbaImage::from_pixel(2, 2, Rgba([1, 2, 3, 128])),
+                        }],
+                    )
+                    .added
+                    > 0
+            },
+            &LIMITS,
+        );
+        assert_eq!(session.current.content.layers().len(), 2);
+        assert_eq!(session.current.content.layers()[1].offset, (1, 1));
+        assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.current.content.layers().len(), 1);
+        assert_eq!(
+            session.current.selection,
+            Selection::Rect(crate::preview::PixelRect::new(0, 0, 2, 2))
+        );
+        assert!(!session.history.is_dirty());
+    }
 }

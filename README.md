@@ -62,6 +62,13 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   the pixels that already lie on the canvas and drops the rest. **Crop to
   Content**, on the Layer and Image menus, trims to pixels that are not fully
   transparent. A fully transparent layer or image is left unchanged.
+  **Copy** and **Cut** put the selected part of the active layer on the
+  clipboard, including transparent pixels. Cut then clears those pixels.
+  **Paste** and **Paste as New Layer** add that image as a centered layer.
+  **File → New from Clipboard** makes a canvas the size of the clipboard
+  image. **Open as Layers** adds PNG, JPEG, and WebP files above the active
+  layer. A file that cannot be read is reported, and the others are still
+  added.
   Click either color swatch for the hue and saturation wheel, brightness
   slider, and hex input. The last 12 distinct colors set or sampled in the
   workspace are available in Recent Colors. Click the swap icon between the
@@ -94,6 +101,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
 | Rectangle Select / Move | R / M |
+| Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |
 | Swap / Reset colors | X / D |
