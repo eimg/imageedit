@@ -16,9 +16,9 @@ Clone the repository, then run these commands from its root.
 open dist/ImageEdit.app
 ```
 
-The script builds an ad hoc signed local app with the ImageEdit icon and
-Finder file associations. You can also run `cargo run --locked` for
-development. Use the app bundle to test Finder integration and app identity.
+The script builds an optimized, ad hoc signed app with the ImageEdit icon and
+Finder file associations. Use the bundle to check image loading performance
+and Finder integration. Run `cargo run --locked` for a debug build.
 
 ## Editing and saving
 
@@ -39,8 +39,9 @@ development. Use the app bundle to test Finder integration and app identity.
   matching RGBA values. **Color Picker** samples the image at full resolution.
   Click either color swatch for the hue and saturation wheel, brightness
   slider, and hex input. The last 12 distinct colors set or sampled in the
-  workspace are available in Recent Colors. Use **Swap FG/BG** or press X
-  to flip the foreground and background.
+  workspace are available in Recent Colors. Click the swap icon between the
+  swatches or press X to flip them. Press D to restore black foreground and
+  white background.
 - Use the Zoom tool, View menu, or status bar to zoom. Control-scroll zooms
   around the pointer. Scroll or use a middle-button drag to pan a zoomed
   image. Pan is also available from the toolbox for left-button dragging.

@@ -1,3 +1,6 @@
+mod composite;
+mod content;
+
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
@@ -15,6 +18,8 @@ use smallvec::smallvec;
 use tempfile::NamedTempFile;
 
 use crate::project;
+
+pub use content::{CropRect, DocumentContent, LayerId};
 
 const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_NEW_EDGE: u32 = 16_384;
@@ -51,37 +56,26 @@ pub struct Document {
     pub path: Option<PathBuf>,
     pub name: String,
     pub format: FileFormat,
-    pub layer_name: String,
+    pub content: DocumentContent,
+    pub canvas: RenderedCanvas,
+}
+
+pub struct RenderedCanvas {
     pub pixels: Arc<RgbaImage>,
     pub preview: Preview,
+}
+
+impl RenderedCanvas {
+    pub fn new(content: &DocumentContent) -> Self {
+        let pixels = content.composite();
+        let preview = render_preview(&pixels);
+        Self { pixels, preview }
+    }
 }
 
 pub struct Preview {
     pub image: Arc<RenderImage>,
     pub has_transparency: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CropRect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl CropRect {
-    pub fn between(start: (u32, u32), end: (u32, u32)) -> Self {
-        Self {
-            x: start.0.min(end.0),
-            y: start.1.min(end.1),
-            width: start.0.abs_diff(end.0) + 1,
-            height: start.1.abs_diff(end.1) + 1,
-        }
-    }
-
-    pub fn extract(self, pixels: &RgbaImage) -> RgbaImage {
-        imageops::crop_imm(pixels, self.x, self.y, self.width, self.height).to_image()
-    }
 }
 
 impl Document {
@@ -108,14 +102,13 @@ impl Document {
             image.apply_orientation(orientation);
             (format, image.into_rgba8(), "Image".to_owned())
         };
-        let pixels = Arc::new(pixels);
+        let content = DocumentContent::single_layer(layer_name, pixels);
         Ok(Self {
             name: file_name(&path),
             path: Some(path),
             format,
-            layer_name,
-            preview: render_preview(&pixels),
-            pixels,
+            canvas: RenderedCanvas::new(&content),
+            content,
         })
     }
 
@@ -133,23 +126,25 @@ impl Document {
     }
 
     pub fn blank(name: String, width: u32, height: u32, background: Rgba<u8>) -> Self {
-        let pixels = Arc::new(RgbaImage::from_pixel(width, height, background));
+        let content = DocumentContent::single_layer(
+            "Background".to_owned(),
+            RgbaImage::from_pixel(width, height, background),
+        );
         Self {
             path: None,
             name,
             format: FileFormat::Project,
-            layer_name: "Background".to_owned(),
-            preview: render_preview(&pixels),
-            pixels,
+            canvas: RenderedCanvas::new(&content),
+            content,
         }
     }
 
     pub fn width(&self) -> u32 {
-        self.pixels.width()
+        self.content.width
     }
 
     pub fn height(&self) -> u32 {
-        self.pixels.height()
+        self.content.height
     }
 }
 
@@ -165,7 +160,7 @@ pub fn decode_image(decoder: impl ImageDecoder) -> Result<DynamicImage> {
     DynamicImage::from_decoder(decoder).context("Invalid image data")
 }
 
-pub fn render_preview(image: &RgbaImage) -> Preview {
+fn render_preview(image: &RgbaImage) -> Preview {
     const MAX_PREVIEW_EDGE: u32 = 4096;
     let (width, height) = image.dimensions();
     let edge = width.max(height);
@@ -198,57 +193,6 @@ pub fn solid_color(color: u32) -> Rgba<u8> {
     Rgba([red, green, blue, 255])
 }
 
-pub fn bucket_fill(source: &RgbaImage, x: u32, y: u32, color: Rgba<u8>) -> Option<RgbaImage> {
-    let target = *source.get_pixel(x, y);
-    if target == color {
-        return None;
-    }
-    let mut image = source.clone();
-
-    // Paint runs as they are queued, so a pixel is never queued twice.
-    let height = image.height();
-    let mut pending = vec![paint_run(&mut image, x, y, target, color)];
-    while let Some((left, right, y)) = pending.pop() {
-        for row in [y.checked_sub(1), (y + 1 < height).then_some(y + 1)]
-            .into_iter()
-            .flatten()
-        {
-            let mut x = left;
-            while x <= right {
-                if *image.get_pixel(x, row) == target {
-                    let run = paint_run(&mut image, x, row, target, color);
-                    x = run.1 + 1;
-                    pending.push(run);
-                } else {
-                    x += 1;
-                }
-            }
-        }
-    }
-    Some(image)
-}
-
-fn paint_run(
-    image: &mut RgbaImage,
-    x: u32,
-    y: u32,
-    target: Rgba<u8>,
-    color: Rgba<u8>,
-) -> (u32, u32, u32) {
-    let mut left = x;
-    let mut right = x;
-    while left > 0 && *image.get_pixel(left - 1, y) == target {
-        left -= 1;
-    }
-    while right + 1 < image.width() && *image.get_pixel(right + 1, y) == target {
-        right += 1;
-    }
-    for x in left..=right {
-        image.put_pixel(x, y, color);
-    }
-    (left, right, y)
-}
-
 pub fn save_format(path: &Path) -> Result<FileFormat> {
     let extension = path
         .extension()
@@ -263,48 +207,20 @@ pub fn save_format(path: &Path) -> Result<FileFormat> {
     }
 }
 
-pub fn save_image(
-    pixels: &RgbaImage,
-    layer_name: &str,
-    path: &Path,
-    format: FileFormat,
-) -> Result<()> {
+pub fn save_image(content: &DocumentContent, path: &Path, format: FileFormat) -> Result<()> {
     let parent = path.parent().context("Choose a destination folder")?;
     let mut temporary =
         NamedTempFile::new_in(parent).context("Could not create the output file")?;
     {
         let mut writer = BufWriter::new(temporary.as_file_mut());
-        let (width, height) = pixels.dimensions();
-        let rgba = ExtendedColorType::Rgba8;
-        match format {
-            FileFormat::Project => project::write(&mut writer, pixels, layer_name)?,
-            FileFormat::Png => codecs::png::PngEncoder::new(&mut writer).write_image(
-                pixels.as_raw(),
-                width,
-                height,
-                rgba,
-            )?,
-            FileFormat::WebP => codecs::webp::WebPEncoder::new_lossless(&mut writer).write_image(
-                pixels.as_raw(),
-                width,
-                height,
-                rgba,
-            )?,
-            FileFormat::Jpeg => {
-                let rgb = RgbImage::from_fn(width, height, |x, y| {
-                    let [r, g, b, a] = pixels.get_pixel(x, y).0;
-                    let alpha = u16::from(a);
-                    image::Rgb([r, g, b].map(|channel| {
-                        ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
-                    }))
-                });
-                codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 92).write_image(
-                    rgb.as_raw(),
-                    width,
-                    height,
-                    ExtendedColorType::Rgb8,
-                )?;
-            }
+        if format == FileFormat::Project {
+            let layer = content.full_canvas_layer().context(
+                "Project version 1 requires a single full-canvas layer at default opacity",
+            )?;
+            project::write(&mut writer, &layer.pixels, &layer.name)?;
+        } else {
+            let pixels = content.composite();
+            write_raster(&mut writer, &pixels, format)?;
         }
         writer.flush()?;
     }
@@ -317,6 +233,42 @@ pub fn save_image(
     temporary
         .persist(path)
         .context("Could not replace the destination file")?;
+    Ok(())
+}
+
+fn write_raster(writer: impl Write, pixels: &RgbaImage, format: FileFormat) -> Result<()> {
+    let (width, height) = pixels.dimensions();
+    let rgba = ExtendedColorType::Rgba8;
+    match format {
+        FileFormat::Project => unreachable!("projects are saved as layers"),
+        FileFormat::Png => codecs::png::PngEncoder::new(writer).write_image(
+            pixels.as_raw(),
+            width,
+            height,
+            rgba,
+        )?,
+        FileFormat::WebP => codecs::webp::WebPEncoder::new_lossless(writer).write_image(
+            pixels.as_raw(),
+            width,
+            height,
+            rgba,
+        )?,
+        FileFormat::Jpeg => {
+            let rgb = RgbImage::from_fn(width, height, |x, y| {
+                let [r, g, b, a] = pixels.get_pixel(x, y).0;
+                let alpha = u16::from(a);
+                image::Rgb([r, g, b].map(|channel| {
+                    ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
+                }))
+            });
+            codecs::jpeg::JpegEncoder::new_with_quality(writer, 92).write_image(
+                rgb.as_raw(),
+                width,
+                height,
+                ExtendedColorType::Rgb8,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -340,31 +292,22 @@ mod tests {
         for y in 0..3 {
             source.put_pixel(4998, y, wall);
         }
-        let document = render_preview(&source);
-        assert!(document.has_transparency);
-        assert_eq!(u32::from(document.image.size(0).width), 4096);
+        let mut content = DocumentContent::single_layer("Image".into(), source);
+        let preview = RenderedCanvas::new(&content).preview;
+        assert!(preview.has_transparency);
+        assert_eq!(u32::from(preview.image.size(0).width), 4096);
 
-        let crop = CropRect::between((4999, 2), (4997, 0)).extract(&source);
-        let filled = bucket_fill(&crop, 0, 1, ink).unwrap();
+        assert!(content.crop(CropRect::between((4999, 2), (4997, 0))));
+        let layer = content.top_layer_id();
+        assert!(content.fill(layer, 0, 1, ink));
+        let filled = content.composite();
         assert_eq!(filled.dimensions(), (3, 3));
         for y in 0..3 {
             assert_eq!(filled.get_pixel(0, y).0, ink.0);
             assert_eq!(filled.get_pixel(1, y).0, wall.0);
             assert_eq!(filled.get_pixel(2, y).0, background.0);
         }
-        assert!(bucket_fill(&filled, 0, 0, ink).is_none());
-    }
-
-    #[test]
-    fn fill_does_not_cross_diagonal_or_different_alpha() {
-        let blank = Rgba([0; 4]);
-        let wall = solid_color(0x000000);
-        let ink = solid_color(0xff00ff);
-        let mut image = RgbaImage::from_pixel(2, 2, wall);
-        image.put_pixel(0, 0, blank);
-        image.put_pixel(1, 1, blank);
-        let filled = bucket_fill(&image, 0, 0, ink).unwrap();
-        assert_eq!(filled.into_raw(), [ink.0, wall.0, wall.0, blank.0].concat());
+        assert!(!content.fill(layer, 0, 0, ink));
     }
 
     #[test]
@@ -376,12 +319,16 @@ mod tests {
             let path = directory
                 .path()
                 .join(format!("image.{}", format.extension()));
-            save_image(&pixels, "Original layer", &path, format).unwrap();
+            let content = DocumentContent::single_layer("Original layer".into(), pixels.clone());
+            save_image(&content, &path, format).unwrap();
             let loaded = Document::open(&path).unwrap();
             assert_eq!(loaded.format, format);
-            assert_eq!(*loaded.pixels, pixels);
+            assert_eq!(*loaded.canvas.pixels, pixels);
             if format == FileFormat::Project {
-                assert_eq!(loaded.layer_name, "Original layer");
+                assert_eq!(
+                    loaded.content.full_canvas_layer().unwrap().name,
+                    "Original layer"
+                );
             }
         }
     }
@@ -391,19 +338,32 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.imageedit");
         let original = RgbaImage::from_pixel(2, 1, solid_color(0xff5500));
-        save_image(&original, "Original", &path, FileFormat::Project).unwrap();
+        let original = DocumentContent::single_layer("Original".into(), original);
+        save_image(&original, &path, FileFormat::Project).unwrap();
         let previous_bytes = std::fs::read(&path).unwrap();
         let replacement = RgbaImage::from_pixel(1, 1, solid_color(0x000000));
-        assert!(
-            save_image(
-                &replacement,
-                &"x".repeat(65_536),
-                &path,
-                FileFormat::Project
-            )
-            .is_err()
-        );
+        let replacement = DocumentContent::single_layer("x".repeat(65_536), replacement);
+        assert!(save_image(&replacement, &path, FileFormat::Project).is_err());
         assert_eq!(std::fs::read(path).unwrap(), previous_bytes);
+    }
+
+    #[test]
+    fn raster_save_uses_the_composite_and_v1_refuses_layer_offsets() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut content = DocumentContent::single_layer(
+            "Image".into(),
+            RgbaImage::from_pixel(2, 1, Rgba([70, 80, 90, 255])),
+        );
+        content.layers[0].offset = (1, 0);
+        let png = directory.path().join("offset.png");
+        save_image(&content, &png, FileFormat::Png).unwrap();
+        let opened = Document::open(&png).unwrap();
+        assert_eq!(opened.canvas.pixels.get_pixel(0, 0).0, [0; 4]);
+        assert_eq!(opened.canvas.pixels.get_pixel(1, 0).0, [70, 80, 90, 255]);
+
+        let project = directory.path().join("offset.imageedit");
+        assert!(save_image(&content, &project, FileFormat::Project).is_err());
+        assert!(!project.exists());
     }
 
     #[test]
@@ -411,10 +371,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.jpg");
         let pixels = RgbaImage::from_pixel(8, 8, Rgba([200, 0, 120, 0]));
-        save_image(&pixels, "Image", &path, FileFormat::Jpeg).unwrap();
+        let content = DocumentContent::single_layer("Image".into(), pixels);
+        save_image(&content, &path, FileFormat::Jpeg).unwrap();
         assert!(
             Document::open(&path)
                 .unwrap()
+                .canvas
                 .pixels
                 .pixels()
                 .all(|pixel| pixel.0 == [255; 4])

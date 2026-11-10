@@ -1,9 +1,9 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    App, Bounds, Context, Corners, CursorStyle, Div, ExternalPaths, MouseButton, ObjectFit, Pixels,
-    Point, TransformationMatrix, Window, canvas, div, fill, img, point, prelude::*, px, rgb, rgba,
-    size, svg,
+    Animation, AnimationExt as _, App, Bounds, Context, Corners, CursorStyle, Div, ExternalPaths,
+    MouseButton, ObjectFit, Pixels, Point, Transformation, TransformationMatrix, Window, canvas,
+    div, fill, img, percentage, point, prelude::*, px, rgb, rgba, size, svg,
 };
 
 use crate::commands::{
@@ -30,6 +30,8 @@ const DISABLED: u32 = 0x767f8d;
 pub(super) const HOVER: u32 = 0x2b323d;
 pub(super) const ACCENT: u32 = 0xacc6ff;
 pub(super) const SELECTED: u32 = 0x2c3a54;
+const HEADER_HEIGHT: f32 = 36.;
+const SWATCH_HEIGHT: f32 = 28.;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -174,18 +176,7 @@ impl Workspace {
             .flex_col()
             .border_r_1()
             .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .h(px(40.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Toolbox"),
-            )
+            .child(panel_header("Toolbox"))
             .child(
                 div()
                     .id("toolbox-scroll")
@@ -253,44 +244,34 @@ impl Workspace {
                         }),
                     )
                     .child(
+                        icon_button("swap")
+                            .id("swap-colors")
+                            .h(px(SWATCH_HEIGHT))
+                            .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                            .cursor_pointer()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(SwapColors), cx);
+                            }),
+                    )
+                    .child(
                         color_swatch("Background", background).on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(BackgroundColor), cx);
                         }),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .mt_1()
-                    .child(
-                        color_button("Swap FG/BG")
-                            .child(icon("swap", 12.))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(SwapColors), cx);
-                            }),
-                    )
-                    .child(color_button("Reset").on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(ResetColors), cx);
-                    })),
-            )
     }
 
     fn tab_strip(&self, cx: &Context<Self>) -> impl IntoElement {
-        div()
+        workspace_header()
             .id("tabs")
-            .h(px(40.))
-            .flex_shrink_0()
-            .flex()
+            .gap_1()
+            .px_1()
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll)
-            .bg(rgb(PANEL))
-            .border_b_1()
-            .border_color(rgb(BORDER))
             .when(self.tabs.is_empty(), |strip| {
                 strip.child(
                     div()
-                        .px_4()
+                        .px_2()
                         .flex()
                         .items_center()
                         .text_color(rgb(MUTED))
@@ -302,39 +283,43 @@ impl Workspace {
                 let id = tab.id;
                 div()
                     .id(("tab", id))
-                    .w(px(188.))
+                    .h(px(28.))
+                    .max_w(px(172.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .pr_2()
-                    .border_r_1()
-                    .border_t_2()
-                    .border_color(rgb(if selected { ACCENT } else { PANEL }))
-                    .bg(rgb(if selected { CHROME } else { PANEL }))
+                    .pr_1()
+                    .rounded_md()
+                    .when_else(
+                        selected,
+                        |tab| tab.bg(rgb(CHROME)),
+                        |tab| tab.hover(|tab| tab.bg(rgb(CHROME))),
+                    )
                     .child(
                         div()
                             .id("select")
                             .h_full()
                             .flex()
-                            .flex_1()
                             .min_w_0()
                             .items_center()
-                            .gap_2()
-                            .pl_3()
+                            .gap_1()
+                            .pl_2()
                             .pr_1()
                             .cursor_pointer()
+                            .text_size(px(12.))
                             .text_color(rgb(if selected { TEXT } else { MUTED }))
-                            .child(icon("image", 14.))
+                            .child(icon("image", 12.))
                             .child(
                                 div()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
                                     .text_ellipsis()
+                                    .line_clamp(1)
                                     .child(tab.document.name.clone()),
                             )
                             .when(tab.dirty, |label| {
-                                label.child(div().text_color(rgb(ACCENT)).child("•"))
+                                label
+                                    .child(div().flex_shrink_0().text_color(rgb(ACCENT)).child("•"))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(index) = this.tab_index(id) {
@@ -563,6 +548,9 @@ impl Workspace {
                         .child(div().text_xs().text_color(rgb(MUTED)).child(OPEN_HINT)),
                 ),
             })
+            .when(self.pending > 0, |area| {
+                area.child(opening_indicator(self.pending))
+            })
     }
 
     fn inspector(&self) -> Div {
@@ -570,12 +558,16 @@ impl Workspace {
         div()
             .w(px(232.))
             .flex_shrink_0()
+            .flex()
+            .flex_col()
             .border_l_1()
             .border_color(rgb(BORDER))
+            .child(panel_header("Tool Options"))
             .child(
                 div()
                     .id("inspector-scroll")
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .child(
                         div()
@@ -585,7 +577,6 @@ impl Workspace {
                             .p_4()
                             .border_b_1()
                             .border_color(rgb(BORDER))
-                            .child(section_label("TOOL OPTIONS"))
                             .child(
                                 div()
                                     .flex()
@@ -660,9 +651,14 @@ impl Workspace {
                                     .child(icon_button("layers")),
                             )
                             .when_else(
-                                self.active_document().is_some(),
+                                self.active_tab().is_some(),
                                 |panel| {
-                                    let document = self.active_document().unwrap();
+                                    let tab = self.active_tab().unwrap();
+                                    let document = &tab.document;
+                                    let layer = document
+                                        .content
+                                        .layer(tab.active_layer)
+                                        .expect("the active layer belongs to the document");
                                     panel
                                         .child(
                                             div()
@@ -675,7 +671,7 @@ impl Workspace {
                                                 .border_color(rgb(BORDER))
                                                 .bg(rgb(CHROME))
                                                 .child(
-                                                    img(document.preview.image.clone())
+                                                    img(document.canvas.preview.image.clone())
                                                         .size(px(34.))
                                                         .flex_shrink_0()
                                                         .rounded_sm()
@@ -687,7 +683,7 @@ impl Workspace {
                                                         .flex_1()
                                                         .min_w_0()
                                                         .text_ellipsis()
-                                                        .child(document.layer_name.clone()),
+                                                        .child(layer.name.clone()),
                                                 )
                                                 .child(
                                                     icon_button("eye").text_color(rgb(DISABLED)),
@@ -741,8 +737,6 @@ impl Workspace {
     fn status_bar(&self) -> Div {
         let summary = if self.creating {
             "Creating image…".to_owned()
-        } else if self.pending > 0 {
-            format!("Opening {}…", self.pending)
         } else {
             self.active_tab().map_or_else(
                 || "Ready".to_owned(),
@@ -839,6 +833,61 @@ impl Workspace {
     }
 }
 
+fn workspace_header() -> Div {
+    div()
+        .h(px(HEADER_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .bg(rgb(PANEL))
+        .border_b_1()
+        .border_color(rgb(BORDER))
+}
+
+fn panel_header(title: &'static str) -> Div {
+    workspace_header()
+        .px_4()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(title)
+}
+
+fn opening_indicator(pending: usize) -> Div {
+    let label = if pending == 1 {
+        "Opening image…".to_owned()
+    } else {
+        format!("Opening {pending} images…")
+    };
+    div()
+        .absolute()
+        .top_3()
+        .right_3()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(rgb(CHROME))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .shadow_md()
+        .text_size(px(12.))
+        .child(
+            svg()
+                .path("loading")
+                .size(px(14.))
+                .text_color(rgb(ACCENT))
+                .with_animation(
+                    "opening-image",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |spinner, progress| {
+                        spinner.with_transformation(Transformation::rotate(percentage(progress)))
+                    },
+                ),
+        )
+        .child(label)
+}
+
 fn open_image(_: &gpui::ClickEvent, window: &mut Window, cx: &mut App) {
     window.dispatch_action(Box::new(OpenImage), cx);
 }
@@ -868,7 +917,7 @@ fn color_swatch(label: &'static str, color: u32) -> gpui::Stateful<Div> {
         .gap_1()
         .child(
             div()
-                .h(px(22.))
+                .h(px(SWATCH_HEIGHT))
                 .rounded_sm()
                 .border_1()
                 .border_color(rgb(BORDER))
@@ -881,23 +930,6 @@ fn color_swatch(label: &'static str, color: u32) -> gpui::Stateful<Div> {
                 .text_color(rgb(MUTED))
                 .child(format!("#{color:06X}")),
         )
-}
-
-fn color_button(label: &'static str) -> gpui::Stateful<Div> {
-    div()
-        .id(label)
-        .flex_1()
-        .flex()
-        .justify_center()
-        .items_center()
-        .gap_1()
-        .py_1()
-        .rounded_sm()
-        .text_size(px(11.))
-        .text_color(rgb(MUTED))
-        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-        .cursor_pointer()
-        .child(label)
 }
 
 fn button(symbol: &'static str, label: &'static str) -> Div {
@@ -1022,9 +1054,9 @@ fn image_preview(
     show_guides: bool,
     crop: Option<CropRect>,
 ) -> impl IntoElement {
-    let image = tab.document.preview.image.clone();
-    let pixels = tab.document.pixels.clone();
-    let has_transparency = tab.document.preview.has_transparency;
+    let image = tab.document.canvas.preview.image.clone();
+    let pixels = tab.document.canvas.pixels.clone();
+    let has_transparency = tab.document.canvas.preview.has_transparency;
     let width = tab.document.width();
     let height = tab.document.height();
     let zoom = tab.zoom;

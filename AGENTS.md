@@ -6,6 +6,9 @@ takes cues from GIMP, with native menus, a fixed toolbox and Layers panel, and a
 tabbed canvas. File commands belong in the menu. The workspace favors canvas
 space and has no top toolbar.
 
+For planned work, start with [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
+and the latest pass handoff.
+
 ## Current product scope
 
 ImageEdit supports single-layer raster editing. Open or create an image,
@@ -22,8 +25,11 @@ separate export commands are placeholders.
 - `src/commands.rs` defines actions, shortcuts, native menus, and toolbox
   metadata. Reuse those actions for UI entry points. A `Planned` menu action
   stays disabled until there is a real handler.
-- `src/document.rs` decodes raster files, applies EXIF orientation, edits
-  full-resolution RGBA pixels, and builds a bounded BGRA preview for GPUI.
+- `src/document.rs` decodes and saves raster files and prepares the
+  full-resolution composite and bounded BGRA preview for GPUI.
+- `src/document/content.rs` owns the canvas dimensions and raster layer stack.
+  It handles crop and layer-local bucket fill. `src/document/composite.rs`
+  blends visible layers for display, sampling, and raster output.
 - `src/project.rs` reads and writes the versioned ImageEdit project container.
 - `src/workspace.rs` owns tabs, view state, and background open and edit jobs.
   The canonical path identifies an already open file.

@@ -2,7 +2,7 @@ use gpui::{Bounds, Context, MouseButton, MouseUpEvent, Pixels, Point, Window, po
 
 use super::{CropDrag, Tab, Workspace};
 use crate::commands::Zoom;
-use crate::document::{CropRect, bucket_fill, solid_color};
+use crate::document::{CropRect, solid_color};
 
 impl Workspace {
     pub(super) fn step_zoom(
@@ -151,14 +151,7 @@ impl Workspace {
             return;
         };
         self.crop_drag = None;
-        self.edit_pixels(
-            true,
-            move |pixels| {
-                (pixels.dimensions() != (crop.width, crop.height)).then(|| crop.extract(pixels))
-            },
-            window,
-            cx,
-        );
+        self.edit_content(true, move |content| content.crop(crop), window, cx);
         cx.notify();
     }
 
@@ -171,10 +164,13 @@ impl Workspace {
         let Some((x, y)) = self.canvas_pixel(position, window.scale_factor(), false) else {
             return;
         };
+        let Some(layer) = self.active_tab().map(|tab| tab.active_layer) else {
+            return;
+        };
         let color = solid_color(self.colors[0]);
-        self.edit_pixels(
+        self.edit_content(
             false,
-            move |pixels| bucket_fill(pixels, x, y, color),
+            move |content| content.fill(layer, x, y, color),
             window,
             cx,
         );
@@ -190,7 +186,7 @@ impl Workspace {
             return;
         };
         if let Some(document) = self.active_document() {
-            let [r, g, b, alpha] = document.pixels.get_pixel(x, y).0;
+            let [r, g, b, alpha] = document.canvas.pixels.get_pixel(x, y).0;
             if alpha > 0 {
                 self.set_color(0, u32::from_be_bytes([0, r, g, b]));
                 cx.notify();

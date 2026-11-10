@@ -166,10 +166,9 @@ impl Workspace {
 
         let tab = &mut self.tabs[index];
         tab.saving = Some(path.clone());
-        let pixels = tab.document.pixels.clone();
-        let layer_name = tab.document.layer_name.clone();
+        let content = tab.document.content.clone();
         let job = cx.background_executor().spawn(async move {
-            let result = save_image(&pixels, &layer_name, &path, format);
+            let result = save_image(&content, &path, format);
             (path, result)
         });
         cx.spawn_in(window, async move |workspace, cx| {

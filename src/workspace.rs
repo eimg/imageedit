@@ -9,10 +9,9 @@ use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{Bounds, Context, FocusHandle, Pixels, Point, ScrollHandle, Window};
-use image::RgbaImage;
 
 use crate::commands::{Tool, Zoom};
-use crate::document::{CropRect, Document, file_name, render_preview};
+use crate::document::{CropRect, Document, DocumentContent, LayerId, RenderedCanvas, file_name};
 
 use self::{cursor::CanvasCursor, dialogs::Form};
 
@@ -22,6 +21,7 @@ const RECENT_COLOR_LIMIT: usize = 12;
 struct Tab {
     id: usize,
     document: Document,
+    active_layer: LayerId,
     zoom: Zoom,
     pan: Point<Pixels>,
     dirty: bool,
@@ -159,7 +159,7 @@ impl Workspace {
             if let Some(index) = self.tabs.iter().position(|tab| {
                 tab.document.path.as_ref() == Some(path) || tab.saving.as_ref() == Some(path)
             }) {
-                cx.drop_image(document.preview.image, Some(window));
+                cx.drop_image(document.canvas.preview.image, Some(window));
                 self.select_tab(index, window, cx);
                 return;
             }
@@ -167,6 +167,7 @@ impl Workspace {
         }
         self.tabs.push(Tab {
             id: self.next_id,
+            active_layer: document.content.top_layer_id(),
             document,
             zoom: Zoom::default(),
             pan: Point::default(),
@@ -215,7 +216,7 @@ impl Workspace {
             self.clear_crop();
         }
         let removed = self.tabs.remove(index);
-        cx.drop_image(removed.document.preview.image, Some(window));
+        cx.drop_image(removed.document.canvas.preview.image, Some(window));
 
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
@@ -235,10 +236,10 @@ impl Workspace {
         self.crop_drag = None;
     }
 
-    fn edit_pixels(
+    fn edit_content(
         &mut self,
         reset_view: bool,
-        edit: impl FnOnce(&RgbaImage) -> Option<RgbaImage> + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent) -> bool + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -250,11 +251,12 @@ impl Workspace {
         }
         tab.editing = true;
         let id = tab.id;
-        let source = tab.document.pixels.clone();
+        let mut content = tab.document.content.clone();
         let job = cx.background_executor().spawn(async move {
-            let pixels = edit(&source)?;
-            let preview = render_preview(&pixels);
-            Some((pixels, preview))
+            edit(&mut content).then(|| {
+                let canvas = RenderedCanvas::new(&content);
+                (content, canvas)
+            })
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
@@ -264,10 +266,13 @@ impl Workspace {
                 };
                 let tab = &mut workspace.tabs[index];
                 tab.editing = false;
-                if let Some((pixels, preview)) = result {
-                    tab.document.pixels = pixels.into();
-                    let old = std::mem::replace(&mut tab.document.preview, preview);
-                    cx.drop_image(old.image, Some(window));
+                if let Some((content, canvas)) = result {
+                    if content.layer(tab.active_layer).is_none() {
+                        tab.active_layer = content.top_layer_id();
+                    }
+                    tab.document.content = content;
+                    let old = std::mem::replace(&mut tab.document.canvas, canvas);
+                    cx.drop_image(old.preview.image, Some(window));
                     tab.dirty = true;
                     if reset_view {
                         tab.pan = Point::default();

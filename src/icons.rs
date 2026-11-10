@@ -13,7 +13,7 @@ impl AssetSource for Icons {
             "image" => {
                 r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m3 17 5-5 3 3 4-5 6 7"/>"#
             }
-            "crop" => r#"<path d="M7 3v14h14M3 7h14v14M17 7l4-4"/>"#,
+            "crop" => r#"<path d="M7 3v14h14M3 7h14v14"/>"#,
             "hand" => {
                 r#"<path d="M8 12V6a1.5 1.5 0 0 1 3 0v4-6a1.5 1.5 0 0 1 3 0v6-5a1.5 1.5 0 0 1 3 0v6-3a1.5 1.5 0 0 1 3 0v7a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7l-4-5.8a1.6 1.6 0 0 1 2.5-2L8 12Z"/>"#
             }
@@ -21,7 +21,7 @@ impl AssetSource for Icons {
                 r#"<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5.5 5.5M7 10h6m-3-3v6"/>"#
             }
             "eyedropper" => {
-                r#"<path d="m13 7 4 4m-2-6 2-2a2 2 0 0 1 3 3l-2 2 1 1-3 3-2-2-8 8-4 1 1-4 8-8-2-2 3-3 3 3Z"/>"#
+                r#"<path d="M13 7l3.5-3.5a2.83 2.83 0 0 1 4 4L17 11l1.5 1.5-2 2-7-7 2-2L13 7Z"/><path d="m11.5 9.5-7 7L3 21l4.5-1.5 7-7"/>"#
             }
             "eye" => {
                 r#"<path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>"#
@@ -69,6 +69,7 @@ impl AssetSource for Icons {
             "swap" => r#"<path d="M3 8h18m-4-4 4 4-4 4m4 4H3m4-4-4 4 4 4"/>"#,
             "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
             "info" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>"#,
+            "loading" => r#"<path d="M12 3a9 9 0 1 1-9 9"/>"#,
             _ => return Ok(None),
         };
         Ok(Some(Cow::Owned(format!(
