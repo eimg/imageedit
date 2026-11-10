@@ -446,8 +446,11 @@ fn clip_layer(
         for x in min_x..=max_x {
             let canvas_x = origin_x + i64::from(x);
             let canvas_y = origin_y + i64::from(y);
-            if selection.covers(canvas_x, canvas_y, canvas.0, canvas.1) {
-                image.put_pixel(x - min_x, y - min_y, *pixels.get_pixel(x, y));
+            let coverage = selection.coverage(canvas_x, canvas_y, canvas.0, canvas.1);
+            if coverage > 0 {
+                let mut pixel = *pixels.get_pixel(x, y);
+                pixel[3] = crate::selection::apply_coverage(pixel[3], coverage);
+                image.put_pixel(x - min_x, y - min_y, pixel);
             }
         }
     }
@@ -557,6 +560,14 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn copied_feathered_pixels_keep_their_color_and_use_the_mask_alpha() {
+        let pixels = RgbaImage::from_pixel(3, 3, Rgba([10, 20, 30, 128]));
+        let mask = Selection::rectangle((1, 1), (1, 1), 3, 3).feather(1, 3, 3);
+        let clipped = clip_layer((0, 0), &pixels, mask, (3, 3)).unwrap();
+        assert_eq!(clipped.get_pixel(1, 1).0, [10, 20, 30, 14]);
     }
 
     #[test]

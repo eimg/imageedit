@@ -48,8 +48,9 @@ document is a single plain layer.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
 a rectangle, the inverse of a rectangle, or a canvas-bounded coverage mask.
 `src/workspace/selection.rs` drags the rectangle, resizes it from its handles,
-moves it from inside, and clears it on a click outside. Free Select draws a
-freehand or clicked polygon, and the Magic Wand shares the bucket tolerance.
+moves it from inside, and clears it on a click outside. Free Select previews
+the freehand path or the polygon's next edge. The Magic Wand shares the
+bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
 Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
 painted crosshair gives way to a hand or resize cursor. The outline is a
 dashed contour.

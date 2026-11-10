@@ -50,8 +50,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   deselect. The dashes move along the outline. The pointer becomes a resize
   arrow on a handle and a hand inside the box. Select All, Deselect, and Invert
   are in the Select menu and in the Select tool options.
-  **Free Select** (`F`) draws a freehand outline or a clicked polygon. Escape
-  drops an unfinished outline, and Return closes a polygon. **Magic Wand**
+  **Free Select** (`F`) has two modes. In Freehand, drag and release to close
+  the outline. In Polygon, click to place vertices, then click the start marker
+  or press Return to close it. Escape cancels either draft. **Magic Wand**
   (`U`) selects a connected region. Its tolerance is shared with Bucket Fill:
   zero matches every channel exactly, and a higher value allows that much
   difference in the most changed channel. Hold Shift to add, Control to

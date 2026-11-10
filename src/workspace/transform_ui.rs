@@ -155,33 +155,10 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| {
                 let old = content.size();
-                let previous = selection.clone();
                 let Some(delta) = content.resize_canvas(width, height, anchor) else {
                     return Dirty::None;
                 };
-                if matches!(previous, Selection::Mask(_)) {
-                    let (dx, dy) = delta;
-                    *selection =
-                        previous.map_mask(content.size().0, content.size().1, move |x, y| {
-                            (x + dx, y + dy)
-                        });
-                    return Dirty::Canvas;
-                }
-                let source = match previous {
-                    Selection::Full => crate::preview::PixelRect::new(0, 0, old.0, old.1),
-                    Selection::Rect(rect) | Selection::Inverse(rect) => rect,
-                    other => {
-                        *selection = other;
-                        return Dirty::Canvas;
-                    }
-                };
-                let mapped = transform::translate_rect(source, delta);
-                let kind = if matches!(previous, Selection::Inverse(_)) {
-                    previous
-                } else {
-                    Selection::Rect(mapped)
-                };
-                *selection = kind.moved_box(mapped, content.size().0, content.size().1);
+                *selection = selection.clone().resize_canvas(old, content.size(), delta);
                 Dirty::Canvas
             },
             window,

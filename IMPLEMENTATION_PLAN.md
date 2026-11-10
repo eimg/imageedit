@@ -2,6 +2,15 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
+## P10–P12 follow-up
+
+Reviewed the three passes from the P12 checkout (`fd11be3`).
+
+- Free Select draws diagonal segments along the pointer path. Freehand includes the release point. Polygon previews the next edge and closes by clicking near its start marker or pressing Return. The click target stays the same size at every zoom. Drafts cancel on tab or tool changes, and outlines that cover no pixel leave the current selection in place.
+- Modified rectangle drags combine on release. Polygon, Magic Wand, and mask edits run on the background executor. Dense contours are cached, and undo limits count both mask coverage and cached contours. Bucket Fill tracks visited source pixels so it finishes even when the replacement color falls within tolerance.
+- Copy and Cut apply feather coverage to the clipboard image. Fill and Clear apply it to the edited pixels. Canvas Size translates an inverted selection within the old canvas area, leaving added space outside the selection.
+- Formatting, Clippy, and 93 locked tests passed. The macOS bundle passed strict signature verification. Native Free Select gestures and cross-app clipboard checks remain for the interactive pass.
+
 ## Latest handoff · P12
 
 P12 adds free select, the magic wand, and mask editing on branch `p12-selection`, which starts from P11.

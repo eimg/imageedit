@@ -7,8 +7,8 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, ContentMask, Context, Corners, CursorStyle, Div,
-    ExternalPaths, MouseButton, Pixels, Point, Transformation, TransformationMatrix, Window,
-    canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba, size, svg,
+    ExternalPaths, MouseButton, PathBuilder, Pixels, Point, Transformation, TransformationMatrix,
+    Window, canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba, size, svg,
 };
 
 use crate::commands::{
@@ -66,7 +66,6 @@ impl Render for Workspace {
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;
-                        this.free_points.clear();
                         this.pan_drag = None;
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
@@ -151,9 +150,17 @@ impl Render for Workspace {
                             .on_action(cx.listener(|this, _: &CancelFreeSelect, _, cx| {
                                 this.cancel_free(cx);
                             }))
-                            .on_action(cx.listener(|this, _: &CloseFreeSelect, window, cx| {
-                                this.close_free(window, cx);
-                            }))
+                            .when(
+                                self.free_mode == super::selection::FreeMode::Polygon
+                                    && self.free_points.len() >= 3,
+                                |root| {
+                                    root.on_action(cx.listener(
+                                        |this, _: &CloseFreeSelect, window, cx| {
+                                            this.close_free(window, cx);
+                                        },
+                                    ))
+                                },
+                            )
                     })
                 },
             )
@@ -614,6 +621,7 @@ impl Workspace {
                             show_handles: self.tool == Tool::Select,
                             move_layer: self.move_paint(),
                             free_path: self.free_points.clone(),
+                            polygon: self.free_mode == super::selection::FreeMode::Polygon,
                         },
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
@@ -1252,7 +1260,8 @@ struct CanvasDecorations {
     selection: crate::selection::Selection,
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
-    free_path: Vec<(i32, i32)>,
+    free_path: Vec<Point<f32>>,
+    polygon: bool,
 }
 
 fn image_preview(
@@ -1268,6 +1277,7 @@ fn image_preview(
         show_handles,
         move_layer,
         free_path,
+        polygon,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
@@ -1278,9 +1288,8 @@ fn image_preview(
     let zoom = tab.zoom;
     let pan = tab.pan;
     let contours = selection.contours(width, height);
-    let mask_edges = selection.outline_edges();
     let handle_rect = show_handles
-        .then(|| super::selection::adjustable_rect(selection))
+        .then(|| super::selection::adjustable_rect(selection.clone()))
         .flatten();
 
     canvas(
@@ -1350,15 +1359,15 @@ fn image_preview(
                 }
             }
             paint_contours(window, &geometry, width, height, visible, &contours);
-            paint_segments(window, &geometry, width, height, visible, &mask_edges);
             paint_segments(
                 window,
                 &geometry,
                 width,
                 height,
                 visible,
-                &free_segments(&free_path),
+                selection.outline_edges(),
             );
+            paint_free_outline(window, &geometry, viewport, &free_path, polygon);
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
             }
@@ -1550,17 +1559,50 @@ fn selection_button(
         })
 }
 
-fn free_segments(points: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
-    let mut segments = Vec::new();
-    for pair in points.windows(2) {
-        segments.push((pair[0].0, pair[0].1, pair[1].0, pair[1].1));
-    }
-    if points.len() >= 3 {
-        let last = points[points.len() - 1];
-        let first = points[0];
-        segments.push((last.0, last.1, first.0, first.1));
-    }
-    segments
+fn paint_free_outline(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    viewport: Bounds<Pixels>,
+    points: &[Point<f32>],
+    polygon: bool,
+) {
+    let Some(first) = points.first().map(|point| geometry.project(*point)) else {
+        return;
+    };
+    let pointer = window.mouse_position();
+    let can_close = polygon && points.len() >= 3;
+    let near_start = can_close && super::selection::near_polygon_start(first, pointer);
+    let tail = (polygon && viewport.contains(&pointer)).then_some(if near_start {
+        first
+    } else {
+        pointer
+    });
+
+    window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+        for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
+            let mut path = PathBuilder::stroke(px(weight));
+            path.move_to(first);
+            for point in &points[1..] {
+                path.line_to(geometry.project(*point));
+            }
+            if let Some(tail) = tail {
+                path.line_to(tail);
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        if polygon {
+            window.paint_quad(fill(
+                Bounds::centered_at(first, size(px(8.), px(8.))),
+                rgb(0x12151c),
+            ));
+            window.paint_quad(fill(
+                Bounds::centered_at(first, size(px(6.), px(6.))),
+                rgb(if near_start { ACCENT } else { 0xffffff }),
+            ));
+        }
+    });
 }
 
 fn paint_segments(
@@ -1581,7 +1623,7 @@ fn paint_segments(
         let from = geometry.project(point(x0 as f32 / width as f32, y0 as f32 / height as f32));
         let to = geometry.project(point(x1 as f32 / width as f32, y1 as f32 / height as f32));
         paint_marching_span(window, from, to, phase, distance, visible);
-        distance += (x1 - x0).abs() as f32 + (y1 - y0).abs() as f32;
+        distance += f32::from((to.x - from.x).abs() + (to.y - from.y).abs());
     }
     window.request_animation_frame();
 }

@@ -99,7 +99,7 @@ pub struct Workspace {
     selection_preview: Option<Selection>,
     tolerance: u8,
     free_mode: selection::FreeMode,
-    free_points: Vec<(i32, i32)>,
+    free_points: Vec<Point<f32>>,
     free_op: crate::selection::SelectionOp,
     move_drag: Option<layers::MoveDrag>,
     move_overlay: Option<layers::MovePaint>,
@@ -360,6 +360,7 @@ impl Workspace {
         if tab.busy() {
             return;
         }
+        self.free_points.clear();
         let target = match change {
             Change::Edit | Change::Selection => None,
             Change::Undo => tab.history.undo_target(),
@@ -384,6 +385,9 @@ impl Workspace {
             } else {
                 edit(&mut content, &mut active_layer, &mut selection)
             };
+            if dirty != Dirty::None {
+                selection.outline_edges();
+            }
             RenderedCanvas::prepare_patch(&pixels, has_transparency, levels, &content, dirty)
                 .map(|patch| (content, active_layer, selection, patch))
         });
@@ -465,11 +469,11 @@ impl Workspace {
         let replaced = tab.document.canvas.apply(patch);
         drop_images(replaced, window, cx);
         tab.history
-            .enforce_tab_limits(&tab.document.content, &LIMITS);
+            .enforce_tab_limits(&tab.document.content, &tab.selection, &LIMITS);
         history::enforce_app_budget(
             self.tabs
                 .iter_mut()
-                .map(|tab| (&mut tab.history, &tab.document.content)),
+                .map(|tab| (&mut tab.history, &tab.document.content, &tab.selection)),
             &LIMITS,
         );
         self.update_title(window);

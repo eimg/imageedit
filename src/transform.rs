@@ -184,15 +184,6 @@ pub fn mirror_rect(rect: PixelRect, canvas: (u32, u32), mirror: Mirror) -> Pixel
     PixelRect::new(nx, ny, rect.width, rect.height)
 }
 
-pub fn translate_rect(rect: PixelRect, delta: (i32, i32)) -> PixelRect {
-    PixelRect::new(
-        rect.x + i64::from(delta.0),
-        rect.y + i64::from(delta.1),
-        rect.width,
-        rect.height,
-    )
-}
-
 pub fn scale_rect(rect: PixelRect, old: (u32, u32), new: (u32, u32)) -> PixelRect {
     let (x, width) = scale_span(rect.x, rect.width, old.0, new.0);
     let (y, height) = scale_span(rect.y, rect.height, old.1, new.1);

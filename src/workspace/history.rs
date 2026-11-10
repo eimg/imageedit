@@ -126,29 +126,42 @@ impl History {
         entry.state
     }
 
-    pub fn enforce_tab_limits(&mut self, current: &DocumentContent, limits: &Limits) {
+    pub fn enforce_tab_limits(
+        &mut self,
+        current: &DocumentContent,
+        selection: &Selection,
+        limits: &Limits,
+    ) {
         while self.undo.len() + self.redo.len() > limits.entries && self.evict_oldest() {}
-        while self.retained_bytes(current) > limits.tab_bytes && self.evict_oldest() {}
+        while self.retained_bytes(current, selection) > limits.tab_bytes && self.evict_oldest() {}
     }
 
     // Counts pixel buffers that only history keeps alive, charging each shared buffer once.
-    pub fn retained_bytes(&self, current: &DocumentContent) -> u64 {
+    pub fn retained_bytes(&self, current: &DocumentContent, selection: &Selection) -> u64 {
         let live: HashSet<*const RgbaImage> = current
             .layers()
             .iter()
             .map(|layer| Arc::as_ptr(&layer.pixels))
             .collect();
         let mut seen = HashSet::new();
-        self.undo
-            .iter()
-            .chain(&self.redo)
+        let entries = || self.undo.iter().chain(&self.redo);
+        let layer_bytes: u64 = entries()
             .flat_map(|entry| entry.state.content.layers())
             .filter(|layer| {
                 let pixels = Arc::as_ptr(&layer.pixels);
                 !live.contains(&pixels) && seen.insert(pixels)
             })
             .map(|layer| layer.pixels.as_raw().len() as u64)
-            .sum()
+            .sum();
+        let mut seen_masks = HashSet::new();
+        if let Some((pixels, _)) = selection.mask_storage() {
+            seen_masks.insert(pixels);
+        }
+        let mask_bytes: u64 = entries()
+            .filter_map(|entry| entry.state.selection.mask_storage())
+            .filter_map(|(pixels, bytes)| seen_masks.insert(pixels).then_some(bytes))
+            .sum();
+        layer_bytes + mask_bytes
     }
 
     fn oldest_stamp(&self) -> Option<u64> {
@@ -175,22 +188,22 @@ impl History {
 }
 
 pub(super) fn enforce_app_budget<'a>(
-    histories: impl IntoIterator<Item = (&'a mut History, &'a DocumentContent)>,
+    histories: impl IntoIterator<Item = (&'a mut History, &'a DocumentContent, &'a Selection)>,
     limits: &Limits,
 ) {
     let mut histories: Vec<_> = histories.into_iter().collect();
     loop {
         let total: u64 = histories
             .iter()
-            .map(|(history, current)| history.retained_bytes(current))
+            .map(|(history, current, selection)| history.retained_bytes(current, selection))
             .sum();
         if total <= limits.app_bytes {
             return;
         }
-        let Some((history, _)) = histories
+        let Some((history, _, _)) = histories
             .iter_mut()
-            .filter(|(history, _)| history.oldest_stamp().is_some())
-            .min_by_key(|(history, _)| history.oldest_stamp())
+            .filter(|(history, _, _)| history.oldest_stamp().is_some())
+            .min_by_key(|(history, _, _)| history.oldest_stamp())
         else {
             return;
         };
@@ -237,8 +250,11 @@ mod tests {
                 let previous = std::mem::replace(&mut self.current, next);
                 let stamp = self.tick();
                 self.history.commit(previous, stamp, true);
-                self.history
-                    .enforce_tab_limits(&self.current.content, limits);
+                self.history.enforce_tab_limits(
+                    &self.current.content,
+                    &self.current.selection,
+                    limits,
+                );
             }
         }
 
@@ -381,7 +397,12 @@ mod tests {
         let shared = session.current.clone();
         session.history.commit(shared.clone(), 1, true);
         session.history.commit(shared, 2, true);
-        assert_eq!(session.history.retained_bytes(&session.current.content), 0);
+        assert_eq!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &session.current.selection),
+            0
+        );
 
         let limits = Limits {
             tab_bytes: 32,
@@ -391,7 +412,12 @@ mod tests {
         for color in 1..=4 {
             session.fill(color, &limits);
         }
-        assert_eq!(session.history.retained_bytes(&session.current.content), 32);
+        assert_eq!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &session.current.selection),
+            32
+        );
         let mut undone = 0;
         while session.undo() {
             undone += 1;
@@ -409,6 +435,28 @@ mod tests {
     }
 
     #[test]
+    fn history_charges_a_shared_selection_mask_once() {
+        let mut session = Session::new(true, 4);
+        let mut snapshot = session.current.clone();
+        snapshot.selection = Selection::rectangle((1, 1), (1, 1), 4, 4).feather(1, 4, 4);
+        let bytes = snapshot.selection.mask_storage().unwrap().1;
+        session.history.commit(snapshot.clone(), 1, false);
+        session.history.commit(snapshot.clone(), 2, false);
+        assert_eq!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &session.current.selection),
+            bytes
+        );
+        assert_eq!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &snapshot.selection),
+            0
+        );
+    }
+
+    #[test]
     fn app_budget_evicts_the_oldest_entry_across_tabs() {
         let limits = Limits {
             app_bytes: 32,
@@ -422,13 +470,31 @@ mod tests {
         first.fill(3, &LIMITS);
         enforce_app_budget(
             [
-                (&mut first.history, &first.current.content),
-                (&mut second.history, &second.current.content),
+                (
+                    &mut first.history,
+                    &first.current.content,
+                    &first.current.selection,
+                ),
+                (
+                    &mut second.history,
+                    &second.current.content,
+                    &second.current.selection,
+                ),
             ],
             &limits,
         );
-        assert_eq!(first.history.retained_bytes(&first.current.content), 16);
-        assert_eq!(second.history.retained_bytes(&second.current.content), 16);
+        assert_eq!(
+            first
+                .history
+                .retained_bytes(&first.current.content, &first.current.selection),
+            16
+        );
+        assert_eq!(
+            second
+                .history
+                .retained_bytes(&second.current.content, &second.current.selection),
+            16
+        );
         assert!(first.undo());
         assert_eq!(first.pixel(), [1, 0, 0, 255]);
         assert!(!first.undo());

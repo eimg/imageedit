@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use image::{Rgba, RgbaImage};
 
@@ -30,14 +30,26 @@ pub enum SelectionOp {
 }
 
 // Coverage is 0 or 255 for a hard mask. Feather stores the values between.
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub type MaskEdge = (i32, i32, i32, i32);
+
+#[derive(Clone, Debug)]
 pub struct Mask {
     x: i32,
     y: i32,
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+    outline: Arc<OnceLock<Vec<MaskEdge>>>,
 }
+
+impl PartialEq for Mask {
+    fn eq(&self, other: &Self) -> bool {
+        self.bounds() == other.bounds()
+            && (Arc::ptr_eq(&self.pixels, &other.pixels) || self.pixels == other.pixels)
+    }
+}
+
+impl Eq for Mask {}
 
 impl Selection {
     pub fn rectangle(start: (u32, u32), end: (u32, u32), width: u32, height: u32) -> Self {
@@ -136,6 +148,24 @@ impl Selection {
         }
     }
 
+    pub fn resize_canvas(self, old: (u32, u32), new: (u32, u32), delta: (i32, i32)) -> Self {
+        let (dx, dy) = (i64::from(delta.0), i64::from(delta.1));
+        let translated_canvas =
+            || Self::from_rect(PixelRect::new(dx, dy, old.0, old.1), new.0, new.1);
+        match self {
+            Self::Full => translated_canvas(),
+            Self::Rect(rect) => Self::from_rect(translate(rect, dx, dy), new.0, new.1),
+            Self::Inverse(hole) => translated_canvas().combine(
+                Self::from_rect(translate(hole, dx, dy), new.0, new.1),
+                SelectionOp::Subtract,
+                new.0,
+                new.1,
+            ),
+            Self::Mask(mask) => mask.translated(dx, dy, new.0, new.1),
+            other => other,
+        }
+    }
+
     pub fn contours(&self, width: u32, height: u32) -> Vec<PixelRect> {
         match self {
             Self::Unrestricted | Self::Empty => Vec::new(),
@@ -146,11 +176,24 @@ impl Selection {
         }
     }
 
+    pub(crate) fn mask_storage(&self) -> Option<(*const u8, u64)> {
+        let Self::Mask(mask) = self else {
+            return None;
+        };
+        let outline_bytes = mask.outline.get().map_or(0, |edges| {
+            edges.capacity() as u64 * std::mem::size_of::<MaskEdge>() as u64
+        });
+        Some((
+            mask.pixels.as_ptr(),
+            mask.pixels.len() as u64 + outline_bytes,
+        ))
+    }
+
     // Boundary segments of a dense mask, in canvas pixels. Each segment is (x0, y0, x1, y1).
-    pub fn outline_edges(&self) -> Vec<(i32, i32, i32, i32)> {
+    pub fn outline_edges(&self) -> &[MaskEdge] {
         match self {
-            Self::Mask(mask) => mask.outline(),
-            _ => Vec::new(),
+            Self::Mask(mask) => mask.outline.get_or_init(|| mask.outline()),
+            _ => &[],
         }
     }
 
@@ -204,7 +247,7 @@ impl Selection {
         }
     }
 
-    pub fn polygon(points: &[(i32, i32)], width: u32, height: u32) -> Self {
+    pub fn polygon(points: &[(f64, f64)], width: u32, height: u32) -> Self {
         polygon_selection(points, width, height)
     }
 
@@ -330,7 +373,13 @@ impl Mask {
 
     fn outline(&self) -> Vec<(i32, i32, i32, i32)> {
         let mut edges = Vec::new();
-        let selected = |x: i32, y: i32| self.coverage(x, y) >= 128;
+        // A small feathered selection can have no pixel at half coverage.
+        let threshold = if self.pixels.iter().any(|&value| value >= 128) {
+            128
+        } else {
+            1
+        };
+        let selected = |x: i32, y: i32| self.coverage(x, y) >= threshold;
         for y in 0..self.height as i32 {
             let canvas_y = self.y + y;
             coalesce(self.x, self.width, |x| {
@@ -531,38 +580,35 @@ fn union_rect(left: PixelRect, right: PixelRect) -> PixelRect {
     PixelRect::new(x, y, (right_edge - x) as u32, (bottom - y) as u32)
 }
 
-fn polygon_selection(points: &[(i32, i32)], width: u32, height: u32) -> Selection {
+fn polygon_selection(points: &[(f64, f64)], width: u32, height: u32) -> Selection {
     if points.len() < 3 || width == 0 || height == 0 {
         return Selection::Empty;
     }
-    let vertices: Vec<(f64, f64)> = points
-        .iter()
-        .map(|(x, y)| (f64::from(*x) + 0.5, f64::from(*y) + 0.5))
-        .collect();
-    let min_x = points.iter().map(|point| point.0).min().unwrap_or(0).max(0);
-    let max_x = points
-        .iter()
-        .map(|point| point.0)
-        .max()
-        .unwrap_or(0)
-        .min(width as i32 - 1);
-    let min_y = points.iter().map(|point| point.1).min().unwrap_or(0).max(0);
-    let max_y = points
-        .iter()
-        .map(|point| point.1)
-        .max()
-        .unwrap_or(0)
-        .min(height as i32 - 1);
-    if min_x > max_x || min_y > max_y {
+    let scan_edge =
+        |value: f64, limit: u32| (value - 0.5).ceil().clamp(0., f64::from(limit)) as i32;
+    let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+    let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in points {
+        if !x.is_finite() || !y.is_finite() {
+            return Selection::Empty;
+        }
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let (min_x, max_x) = (scan_edge(min_x, width), scan_edge(max_x, width));
+    let (min_y, max_y) = (scan_edge(min_y, height), scan_edge(max_y, height));
+    if min_x >= max_x || min_y >= max_y {
         return Selection::Empty;
     }
-    let buf_w = (max_x - min_x + 1) as u32;
-    let buf_h = (max_y - min_y + 1) as u32;
+    let buf_w = (max_x - min_x) as u32;
+    let buf_h = (max_y - min_y) as u32;
     let mut pixels = vec![0u8; buf_w as usize * buf_h as usize];
     let mut edges = Vec::new();
-    for index in 0..vertices.len() {
-        let (x0, y0) = vertices[index];
-        let (x1, y1) = vertices[(index + 1) % vertices.len()];
+    for index in 0..points.len() {
+        let (x0, y0) = points[index];
+        let (x1, y1) = points[(index + 1) % points.len()];
         if (y1 - y0).abs() < 1e-9 {
             continue;
         }
@@ -573,9 +619,10 @@ fn polygon_selection(points: &[(i32, i32)], width: u32, height: u32) -> Selectio
             edges.push((y1, y0, x1, x0, dir));
         }
     }
-    for y in min_y..=max_y {
+    let mut hits = Vec::new();
+    for y in min_y..max_y {
         let scan = f64::from(y) + 0.5;
-        let mut hits = Vec::new();
+        hits.clear();
         for &(y0, y1, x0, x1, dir) in &edges {
             if scan >= y0 && scan < y1 {
                 let t = (scan - y0) / (y1 - y0);
@@ -589,7 +636,7 @@ fn polygon_selection(points: &[(i32, i32)], width: u32, height: u32) -> Selectio
         });
         let mut wind = 0;
         let mut from = None;
-        for (x, dir) in hits {
+        for &(x, dir) in &hits {
             let next = wind + dir;
             if wind == 0 && next != 0 {
                 from = Some(x);
@@ -614,18 +661,11 @@ fn fill_span(
     left: f64,
     right: f64,
 ) {
-    let start = (left - 0.5).ceil() as i32;
-    let end = (right - 0.5).ceil() as i32;
-    let row = (y - origin_y) as u32;
-    for x in start..end {
-        if x < origin_x {
-            continue;
-        }
-        let column = (x - origin_x) as u32;
-        if column >= width {
-            break;
-        }
-        pixels[(row * width + column) as usize] = 255;
+    let start = ((left - 0.5).ceil() as i32).max(origin_x);
+    let end = ((right - 0.5).ceil() as i32).min(origin_x + width as i32);
+    if start < end {
+        let row = (y - origin_y) as usize * width as usize;
+        pixels[row + (start - origin_x) as usize..row + (end - origin_x) as usize].fill(255);
     }
 }
 
@@ -642,22 +682,27 @@ fn flood_selection(
     }
     let target = *image.get_pixel(x, y);
     let (width, height) = image.dimensions();
+    let Some(bounds) = clip(
+        PixelRect::new(i64::from(offset.0), i64::from(offset.1), width, height),
+        canvas.0,
+        canvas.1,
+    ) else {
+        return Selection::Empty;
+    };
+    let local_x = (bounds.x - i64::from(offset.0)) as u32;
+    let local_y = (bounds.y - i64::from(offset.1)) as u32;
+    let mut pixels = vec![0; bounds.width as usize * bounds.height as usize];
     let mut seen = vec![false; width as usize * height as usize];
     let mut stack = vec![(x, y)];
     seen[(y * width + x) as usize] = true;
-    let mut points = Vec::new();
     while let Some((px, py)) = stack.pop() {
         if !within_tolerance(*image.get_pixel(px, py), target, tolerance) {
             continue;
         }
-        let canvas_x = offset.0 + px as i32;
-        let canvas_y = offset.1 + py as i32;
-        if canvas_x >= 0
-            && canvas_y >= 0
-            && (canvas_x as u32) < canvas.0
-            && (canvas_y as u32) < canvas.1
+        if (local_x..local_x + bounds.width).contains(&px)
+            && (local_y..local_y + bounds.height).contains(&py)
         {
-            points.push((canvas_x, canvas_y, 255));
+            pixels[((py - local_y) * bounds.width + (px - local_x)) as usize] = 255;
         }
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let next_x = px as i32 + dx;
@@ -673,7 +718,19 @@ fn flood_selection(
             stack.push((next_x as u32, next_y as u32));
         }
     }
-    selection_from_points(&points, canvas.0, canvas.1)
+    finish_mask(
+        bounds.x as i32,
+        bounds.y as i32,
+        bounds.width,
+        bounds.height,
+        pixels,
+        canvas.0,
+        canvas.1,
+    )
+}
+
+pub(crate) fn apply_coverage(alpha: u8, coverage: u8) -> u8 {
+    ((u16::from(alpha) * u16::from(coverage) + 127) / 255) as u8
 }
 
 pub(crate) fn within_tolerance(pixel: Rgba<u8>, target: Rgba<u8>, tolerance: u8) -> bool {
@@ -872,6 +929,7 @@ fn finish_mask(
         width,
         height,
         pixels: pixels.into(),
+        outline: Arc::default(),
     })
 }
 
@@ -1011,8 +1069,18 @@ mod tests {
     }
 
     #[test]
+    fn an_inverse_selection_does_not_extend_into_new_canvas_space() {
+        let inverse = Selection::Inverse(PixelRect::new(1, 1, 1, 1));
+        let resized = inverse.resize_canvas((3, 3), (5, 5), (1, 1));
+        assert!(resized.covers(1, 1, 5, 5));
+        assert!(!resized.covers(2, 2, 5, 5));
+        assert!(!resized.covers(0, 0, 5, 5));
+        assert!(!resized.covers(4, 4, 5, 5));
+    }
+
+    #[test]
     fn polygon_winding_agrees_in_both_directions_and_clips_to_the_canvas() {
-        let clockwise = [(1, 1), (5, 1), (1, 5)];
+        let clockwise = [(1.5, 1.5), (5.5, 1.5), (1.5, 5.5)];
         let mut counter = clockwise;
         counter.reverse();
         let left = Selection::polygon(&clockwise, 8, 8);
@@ -1021,9 +1089,20 @@ mod tests {
         assert!(!left.covers(4, 4, 8, 8));
         assert_eq!(left.covers(2, 2, 8, 8), right.covers(2, 2, 8, 8));
         assert_eq!(left.covers(4, 4, 8, 8), right.covers(4, 4, 8, 8));
-        let clipped = Selection::polygon(&[(-2, 1), (2, 1), (2, -2)], 4, 4);
+        let clipped = Selection::polygon(&[(-1.5, 1.5), (2.5, 1.5), (2.5, -1.5)], 4, 4);
         assert!(clipped.covers(1, 0, 4, 4));
         assert!(!clipped.covers(3, 3, 4, 4));
+    }
+
+    #[test]
+    fn fractional_lasso_vertices_select_pixel_centers_and_clip_distant_edges() {
+        let outline = [(0.6, 0.6), (1.9, 0.6), (1.9, 1.9), (0.6, 1.9)];
+        assert_eq!(
+            Selection::polygon(&outline, 4, 4),
+            Selection::Rect(PixelRect::new(1, 1, 1, 1))
+        );
+        let outside = [(-1e12, -1e12), (4., -1e12), (4., 4.), (-1e12, 4.)];
+        assert_eq!(Selection::polygon(&outside, 4, 4), Selection::Full);
     }
 
     #[test]

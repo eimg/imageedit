@@ -518,8 +518,8 @@ impl DocumentContent {
         let origin_x = i64::from(layer.offset.0);
         let origin_y = i64::from(layer.offset.1);
         let canvas = (self.width, self.height);
-        let covers = |px: u32, py: u32| {
-            selection.covers(
+        let coverage = |px: u32, py: u32| {
+            selection.coverage(
                 origin_x + i64::from(px),
                 origin_y + i64::from(py),
                 canvas.0,
@@ -532,7 +532,7 @@ impl DocumentContent {
             local_y as u32,
             color,
             tolerance,
-            covers,
+            coverage,
         )?;
         layer.pixels = Arc::new(pixels);
         Some(PixelRect::new(
@@ -560,14 +560,23 @@ impl DocumentContent {
             for x in 0..width {
                 let canvas_x = origin_x + i64::from(x);
                 let canvas_y = origin_y + i64::from(y);
-                if !selection.covers(canvas_x, canvas_y, canvas.0, canvas.1) {
+                let coverage = selection.coverage(canvas_x, canvas_y, canvas.0, canvas.1);
+                if coverage == 0 {
                     continue;
                 }
-                if layer.pixels.get_pixel(x, y).0 == [0, 0, 0, 0] {
+                let before = *layer.pixels.get_pixel(x, y);
+                let after = if coverage == 255 {
+                    Rgba([0; 4])
+                } else {
+                    let mut pixel = before;
+                    pixel[3] = crate::selection::apply_coverage(pixel[3], 255 - coverage);
+                    pixel
+                };
+                if after == before {
                     continue;
                 }
                 let image = image.get_or_insert_with(|| layer.pixels.as_ref().clone());
-                image.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                image.put_pixel(x, y, after);
                 min_x = min_x.min(canvas_x);
                 min_y = min_y.min(canvas_y);
                 max_x = max_x.max(canvas_x);
@@ -1028,67 +1037,90 @@ fn bucket_fill(
     y: u32,
     color: Rgba<u8>,
     tolerance: u8,
-    covers: impl Fn(u32, u32) -> bool,
+    coverage: impl Fn(u32, u32) -> u8,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
     let target = *source.get_pixel(x, y);
-    if target == color || !covers(x, y) {
+    if (tolerance == 0 && target == color) || coverage(x, y) == 0 {
         return None;
     }
-    let mut image = source.clone();
-
-    // Paint runs as they are queued, so a pixel is never queued twice.
-    let height = image.height();
-    let mut pending = vec![paint_run(
-        &mut image, x, y, target, color, tolerance, &covers,
-    )];
+    let (width, height) = source.dimensions();
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    let mut visited = vec![false; width as usize * height as usize];
+    let mut pending = vec![(x, y)];
+    let mut image = None;
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
-    while let Some((left, right, y)) = pending.pop() {
-        min_x = min_x.min(left);
-        max_x = max_x.max(right);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
+    let paintable = |visited: &[bool], x, y| {
+        !visited[index(x, y)]
+            && within_tolerance(*source.get_pixel(x, y), target, tolerance)
+            && coverage(x, y) > 0
+    };
+
+    // Discover runs against the original pixels. A replacement can still match the target.
+    while let Some((x, y)) = pending.pop() {
+        if !paintable(&visited, x, y) {
+            continue;
+        }
+        let mut left = x;
+        let mut right = x;
+        while left > 0 && paintable(&visited, left - 1, y) {
+            left -= 1;
+        }
+        while right + 1 < width && paintable(&visited, right + 1, y) {
+            right += 1;
+        }
+        for x in left..=right {
+            visited[index(x, y)] = true;
+            let before = *source.get_pixel(x, y);
+            let after = mix_fill(before, color, coverage(x, y));
+            if before != after {
+                image
+                    .get_or_insert_with(|| source.clone())
+                    .put_pixel(x, y, after);
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
         for row in [y.checked_sub(1), (y + 1 < height).then_some(y + 1)]
             .into_iter()
             .flatten()
         {
-            let mut x = left;
-            while x <= right {
-                if within_tolerance(*image.get_pixel(x, row), target, tolerance) && covers(x, row) {
-                    let run = paint_run(&mut image, x, row, target, color, tolerance, &covers);
-                    x = run.1 + 1;
-                    pending.push(run);
-                } else {
-                    x += 1;
+            let mut in_run = false;
+            for x in left..=right {
+                let matches = paintable(&visited, x, row);
+                if matches && !in_run {
+                    pending.push((x, row));
                 }
+                in_run = matches;
             }
         }
     }
-    Some((image, min_x, min_y, max_x, max_y))
+    Some((image?, min_x, min_y, max_x, max_y))
 }
 
-fn paint_run(
-    image: &mut RgbaImage,
-    x: u32,
-    y: u32,
-    target: Rgba<u8>,
-    color: Rgba<u8>,
-    tolerance: u8,
-    covers: &impl Fn(u32, u32) -> bool,
-) -> (u32, u32, u32) {
-    let paintable =
-        |px: u32| within_tolerance(*image.get_pixel(px, y), target, tolerance) && covers(px, y);
-    let mut left = x;
-    let mut right = x;
-    while left > 0 && paintable(left - 1) {
-        left -= 1;
+fn mix_fill(before: Rgba<u8>, color: Rgba<u8>, coverage: u8) -> Rgba<u8> {
+    if coverage == 255 {
+        return color;
     }
-    while right + 1 < image.width() && paintable(right + 1) {
-        right += 1;
+    if before == color {
+        return before;
     }
-    for x in left..=right {
-        image.put_pixel(x, y, color);
+    // Interpolate in premultiplied color so a transparent pixel adds no color to a soft edge.
+    let old = u32::from(before[3]) * u32::from(255 - coverage);
+    let new = u32::from(color[3]) * u32::from(coverage);
+    let alpha = old + new;
+    if alpha == 0 {
+        return before;
     }
-    (left, right, y)
+    let channel =
+        |i| ((u32::from(before[i]) * old + u32::from(color[i]) * new + alpha / 2) / alpha) as u8;
+    Rgba([
+        channel(0),
+        channel(1),
+        channel(2),
+        ((alpha + 127) / 255) as u8,
+    ])
 }
 
 #[cfg(test)]
@@ -1347,6 +1379,31 @@ mod tests {
     }
 
     #[test]
+    fn fill_terminates_when_the_replacement_is_within_tolerance() {
+        let source = RgbaImage::from_pixel(3, 3, Rgba([0, 0, 0, 255]));
+        let color = Rgba([1, 0, 0, 255]);
+        let (filled, left, top, right, bottom) =
+            bucket_fill(&source, 1, 1, color, 1, |_, _| 255).unwrap();
+        assert_eq!((left, top, right, bottom), (0, 0, 2, 2));
+        assert!(filled.pixels().all(|pixel| *pixel == color));
+    }
+
+    #[test]
+    fn fill_and_clear_respect_feathered_coverage() {
+        let mut content = DocumentContent::single_layer("Image".into(), RgbaImage::new(3, 3));
+        let selection = Selection::rectangle((1, 1), (1, 1), 3, 3).feather(1, 3, 3);
+        let id = content.top_layer_id();
+        assert!(
+            content
+                .fill(id, 1, 1, Rgba([255, 0, 0, 255]), &selection, 0)
+                .is_some()
+        );
+        assert_eq!(content.layers[0].pixels.get_pixel(1, 1).0, [255, 0, 0, 28]);
+        assert!(content.clear(id, &selection).is_some());
+        assert_eq!(content.layers[0].pixels.get_pixel(1, 1).0, [255, 0, 0, 25]);
+    }
+
+    #[test]
     fn fill_does_not_cross_diagonal_or_different_alpha() {
         let blank = Rgba([0; 4]);
         let wall = Rgba([0, 0, 0, 255]);
@@ -1355,7 +1412,7 @@ mod tests {
         image.put_pixel(0, 0, blank);
         image.put_pixel(1, 1, blank);
         let (filled, left, top, right, bottom) =
-            bucket_fill(&image, 0, 0, ink, 0, |_, _| true).unwrap();
+            bucket_fill(&image, 0, 0, ink, 0, |_, _| 255).unwrap();
         assert_eq!((left, top, right, bottom), (0, 0, 0, 0));
         assert_eq!(filled.into_raw(), [ink.0, wall.0, wall.0, blank.0].concat());
     }
