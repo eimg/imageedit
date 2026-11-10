@@ -12,7 +12,9 @@ and the latest pass handoff.
 ## Current product scope
 
 ImageEdit supports layered raster editing. Open or create an image, crop it,
-sample or set swatches, and fill connected regions on the active layer. Each
+sample or set swatches, and fill connected regions on the active layer. Rectangle
+selection limits fill and Clear to Transparency, and Crop to Selection uses its
+bounds. Each
 tab can undo and redo crops, fills and layer changes, and undoing back to the
 saved state clears the unsaved marker. Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
@@ -34,6 +36,12 @@ Clipboard workflows are placeholders.
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
+- `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
+  a rectangle, or the inverse of a rectangle. `src/workspace/selection.rs`
+  drags the rectangle, resizes it from its handles, moves it from inside, and
+  clears it on a click outside. Over the box the painted crosshair gives way
+  to a hand or resize cursor. The outline is a dashed contour. Shift-add
+  waits for the mask in P12.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
   It handles crop and layer-local bucket fill. `src/document/composite.rs`
   blends visible layers for display, sampling, and raster output.

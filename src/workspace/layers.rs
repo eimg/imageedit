@@ -135,7 +135,7 @@ impl Workspace {
             LayerCommand::Rename => self.rename_layer_form(id, window, cx),
             LayerCommand::Opacity => self.layer_opacity_form(id, window, cx),
             LayerCommand::Duplicate => self.edit_content(
-                move |content, active| {
+                move |content, active, _| {
                     if let Some(copy) = content.duplicate_layer(id) {
                         *active = copy;
                         Dirty::Canvas
@@ -147,7 +147,7 @@ impl Workspace {
                 cx,
             ),
             LayerCommand::Delete => self.edit_content(
-                move |content, active| {
+                move |content, active, _| {
                     if let Some(next) = content.delete_layer(id) {
                         *active = next;
                         Dirty::Canvas
@@ -159,7 +159,7 @@ impl Workspace {
                 cx,
             ),
             LayerCommand::MergeDown => self.edit_content(
-                move |content, active| {
+                move |content, active, _| {
                     if let Some(merged) = content.merge_down(id) {
                         *active = merged;
                         Dirty::Canvas
@@ -171,7 +171,7 @@ impl Workspace {
                 cx,
             ),
             LayerCommand::ToggleVisibility => self.edit_content(
-                move |content, _| {
+                move |content, _, _| {
                     if content.set_visible(id, !visible) {
                         content.layer_dirty(id)
                     } else {
@@ -196,7 +196,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.edit_content(
-            move |content, _| {
+            move |content, _, _| {
                 if content.move_layer(id, index) {
                     Dirty::Canvas
                 } else {
@@ -229,7 +229,7 @@ impl Workspace {
             return;
         };
         self.edit_content(
-            move |content, _| {
+            move |content, _, _| {
                 if content.set_visible(id, !visible) {
                     content.layer_dirty(id)
                 } else {
@@ -263,7 +263,7 @@ impl Workspace {
     fn end_opacity_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((id, opacity)) = self.opacity_drag.take() {
             self.edit_content(
-                move |content, _| {
+                move |content, _, _| {
                     if content.set_opacity(id, opacity) {
                         content.layer_dirty(id)
                     } else {

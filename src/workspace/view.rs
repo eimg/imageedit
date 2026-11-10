@@ -8,9 +8,10 @@ use gpui::{
 
 use crate::commands::{
     ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ExportJpeg, ExportPng, ExportWebp,
-    ForegroundColor, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo,
-    ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS,
-    ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    ForegroundColor, InvertSelection, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
+    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
+    SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
+    ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -52,10 +53,12 @@ impl Render for Workspace {
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
                 let root = self.bind_layer_actions(root, cx);
+                let root = self.bind_selection_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, _, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;
                         this.pan_drag = None;
+                        this.clear_selection_gesture();
                         this.clear_crop();
                         cx.notify();
                     }
@@ -181,7 +184,11 @@ impl Render for Workspace {
                             .when(!self.errors.is_empty(), |area| {
                                 area.child(self.error_banner(cx))
                             })
-                            .child(self.canvas(interactive && window.is_window_hovered(), cx)),
+                            .child(self.canvas(
+                                interactive && window.is_window_hovered(),
+                                window.scale_factor(),
+                                cx,
+                            )),
                     )
                     .child(self.inspector(cx)),
             )
@@ -364,7 +371,7 @@ impl Workspace {
             }))
     }
 
-    fn canvas(&self, show_tool_cursor: bool, cx: &Context<Self>) -> impl IntoElement {
+    fn canvas(&self, show_tool_cursor: bool, scale: f32, cx: &Context<Self>) -> impl IntoElement {
         if !show_tool_cursor || self.active.is_none() {
             self.canvas_cursor.leave();
         }
@@ -433,6 +440,11 @@ impl Workspace {
                                 );
                                 if button == MouseButton::Left {
                                     this.extend_crop(event.position, window.scale_factor(), cx);
+                                    this.extend_selection(
+                                        event.position,
+                                        window.scale_factor(),
+                                        cx,
+                                    );
                                 }
                             }
                         }),
@@ -446,6 +458,14 @@ impl Workspace {
                             cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
                                 this.pan_drag = Some((event.button, event.position));
                                 cx.notify();
+                            }),
+                        )
+                    })
+                    .when(self.tool == Tool::Select && !tab.busy(), |area| {
+                        area.cursor(self.selection_cursor(scale)).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_selection(event.position, window.scale_factor(), cx);
                             }),
                         )
                     })
@@ -510,6 +530,8 @@ impl Workspace {
                         self.show_grid,
                         self.show_guides,
                         self.crop,
+                        self.selection_preview.unwrap_or(tab.selection),
+                        self.tool == Tool::Select,
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
                         if *hovered {
@@ -522,10 +544,19 @@ impl Workspace {
                         window.refresh();
                     }))
                     .when(show_tool_cursor, |area| {
-                        area.when(!cfg!(target_os = "macos"), |area| {
+                        // The painted crosshair hides the system pointer. A selection that can
+                        // be moved or resized needs that pointer, so the hand and arrows show.
+                        let drag_cursor = self.tool == Tool::Select
+                            && self.selection_cursor(scale) != CursorStyle::Crosshair;
+                        if drag_cursor {
+                            self.canvas_cursor.show_native(true);
+                        }
+                        area.when(!drag_cursor && !cfg!(target_os = "macos"), |area| {
                             area.cursor(CursorStyle::None)
                         })
-                        .child(tool_cursor(self.tool, self.canvas_cursor.clone()))
+                        .when(!drag_cursor, |area| {
+                            area.child(tool_cursor(self.tool, self.canvas_cursor.clone()))
+                        })
                     }),
                 None => area.child(dot_grid()).child(
                     div()
@@ -618,6 +649,31 @@ impl Workspace {
                                     .line_height(px(19.))
                                     .child(tool.description),
                             )
+                            .when(self.tool == Tool::Select, |panel| {
+                                let enabled = self.selection_command_enabled(
+                                    super::selection::SelectionCommand::None,
+                                );
+                                panel.child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(selection_button(
+                                            "Deselect",
+                                            enabled,
+                                            |window, cx| {
+                                                window.dispatch_action(Box::new(SelectNone), cx);
+                                            },
+                                        ))
+                                        .child(selection_button(
+                                            "Invert",
+                                            enabled,
+                                            |window, cx| {
+                                                window
+                                                    .dispatch_action(Box::new(InvertSelection), cx);
+                                            },
+                                        )),
+                                )
+                            })
                             .when_some(self.crop, |panel, crop| {
                                 panel
                                     .child(format!("{} × {} px", crop.width, crop.height))
@@ -645,6 +701,7 @@ impl Workspace {
                                         | Tool::Eyedropper
                                         | Tool::Crop
                                         | Tool::BucketFill
+                                        | Tool::Select
                                 ),
                                 |panel| {
                                     panel.child(
@@ -685,8 +742,19 @@ impl Workspace {
                     } else {
                         String::new()
                     };
+                    let selection = match tab.selection {
+                        crate::selection::Selection::Unrestricted => String::new(),
+                        crate::selection::Selection::Empty => "  ·  Empty selection".to_owned(),
+                        crate::selection::Selection::Full => "  ·  All pixels".to_owned(),
+                        crate::selection::Selection::Rect(rect) => {
+                            format!("  ·  Selection {} × {}", rect.width, rect.height)
+                        }
+                        crate::selection::Selection::Inverse(_) => {
+                            "  ·  Inverted selection".to_owned()
+                        }
+                    };
                     format!(
-                        "{}  ·  {} × {} px{state}",
+                        "{}  ·  {} × {} px{selection}{state}",
                         document.format.label(),
                         document.width(),
                         document.height()
@@ -989,6 +1057,8 @@ fn image_preview(
     show_grid: bool,
     show_guides: bool,
     crop: Option<CropRect>,
+    selection: crate::selection::Selection,
+    show_handles: bool,
 ) -> impl IntoElement {
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
@@ -998,6 +1068,10 @@ fn image_preview(
     let height = tab.document.height();
     let zoom = tab.zoom;
     let pan = tab.pan;
+    let contours = selection.contours(width, height);
+    let handle_rect = show_handles
+        .then(|| super::selection::adjustable_rect(selection))
+        .flatten();
 
     canvas(
         move |bounds, window, _| {
@@ -1060,6 +1134,10 @@ fn image_preview(
                         color,
                     ));
                 }
+            }
+            paint_contours(window, &geometry, width, height, visible, &contours);
+            if let Some(rect) = handle_rect {
+                paint_handles(window, &geometry, width, height, rect);
             }
             if let Some(crop) = crop {
                 let start = geometry.project(point(
@@ -1187,6 +1265,268 @@ fn paint_checkerboard(window: &mut Window, image: Bounds<Pixels>, visible: Bound
     }
 }
 
+fn selection_button(
+    label: &'static str,
+    enabled: bool,
+    action: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::Stateful<Div> {
+    form_button(label, false)
+        .when(enabled, |button| {
+            button.on_click(move |_, window, cx| action(window, cx))
+        })
+        .when(!enabled, |button| {
+            button.opacity(0.45).cursor(CursorStyle::Arrow)
+        })
+}
+
+fn paint_contours(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    contours: &[preview::PixelRect],
+) {
+    if contours.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    // The dash walks in screen pixels, about 24 px per second, matching the usual ants.
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f32())
+        .unwrap_or(0.);
+    let phase = (elapsed * 24.) % 8.;
+    let mut painted = false;
+    for rect in contours {
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
+        let start = geometry.project(point(
+            rect.x as f32 / width as f32,
+            rect.y as f32 / height as f32,
+        ));
+        let end = geometry.project(point(
+            rect.right() as f32 / width as f32,
+            rect.bottom() as f32 / height as f32,
+        ));
+        let bounds = Bounds::from_corners(start, end);
+        if bounds.intersect(&visible).is_empty() {
+            continue;
+        }
+        paint_marching_rect(window, bounds, visible, phase);
+        painted = true;
+    }
+    if painted {
+        window.request_animation_frame();
+    }
+}
+
+fn paint_handles(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    rect: preview::PixelRect,
+) {
+    if width == 0 || height == 0 || rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let project =
+        |x: i64, y: i64| geometry.project(point(x as f32 / width as f32, y as f32 / height as f32));
+    let top_left = project(rect.x, rect.y);
+    let bottom_right = project(rect.right(), rect.bottom());
+    let left = f32::from(top_left.x.min(bottom_right.x));
+    let right = f32::from(top_left.x.max(bottom_right.x));
+    let top = f32::from(top_left.y.min(bottom_right.y));
+    let bottom = f32::from(top_left.y.max(bottom_right.y));
+    let mid_x = (left + right) / 2.;
+    let mid_y = (top + bottom) / 2.;
+    let scale = window.scale_factor();
+    let snap = |value: f32| (value * scale).round() / scale;
+    let handle = 5.;
+    for (x, y) in [
+        (left, top),
+        (mid_x, top),
+        (right, top),
+        (left, mid_y),
+        (right, mid_y),
+        (left, bottom),
+        (mid_x, bottom),
+        (right, bottom),
+    ] {
+        let origin_x = snap(x - handle / 2.);
+        let origin_y = snap(y - handle / 2.);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(origin_x), px(origin_y)),
+                size(px(handle), px(handle)),
+            ),
+            rgb(0x12151c),
+        ));
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(origin_x + 1.), px(origin_y + 1.)),
+                size(px(handle - 2.), px(handle - 2.)),
+            ),
+            rgb(0xffffff),
+        ));
+    }
+}
+
+fn paint_marching_rect(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    visible: Bounds<Pixels>,
+    phase: f32,
+) {
+    let top = bounds.top();
+    let right = bounds.right();
+    let bottom = bounds.bottom();
+    let left = bounds.left();
+    let width = f32::from(bounds.size.width).max(0.);
+    let height = f32::from(bounds.size.height).max(0.);
+    paint_marching_span(
+        window,
+        point(left, top),
+        point(right, top),
+        phase,
+        0.,
+        visible,
+    );
+    paint_marching_span(
+        window,
+        point(right, top),
+        point(right, bottom),
+        phase,
+        width,
+        visible,
+    );
+    paint_marching_span(
+        window,
+        point(right, bottom),
+        point(left, bottom),
+        phase,
+        width + height,
+        visible,
+    );
+    paint_marching_span(
+        window,
+        point(left, bottom),
+        point(left, top),
+        phase,
+        width + height + width,
+        visible,
+    );
+}
+
+// `distance` is how far `from` sits along the whole outline, so the dash continues around corners.
+fn paint_marching_span(
+    window: &mut Window,
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    phase: f32,
+    distance: f32,
+    visible: Bounds<Pixels>,
+) {
+    let horizontal = (f32::from(from.y) - f32::from(to.y)).abs() < f32::from(to.x - from.x).abs();
+    let (start, end, cross) = if horizontal {
+        (f32::from(from.x), f32::from(to.x), f32::from(from.y))
+    } else {
+        (f32::from(from.y), f32::from(to.y), f32::from(from.x))
+    };
+    let length = (end - start).abs();
+    if length < 0.5 {
+        return;
+    }
+    let cross_visible = if horizontal {
+        cross + 1. >= f32::from(visible.top()) && cross - 1. <= f32::from(visible.bottom())
+    } else {
+        cross + 1. >= f32::from(visible.left()) && cross - 1. <= f32::from(visible.right())
+    };
+    if !cross_visible {
+        return;
+    }
+    let (view_min, view_max) = if horizontal {
+        (f32::from(visible.left()), f32::from(visible.right()))
+    } else {
+        (f32::from(visible.top()), f32::from(visible.bottom()))
+    };
+    let draw_min = start.min(end).max(view_min);
+    let draw_max = start.max(end).min(view_max);
+    if draw_max - draw_min < 0.5 {
+        return;
+    }
+    let forward = end >= start;
+    // Bottom and left edges run back toward the origin. Their visible interval is
+    // still a forward distance range, or those two sides never get a dash.
+    let (first, last) = span_draw_range(start, end, draw_min, draw_max);
+    let scale = window.scale_factor();
+    let snap = |value: f32| (value * scale).round() / scale;
+    let axis = |travel: f32| {
+        if forward {
+            start + travel
+        } else {
+            start - travel
+        }
+    };
+    let mut cursor = first;
+    while cursor < last {
+        let (white, remaining) = dash_at(cursor, distance, phase);
+        let dash_end = (cursor + remaining).min(last);
+        if dash_end <= cursor {
+            break;
+        }
+        if dash_end - cursor >= 0.5 {
+            let color = if white { rgb(0xffffff) } else { rgb(0x12151c) };
+            let left_edge = snap(axis(cursor).min(axis(dash_end)));
+            let right_edge = snap(axis(cursor).max(axis(dash_end)));
+            let cross = snap(cross);
+            let segment = if horizontal {
+                Bounds::new(
+                    point(px(left_edge), px(cross)),
+                    size(px((right_edge - left_edge).max(1.)), px(1.)),
+                )
+            } else {
+                Bounds::new(
+                    point(px(cross), px(left_edge)),
+                    size(px(1.), px((right_edge - left_edge).max(1.))),
+                )
+            };
+            let segment = segment.intersect(&visible);
+            if !segment.is_empty() {
+                window.paint_quad(fill(segment, color));
+            }
+        }
+        cursor = dash_end;
+    }
+}
+
+/// Whether the dash at this point on the outline is white, and how far that dash continues.
+/// `distance` carries the phase around corners. Snapping to the dash period would cancel `phase`.
+fn dash_at(travel: f32, distance: f32, phase: f32) -> (bool, f32) {
+    const DASH: f32 = 4.;
+    const PERIOD: f32 = DASH * 2.;
+    let cycle = (travel + distance - phase).rem_euclid(PERIOD);
+    if cycle < DASH {
+        (true, DASH - cycle)
+    } else {
+        (false, PERIOD - cycle)
+    }
+}
+
+fn span_draw_range(start: f32, end: f32, draw_min: f32, draw_max: f32) -> (f32, f32) {
+    let along = |position: f32| {
+        if end >= start {
+            position - start
+        } else {
+            start - position
+        }
+    };
+    let near = along(draw_min);
+    let far = along(draw_max);
+    (near.min(far), near.max(far))
+}
+
 fn paint_crop(window: &mut Window, image: Bounds<Pixels>, crop: Bounds<Pixels>) {
     let shade = rgba(0x0b0d12a6);
     let bands = [
@@ -1248,4 +1588,22 @@ fn dot_grid() -> impl IntoElement {
     )
     .absolute()
     .size_full()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dash_at, span_draw_range};
+
+    #[test]
+    fn a_backward_edge_still_covers_its_visible_span() {
+        assert_eq!(span_draw_range(0., 100., 10., 90.), (10., 90.));
+        assert_eq!(span_draw_range(100., 0., 10., 90.), (10., 90.));
+    }
+
+    #[test]
+    fn the_dash_phase_shifts_the_pattern_around_corners() {
+        assert_eq!(dash_at(0., 0., 0.), (true, 4.));
+        assert_eq!(dash_at(0., 0., 2.), (false, 2.));
+        assert_eq!(dash_at(0., 10., 2.), dash_at(10., 0., 2.));
+    }
 }

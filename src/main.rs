@@ -10,6 +10,7 @@ mod icons;
 mod macos;
 mod preview;
 mod project;
+mod selection;
 mod workspace;
 
 use std::path::PathBuf;

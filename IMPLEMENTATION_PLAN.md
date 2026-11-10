@@ -2,7 +2,20 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P07
+## Latest handoff · P08
+
+P08 adds canvas-space selection on branch `p08-selection`, which starts from P07's commit on `p07-preview`.
+
+- `src/selection.rs` keeps unrestricted, empty, and full selections allocation-free, plus a rectangle and the inverse of a rectangle. Coverage is tested in canvas coordinates, including a layer whose pixels are offset from the canvas. Crop bounds are absent for unrestricted, empty, and a selection that already covers the canvas. Cropping rebases a rectangle and drops it when the crop misses it.
+- Rectangle Select (`R`, and the Select toolbox tool) commits one history entry on release. The contour is a black-and-white dash in screen space and follows zoom and pan. While the Select tool is active, a rectangle or an inverse hole shows handles: dragging a handle resizes that edge, dragging inside moves the box without letting it leave the canvas, and a click that misses the box returns to unrestricted. Over a handle or the inside of the box the painted crosshair gives way to the system resize or hand cursor. Select All (`⌘A`), Select None (`⌘⇧A`), and Invert (`⌘I`) use Ctrl on Windows. Deselect and Invert are also buttons in the Select tool options. Select None returns to unrestricted, so later edits are not masked. Invert of unrestricted is empty, and invert of empty is the full canvas.
+- A drag replaces the selection. Shift to add, Control to subtract, and Shift-Control to intersect need a canvas-bounded mask, because this selection stores one rectangle or its inverse. P12 already owns those modifiers. Do not emulate them by storing only the latest rectangle.
+- Bucket Fill stops at the selection edge. Clear to Transparency writes transparent pixels only where the selection covers the active layer, and a pixel that is already clear does not become a change. A hidden active layer is refused with a status notice, as fill already was. Crop to Selection uses the bounding box and rebases the selection; the manual crop tool rebases it too.
+- Selection changes share the tab history. A selection-only undo returns a saved document to a clean state without changing pixels. The project file still does not store the selection.
+- Formatting, Clippy and locked tests passed. P07 ended with 38 tests and P08 ends with 51, plus the ignored release benchmark.
+- The rectangle drag, contour, and menu commands were not driven in the app. Computer Use can screenshot ImageEdit, but the window stayed covered and clicks did not reach it.
+- **Next is P09**, layer movement and geometry. It can use this selection's canvas coordinates.
+
+## Previous handoff · P07
 
 P07 paints the 256 px tiles from P06 on branch `p07-preview`, which starts from P06's commit on `p06-preview`.
 
@@ -234,7 +247,7 @@ Add 90° left/right, 180° and flips. Image transforms move all layers and selec
 
 **Depends on** P08. **Own** selection modules. Use separate review checkpoints for geometry, region tools, and morphology.
 
-Add Free Select (`F`) with freehand and click-to-close polygon modes. Add Magic Wand (`U`) and a shared tolerance control for connected bucket fill. Preserve exact RGBA matching at threshold zero. Use four-neighbor connectivity and compare the maximum absolute difference among RGBA channels to a tolerance from 0 to 255. Use Replace by default, Shift for Add, Control for Subtract and Shift+Control for Intersect when starting a selection gesture. Add Feather, Grow and Shrink dialogs using bounded mask operations.
+Add Free Select (`F`) with freehand and click-to-close polygon modes. Add Magic Wand (`U`) and a shared tolerance control for connected bucket fill. Preserve exact RGBA matching at threshold zero. Use four-neighbor connectivity and compare the maximum absolute difference among RGBA channels to a tolerance from 0 to 255. P08's rectangle replaces the selection. Use Replace by default, Shift for Add, Control for Subtract and Shift+Control for Intersect when starting a selection gesture, once the selection can hold a combined mask. Add Feather, Grow and Shrink dialogs using bounded mask operations.
 
 **Accept** test polygon winding and clipping, corner-touching regions, alpha and tolerance endpoints, mask combination and morphology at image edges. Verify Escape discards an unfinished selection and selection dialogs create one history entry.
 

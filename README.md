@@ -44,6 +44,15 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - Drag a rectangle with **Crop** and press Return to apply it or Escape to
   cancel. **Bucket Fill** uses the foreground color on connected pixels with
   matching RGBA values. **Color Picker** samples the image at full resolution.
+  **Select** (`R`) drags a rectangle. The outline is a dashed box with handles:
+  drag a handle to resize it, drag inside to move it, and click outside it to
+  deselect. The pointer becomes a resize arrow on a handle and a hand inside
+  the box. Select All, Deselect, and Invert are in the Select menu and in the
+  Select tool options.
+  Fill and **Edit → Clear to Transparency**
+  change only selected pixels. With no selection, they change the whole image.
+  **Image → Crop to Selection** uses the selection's bounding box and is
+  disabled when nothing is selected or the whole image is selected.
   Click either color swatch for the hue and saturation wheel, brightness
   slider, and hex input. The last 12 distinct colors set or sampled in the
   workspace are available in Recent Colors. Click the swap icon between the
@@ -54,7 +63,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   image. Pan is also available from the toolbox for left-button dragging.
   Fitting or zooming out uses a reduced preview; zooming in shows source
   pixels. The cursor shows the selected tool beside the canvas crosshair.
-- **Edit → Undo** and **Redo** step through crops, fills and layer changes in
+- **Edit → Undo** and **Redo** step through crops, fills, selections, and layer changes in
   the current tab. Undoing back to the last save clears the unsaved marker.
   Each tab keeps up to 100 steps, and the oldest steps are dropped first when
   history uses too much memory.
@@ -75,6 +84,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
+| Rectangle Select | R |
+| Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |
 | Swap / Reset colors | X / D |
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |

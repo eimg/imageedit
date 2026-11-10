@@ -705,7 +705,11 @@ mod tests {
 
         assert!(content.crop(CropRect::between((4999, 2), (4997, 0))));
         let layer = content.top_layer_id();
-        assert!(content.fill(layer, 0, 1, ink).is_some());
+        assert!(
+            content
+                .fill(layer, 0, 1, ink, &crate::selection::Selection::Unrestricted)
+                .is_some()
+        );
         let filled = content.composite();
         assert_eq!(filled.dimensions(), (3, 3));
         for y in 0..3 {
@@ -713,7 +717,11 @@ mod tests {
             assert_eq!(filled.get_pixel(1, y).0, wall.0);
             assert_eq!(filled.get_pixel(2, y).0, background.0);
         }
-        assert!(content.fill(layer, 0, 0, ink).is_none());
+        assert!(
+            content
+                .fill(layer, 0, 0, ink, &crate::selection::Selection::Unrestricted)
+                .is_none()
+        );
     }
 
     #[test]
@@ -939,7 +947,13 @@ mod tests {
         assert!(
             document
                 .content
-                .fill(layer, 0, 0, solid_color(0x123456))
+                .fill(
+                    layer,
+                    0,
+                    0,
+                    solid_color(0x123456),
+                    &crate::selection::Selection::Unrestricted,
+                )
                 .is_some()
         );
         assert!(document.content.crop(CropRect::between((0, 0), (0, 1))));

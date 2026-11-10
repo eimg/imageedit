@@ -6,6 +6,7 @@ use std::{
 use image::RgbaImage;
 
 use crate::document::{DocumentContent, LayerId};
+use crate::selection::Selection;
 
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
@@ -27,6 +28,7 @@ pub(super) struct Revision(u64);
 pub(super) struct State {
     pub content: DocumentContent,
     pub active_layer: LayerId,
+    pub selection: Selection,
 }
 
 struct Entry {
@@ -216,6 +218,7 @@ mod tests {
                 current: State {
                     active_layer: content.top_layer_id(),
                     content,
+                    selection: Selection::Unrestricted,
                 },
                 clock: 0,
             }
@@ -242,7 +245,13 @@ mod tests {
             self.edit(
                 |content| {
                     content
-                        .fill(layer, 0, 0, Rgba([color, 0, 0, 255]))
+                        .fill(
+                            layer,
+                            0,
+                            0,
+                            Rgba([color, 0, 0, 255]),
+                            &Selection::Unrestricted,
+                        )
                         .is_some()
                 },
                 limits,
@@ -430,5 +439,19 @@ mod tests {
         let started = session.history.generation();
         assert!(session.undo());
         assert_ne!(session.history.generation(), started);
+    }
+
+    #[test]
+    fn undoing_a_selection_returns_a_saved_document_to_clean() {
+        let mut session = Session::new(true, 2);
+        let previous = session.current.clone();
+        session.current.selection = Selection::Full;
+        let stamp = session.tick();
+        session.history.commit(previous, stamp);
+        assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.current.selection, Selection::Unrestricted);
+        assert!(!session.history.is_dirty());
+        assert_eq!(session.pixel(), [0, 0, 0, 0]);
     }
 }

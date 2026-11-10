@@ -93,6 +93,10 @@ impl Workspace {
             self.crop_drag = None;
             cx.notify();
         }
+        if event.button == MouseButton::Left && self.selection_drag.is_some() {
+            self.extend_selection(event.position, window.scale_factor(), cx);
+            self.finish_selection(window, cx);
+        }
     }
 
     pub(super) fn pan_preview(&mut self, delta: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {
@@ -155,8 +159,14 @@ impl Workspace {
         };
         self.crop_drag = None;
         self.edit_content(
-            move |content, _| {
+            move |content, _, selection| {
                 if content.crop(crop) {
+                    *selection = selection.rebase(
+                        i64::from(crop.x),
+                        i64::from(crop.y),
+                        crop.width,
+                        crop.height,
+                    );
                     Dirty::Canvas
                 } else {
                     Dirty::None
@@ -181,6 +191,17 @@ impl Workspace {
             return;
         };
         let layer = tab.active_layer;
+        let selection = tab.selection;
+        let (width, height) = tab.document.content.size();
+        if !selection.covers(i64::from(x), i64::from(y), width, height) {
+            tab.notice = Some(if selection == crate::selection::Selection::Empty {
+                "Nothing is selected.".into()
+            } else {
+                "That pixel is outside the selection.".into()
+            });
+            cx.notify();
+            return;
+        }
         if tab
             .document
             .content
@@ -193,9 +214,9 @@ impl Workspace {
         }
         let color = solid_color(self.colors[0]);
         self.edit_content(
-            move |content, _| {
+            move |content, _, selection| {
                 content
-                    .fill(layer, x, y, color)
+                    .fill(layer, x, y, color, selection)
                     .map(Dirty::Region)
                     .unwrap_or(Dirty::None)
             },
@@ -222,7 +243,12 @@ impl Workspace {
         }
     }
 
-    fn canvas_pixel(&self, position: Point<Pixels>, scale: f32, clamp: bool) -> Option<(u32, u32)> {
+    pub(super) fn canvas_pixel(
+        &self,
+        position: Point<Pixels>,
+        scale: f32,
+        clamp: bool,
+    ) -> Option<(u32, u32)> {
         let tab = self.active_tab()?;
         let viewport = self.viewport.get();
         let geometry = PreviewGeometry::for_tab(tab, viewport, scale)?;
@@ -299,7 +325,7 @@ impl PreviewGeometry {
         self
     }
 
-    fn fraction(&self, position: Point<Pixels>) -> Point<f32> {
+    pub(super) fn fraction(&self, position: Point<Pixels>) -> Point<f32> {
         point(
             (position.x - self.bounds.left()) / self.bounds.size.width,
             (position.y - self.bounds.top()) / self.bounds.size.height,

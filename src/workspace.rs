@@ -5,6 +5,7 @@ mod dialogs;
 mod files;
 mod history;
 mod layers;
+mod selection;
 mod view;
 
 use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};
@@ -18,6 +19,7 @@ use crate::document::{
     build_level, file_name,
 };
 use crate::preview::{self, Dirty};
+use crate::selection::Selection;
 
 use self::{
     cursor::CanvasCursor,
@@ -40,6 +42,7 @@ struct Tab {
     exporting: bool,
     notice: Option<String>,
     building_level: Option<u32>,
+    selection: Selection,
 }
 
 impl Tab {
@@ -55,6 +58,7 @@ impl Tab {
         State {
             content: self.document.content.clone(),
             active_layer: self.active_layer,
+            selection: self.selection,
         }
     }
 }
@@ -88,6 +92,8 @@ pub struct Workspace {
     pan_drag: Option<(gpui::MouseButton, Point<Pixels>)>,
     crop_drag: Option<CropDrag>,
     crop: Option<CropRect>,
+    selection_drag: Option<selection::SelectionGesture>,
+    selection_preview: Option<Selection>,
     dialog_open: bool,
     form: Option<Form>,
     creating: bool,
@@ -158,6 +164,8 @@ impl Workspace {
             pan_drag: None,
             crop_drag: None,
             crop: None,
+            selection_drag: None,
+            selection_preview: None,
             dialog_open: false,
             form: None,
             creating: false,
@@ -214,6 +222,7 @@ impl Workspace {
             exporting: false,
             notice: None,
             building_level: None,
+            selection: Selection::Unrestricted,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -234,6 +243,7 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.active != Some(index) {
             self.clear_crop();
+            self.clear_selection_gesture();
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -256,6 +266,7 @@ impl Workspace {
         self.pan_drag = None;
         if self.active == Some(index) {
             self.clear_crop();
+            self.clear_selection_gesture();
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -281,7 +292,7 @@ impl Workspace {
     // The edit may also choose a new active layer.
     fn edit_content(
         &mut self,
-        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> Dirty + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId, &mut Selection) -> Dirty + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -302,14 +313,15 @@ impl Workspace {
     fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_step_history(change) {
             self.clear_crop();
-            self.start_change(change, |_, _| Dirty::Canvas, window, cx);
+            self.clear_selection_gesture();
+            self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }
 
     fn start_change(
         &mut self,
         change: Change,
-        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> Dirty + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId, &mut Selection) -> Dirty + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -335,10 +347,11 @@ impl Workspace {
         let has_transparency = tab.document.canvas.preview.has_transparency;
         let levels = tab.document.canvas.level_caches();
         let mut active_layer = tab.active_layer;
+        let mut selection = tab.selection;
         let job = cx.background_executor().spawn(async move {
-            let dirty = edit(&mut content, &mut active_layer);
+            let dirty = edit(&mut content, &mut active_layer, &mut selection);
             RenderedCanvas::prepare_patch(&pixels, has_transparency, levels, &content, dirty)
-                .map(|patch| (content, active_layer, patch))
+                .map(|patch| (content, active_layer, selection, patch))
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
@@ -357,7 +370,12 @@ impl Workspace {
         id: usize,
         generation: u64,
         change: Change,
-        result: Option<(DocumentContent, LayerId, crate::document::CanvasPatch)>,
+        result: Option<(
+            DocumentContent,
+            LayerId,
+            Selection,
+            crate::document::CanvasPatch,
+        )>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -368,7 +386,7 @@ impl Workspace {
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];
         tab.editing = false;
-        let Some((content, edited_layer, patch)) = result else {
+        let Some((content, edited_layer, edited_selection, patch)) = result else {
             return;
         };
         if tab.history.generation() != generation {
@@ -376,10 +394,10 @@ impl Workspace {
             return;
         }
         let current = tab.state();
-        let (content, active_layer) = match change {
+        let (content, active_layer, selection) = match change {
             Change::Edit => {
                 tab.history.commit(current, stamp);
-                (content, edited_layer)
+                (content, edited_layer, edited_selection)
             }
             Change::Undo | Change::Redo => {
                 let state = if matches!(change, Change::Undo) {
@@ -388,9 +406,10 @@ impl Workspace {
                     tab.history.redo(current, stamp)
                 };
                 let state = state.expect("the generation guards the history target");
-                (state.content, state.active_layer)
+                (state.content, state.active_layer, state.selection)
             }
         };
+        tab.selection = selection;
         tab.active_layer = if content.layer(active_layer).is_some() {
             active_layer
         } else {

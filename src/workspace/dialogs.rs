@@ -403,7 +403,7 @@ impl Workspace {
                     return;
                 };
                 self.edit_content(
-                    move |content, active| {
+                    move |content, active, _| {
                         if let Some(id) = content.add_layer(above, name, fill) {
                             *active = id;
                             Dirty::Canvas
@@ -431,7 +431,7 @@ impl Workspace {
                 let name = name.to_owned();
                 self.dismiss_form(window, cx);
                 self.edit_content(
-                    move |content, _| {
+                    move |content, _, _| {
                         if content.rename_layer(id, name) {
                             Dirty::Unpainted
                         } else {
@@ -457,7 +457,7 @@ impl Workspace {
                 let opacity = opacity_from_percent(percent);
                 self.dismiss_form(window, cx);
                 self.edit_content(
-                    move |content, _| {
+                    move |content, _, _| {
                         if content.set_opacity(id, opacity) {
                             content.layer_dirty(id)
                         } else {
