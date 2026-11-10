@@ -12,11 +12,13 @@ and the latest pass handoff.
 ## Current product scope
 
 ImageEdit supports single-layer raster editing. Open or create an image,
-crop it, sample or set swatches, and fill connected regions. Tabs retain zoom
+crop it, sample or set swatches, and fill connected regions. Each tab can undo
+and redo crops and fills, and undoing back to the saved state clears the
+unsaved marker. Tabs retain zoom
 and pan. The canvas supports a grid and center guides. Save and Save As handle
 ImageEdit projects, PNG, JPEG, and WebP. A project stores the layer stack with
 lossless pixels. The UI does not create layers yet. Layer management, clipboard
-workflows, undo, and separate export commands are placeholders.
+workflows, and separate export commands are placeholders.
 
 ## Code map
 
@@ -35,8 +37,12 @@ workflows, undo, and separate export commands are placeholders.
  project versions are not supported. `fixtures/projects/` holds a golden
  project that the reader must keep opening. Regenerate it only when the
  format intentionally changes.
-- `src/workspace.rs` owns tabs, view state, and background open and edit jobs.
-  The canonical path identifies an already open file.
+- `src/workspace.rs` owns tabs, view state, and background open, edit, undo
+  and redo jobs. A job publishes only if its tab's edit generation is
+  unchanged. The canonical path identifies an already open file.
+- `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
+  current and saved revisions, and the entry and memory limits. Snapshots
+  share layer pixels, and each shared buffer counts once toward the limits.
 - `src/workspace/files.rs` handles native file dialogs, background saving,
   and unsaved-change confirmation.
 - `src/workspace/dialogs.rs` renders the canvas dimensions and color dialogs.

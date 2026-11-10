@@ -8,6 +8,8 @@ actions!(
         SaveImage,
         SaveImageAs,
         SaveProjectAs,
+        Undo,
+        Redo,
         ForegroundColor,
         BackgroundColor,
         SwapColors,
@@ -233,10 +235,17 @@ pub fn register(cx: &mut App) {
     ]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([
+            KeyBinding::new("cmd-z", Undo, None),
+            KeyBinding::new("cmd-shift-z", Redo, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("cmd-alt-h", HideOthers, None),
             KeyBinding::new("cmd-m", MinimizeWindow, None),
+        ]);
+    } else {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-z", Undo, None),
+            KeyBinding::new("ctrl-y", Redo, None),
         ]);
     }
 
@@ -281,8 +290,8 @@ pub fn register(cx: &mut App) {
         menu(
             "Edit",
             vec![
-                planned("Undo"),
-                planned("Redo"),
+                MenuItem::action("Undo", Undo),
+                MenuItem::action("Redo", Redo),
                 MenuItem::separator(),
                 planned("Cut"),
                 planned("Copy"),

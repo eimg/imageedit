@@ -151,7 +151,7 @@ impl Workspace {
             return;
         };
         self.crop_drag = None;
-        self.edit_content(true, move |content| content.crop(crop), window, cx);
+        self.edit_content(move |content| content.crop(crop), window, cx);
         cx.notify();
     }
 
@@ -168,12 +168,7 @@ impl Workspace {
             return;
         };
         let color = solid_color(self.colors[0]);
-        self.edit_content(
-            false,
-            move |content| content.fill(layer, x, y, color),
-            window,
-            cx,
-        );
+        self.edit_content(move |content| content.fill(layer, x, y, color), window, cx);
     }
 
     pub(super) fn pick_color(

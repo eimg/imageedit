@@ -8,9 +8,9 @@ use gpui::{
 
 use crate::commands::{
     ADD_LAYER, ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ForegroundColor, MinimizeWindow,
-    NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, ResetColors, SaveImage, SaveImageAs,
-    SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Zoom,
-    ZoomIn, ZoomOut, ZoomWindow,
+    NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage,
+    SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
+    Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::CropRect;
 
@@ -18,7 +18,7 @@ use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
 use super::dialogs::form_button;
 use super::files::SaveMode;
-use super::{DEFAULT_COLORS, Tab, Workspace};
+use super::{Change, DEFAULT_COLORS, Tab, Workspace};
 
 pub(super) const CHROME: u32 = 0x20242c;
 pub(super) const PANEL: u32 = 0x191d24;
@@ -108,6 +108,16 @@ impl Render for Workspace {
                     })
                 },
             )
+            .when(interactive && self.can_step_history(Change::Undo), |root| {
+                root.on_action(cx.listener(|this, _: &Undo, window, cx| {
+                    this.step_history(Change::Undo, window, cx)
+                }))
+            })
+            .when(interactive && self.can_step_history(Change::Redo), |root| {
+                root.on_action(cx.listener(|this, _: &Redo, window, cx| {
+                    this.step_history(Change::Redo, window, cx)
+                }))
+            })
             .when(interactive && active.is_some(), |root| {
                 root.on_action(cx.listener(|this, zoom: &Zoom, _, cx| {
                     if let Some(index) = this.active {
@@ -317,7 +327,7 @@ impl Workspace {
                                     .line_clamp(1)
                                     .child(tab.document.name.clone()),
                             )
-                            .when(tab.dirty, |label| {
+                            .when(tab.dirty(), |label| {
                                 label
                                     .child(div().flex_shrink_0().text_color(rgb(ACCENT)).child("•"))
                             })

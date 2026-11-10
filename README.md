@@ -47,11 +47,16 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   around the pointer. Scroll or use a middle-button drag to pan a zoomed
   image. Pan is also available from the toolbox for left-button dragging.
   The cursor shows the selected tool beside the canvas crosshair.
+- **Edit → Undo** and **Redo** step through crops and fills in the current
+  tab. Undoing back to the last save clears the unsaved marker. Each tab keeps
+  up to 100 steps, and the oldest steps are dropped first when history uses
+  too much memory.
 
 | Action | macOS shortcut |
 | --- | --- |
 | New / Open | ⌘N / ⌘O |
 | Save / Save As / Save Project As | ⌘S / ⌘⇧S / ⌘⌥S |
+| Undo / Redo | ⌘Z / ⌘⇧Z |
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
@@ -61,7 +66,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
 Menus and the toolbox still show planned features such as multiple layers,
-text, color adjustments, filters, and undo. Commands without handlers appear
+text, color adjustments, and filters. Commands without handlers appear
 disabled. Windows is a future target.
 
 ## Development

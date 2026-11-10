@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P02
+## Latest handoff · P03
+
+P03 added per-tab undo/redo history and save identity on branch `p03-history`, which starts from P02's branch `p02-project-v2`.
+
+- `src/workspace/history.rs` is pure and unit-tested. `History` keeps undo entries oldest-first and redo entries with the next target last. Each entry stores a `State` (content snapshot and active layer), its revision and a global stamp. Snapshots are `DocumentContent` clones that share layer pixel `Arc`s. `retained_bytes` charges only the buffers history keeps alive beyond the current content, counting each shared buffer once. `LIMITS` holds 100 entries per tab, 256 MiB per tab and 512 MiB app-wide. Eviction removes the entry with the oldest stamp, so redo entries are evictable too. `enforce_app_budget` evicts the globally oldest entry across tabs. An entry that alone exceeds a budget is evicted at once, leaving the current state intact.
+- Revisions identify persistent content. They are allocated from a per-tab counter and never reused, so a discarded redo branch cannot collide with a later edit. A tab is dirty when its current revision differs from the saved revision. Untitled documents start with no saved revision. `write_image` captures the revision when the save starts and records it only on success. The edit generation advances on commit, undo and redo.
+- `src/workspace.rs` replaced `edit_content`'s private job with `start_change`/`finish_change` for `Change::Edit`, `Undo` and `Redo`. Every change renders the target in the background, and `finish_change` publishes only if the tab still exists and its generation matches the one captured at start. A stale result's preview is dropped. A no-op edit returns `None` and creates no entry. Pan resets when the canvas size changes, which replaces the old `reset_view` flag. The tab-level busy guard still serializes edits, history steps and saves.
+- `src/commands.rs` adds `Undo` and `Redo` in the Edit menu, bound to `⌘Z`/`⌘⇧Z` on macOS and `Ctrl+Z`/`Ctrl+Y` elsewhere. `src/workspace/view.rs` registers each handler only when no form or dialog is open, the tab is idle and a target exists, so the menu items disable themselves otherwise. Undo and Redo clear an in-progress crop rectangle. Menu labels do not name the step yet.
+- Formatting, Clippy and locked tests passed before and after the change. P02 ended with 18 tests and P03 ends with 25. The new tests cover undo and redo of a crop then a fill back to a clean saved revision, saving after undo and branching by editing, a no-op edit, the entry cap with saved identity kept after eviction, shared-buffer byte accounting with an over-budget entry, app-wide eviction across tabs, and generation change on undo. The workspace's generation comparison itself has no GPUI test harness.
+- The release bundle built and passed `codesign --verify --strict` and launched with the v2 fixture. Computer Use still lacked Accessibility and Screen Recording permission, so Undo/Redo through the menu and shortcuts, the disabled menu state, and the unsaved marker were not exercised in the native UI.
+- **Next is P04.** P06 can also start in an isolated worktree now that P03 is ready.
+
+## Previous handoff · P02
 
 P02 replaced the project format with the v2 layer-stack format on branch `p02-project-v2`. ImageEdit has no released users, so v1 support was dropped by product decision: v1 files and any other version are rejected. No menu, shortcut or tab behavior changed.
 
@@ -12,9 +24,8 @@ P02 replaced the project format with the v2 layer-stack format on branch `p02-pr
 - Formatting, Clippy and locked tests passed before and after the change. The baseline had 12 tests and the final run had 18. New tests cover v2 round-trips against the writer and the golden file, 17 malformed manifests, 12 malformed payload or framing cases, writer limits, a failed save that leaves the original file reopenable with no leftover temporary file, a truncated project failing `Document::open`, and the constructor's validation. A malformed file fails in `Document::open` before a tab exists, so no tab can be mutated.
 - The release bundle built and passed `codesign --verify --strict`. It launched with the fixtures and a truncated project from a temporary directory. The UI smoke test did not run because Computer Use lacked Accessibility and Screen Recording permission. The opened tabs, the error for the truncated file, and a Save and reopen through the UI remain unverified.
 - Known gap for P04 and P05: opening a multi-layer v2 file makes the top layer active even if it is hidden, so Bucket Fill can edit an invisible layer. Save As to PNG, JPEG or WebP flattens a layered tab and switches it to that raster format. P04 owns that routing.
-- **Next is P03.** Add transactions, history and save identity on top of the current crop and fill edits.
 
-## Previous handoff · P01
+## Earlier handoff · P01
 
 P01 introduced the layer stack and Normal compositor behind the existing single-layer UI. It is the commit immediately after baseline `5c4cfcf`, and it was verified against that baseline before commit.
 

@@ -83,7 +83,7 @@ impl Workspace {
         if matches!(mode, SaveMode::Current)
             && let Some(path) = &document.path
         {
-            if tab.dirty {
+            if tab.dirty() {
                 self.write_image(id, path.clone(), document.format, window, cx);
             }
             return;
@@ -166,6 +166,7 @@ impl Workspace {
 
         let tab = &mut self.tabs[index];
         tab.saving = Some(path.clone());
+        let revision = tab.history.revision();
         let content = tab.document.content.clone();
         let job = cx.background_executor().spawn(async move {
             let result = save_image(&content, &path, format);
@@ -186,7 +187,7 @@ impl Workspace {
                         tab.document.name = name;
                         tab.document.path = Some(path);
                         tab.document.format = format;
-                        tab.dirty = false;
+                        tab.history.mark_saved(revision);
                         workspace.update_title(window);
                     }
                     Err(error) => workspace
@@ -210,7 +211,7 @@ impl Workspace {
         if self.dialog_open || self.form.is_some() || tab.busy() {
             return;
         }
-        if !tab.dirty {
+        if !tab.dirty() {
             self.close_tab(index, window, cx);
             return;
         }
@@ -233,7 +234,7 @@ impl Workspace {
         if self.dialog_open || self.creating || self.tabs.iter().any(|tab| tab.busy()) {
             return false;
         }
-        let unsaved = self.tabs.iter().filter(|tab| tab.dirty).count();
+        let unsaved = self.tabs.iter().filter(|tab| tab.dirty()).count();
         if unsaved == 0 {
             return true;
         }

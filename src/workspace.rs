@@ -3,6 +3,7 @@ mod color;
 mod cursor;
 mod dialogs;
 mod files;
+mod history;
 mod view;
 
 use std::{cell::Cell, path::PathBuf, rc::Rc};
@@ -13,7 +14,11 @@ use gpui::{Bounds, Context, FocusHandle, Pixels, Point, ScrollHandle, Window};
 use crate::commands::{Tool, Zoom};
 use crate::document::{CropRect, Document, DocumentContent, LayerId, RenderedCanvas, file_name};
 
-use self::{cursor::CanvasCursor, dialogs::Form};
+use self::{
+    cursor::CanvasCursor,
+    dialogs::Form,
+    history::{History, LIMITS, State},
+};
 
 const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
 const RECENT_COLOR_LIMIT: usize = 12;
@@ -24,7 +29,7 @@ struct Tab {
     active_layer: LayerId,
     zoom: Zoom,
     pan: Point<Pixels>,
-    dirty: bool,
+    history: History,
     editing: bool,
     saving: Option<PathBuf>,
 }
@@ -33,6 +38,24 @@ impl Tab {
     fn busy(&self) -> bool {
         self.editing || self.saving.is_some()
     }
+
+    fn dirty(&self) -> bool {
+        self.history.is_dirty()
+    }
+
+    fn state(&self) -> State {
+        State {
+            content: self.document.content.clone(),
+            active_layer: self.active_layer,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Change {
+    Edit,
+    Undo,
+    Redo,
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +87,7 @@ pub struct Workspace {
     loader: mpsc::UnboundedSender<PathBuf>,
     pending: usize,
     errors: Vec<String>,
+    history_clock: u64,
 }
 
 impl Workspace {
@@ -131,6 +155,7 @@ impl Workspace {
             loader,
             pending: 0,
             errors: Vec::new(),
+            history_clock: 0,
         }
     }
 
@@ -154,7 +179,7 @@ impl Workspace {
     }
 
     fn show_document(&mut self, document: Document, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = document.path.is_none();
+        let history = History::new(document.path.is_some());
         if let Some(path) = &document.path {
             if let Some(index) = self.tabs.iter().position(|tab| {
                 tab.document.path.as_ref() == Some(path) || tab.saving.as_ref() == Some(path)
@@ -171,7 +196,7 @@ impl Workspace {
             document,
             zoom: Zoom::default(),
             pan: Point::default(),
-            dirty,
+            history,
             editing: false,
             saving: None,
         });
@@ -238,7 +263,34 @@ impl Workspace {
 
     fn edit_content(
         &mut self,
-        reset_view: bool,
+        edit: impl FnOnce(&mut DocumentContent) -> bool + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_change(Change::Edit, edit, window, cx);
+    }
+
+    fn can_step_history(&self, change: Change) -> bool {
+        self.active_tab().is_some_and(|tab| {
+            !tab.busy()
+                && match change {
+                    Change::Edit => false,
+                    Change::Undo => tab.history.undo_target().is_some(),
+                    Change::Redo => tab.history.redo_target().is_some(),
+                }
+        })
+    }
+
+    fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_step_history(change) {
+            self.clear_crop();
+            self.start_change(change, |_| true, window, cx);
+        }
+    }
+
+    fn start_change(
+        &mut self,
+        change: Change,
         edit: impl FnOnce(&mut DocumentContent) -> bool + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -249,9 +301,17 @@ impl Workspace {
         if tab.busy() {
             return;
         }
+        let source = match change {
+            Change::Edit => Some(&tab.document.content),
+            Change::Undo => tab.history.undo_target().map(|state| &state.content),
+            Change::Redo => tab.history.redo_target().map(|state| &state.content),
+        };
+        let Some(mut content) = source.cloned() else {
+            return;
+        };
         tab.editing = true;
         let id = tab.id;
-        let mut content = tab.document.content.clone();
+        let generation = tab.history.generation();
         let job = cx.background_executor().spawn(async move {
             edit(&mut content).then(|| {
                 let canvas = RenderedCanvas::new(&content);
@@ -261,24 +321,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
-                let Some(index) = workspace.tab_index(id) else {
-                    return;
-                };
-                let tab = &mut workspace.tabs[index];
-                tab.editing = false;
-                if let Some((content, canvas)) = result {
-                    if content.layer(tab.active_layer).is_none() {
-                        tab.active_layer = content.top_layer_id();
-                    }
-                    tab.document.content = content;
-                    let old = std::mem::replace(&mut tab.document.canvas, canvas);
-                    cx.drop_image(old.preview.image, Some(window));
-                    tab.dirty = true;
-                    if reset_view {
-                        tab.pan = Point::default();
-                    }
-                    workspace.update_title(window);
-                }
+                workspace.finish_change(id, generation, change, result, window, cx);
                 cx.notify();
             });
         })
@@ -286,15 +329,77 @@ impl Workspace {
         cx.notify();
     }
 
+    // Publishes a background result only if the tab has not changed since the job started.
+    fn finish_change(
+        &mut self,
+        id: usize,
+        generation: u64,
+        change: Change,
+        result: Option<(DocumentContent, RenderedCanvas)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.tab_index(id) else {
+            return;
+        };
+        self.history_clock += 1;
+        let stamp = self.history_clock;
+        let tab = &mut self.tabs[index];
+        tab.editing = false;
+        let Some((content, canvas)) = result else {
+            return;
+        };
+        if tab.history.generation() != generation {
+            cx.drop_image(canvas.preview.image, Some(window));
+            return;
+        }
+        let current = tab.state();
+        let (content, active_layer) = match change {
+            Change::Edit => {
+                tab.history.commit(current, stamp);
+                (content, tab.active_layer)
+            }
+            Change::Undo | Change::Redo => {
+                let state = if matches!(change, Change::Undo) {
+                    tab.history.undo(current, stamp)
+                } else {
+                    tab.history.redo(current, stamp)
+                };
+                let state = state.expect("the generation guards the history target");
+                (state.content, state.active_layer)
+            }
+        };
+        tab.active_layer = if content.layer(active_layer).is_some() {
+            active_layer
+        } else {
+            content.top_layer_id()
+        };
+        if content.size() != tab.document.content.size() {
+            tab.pan = Point::default();
+        }
+        tab.document.content = content;
+        let old = std::mem::replace(&mut tab.document.canvas, canvas);
+        cx.drop_image(old.preview.image, Some(window));
+        tab.history
+            .enforce_tab_limits(&tab.document.content, &LIMITS);
+        history::enforce_app_budget(
+            self.tabs
+                .iter_mut()
+                .map(|tab| (&mut tab.history, &tab.document.content)),
+            &LIMITS,
+        );
+        self.update_title(window);
+    }
+
     fn update_title(&self, window: &mut Window) {
         let title = self.active_tab().map_or_else(
             || "ImageEdit".to_owned(),
             |tab| {
-                let marker = if tab.dirty { " •" } else { "" };
+                let marker = if tab.dirty() { " •" } else { "" };
                 format!("{}{marker} — ImageEdit", tab.document.name)
             },
         );
         window.set_window_title(&title);
-        window.set_window_edited(self.active_tab().is_some_and(|tab| tab.dirty));
+        window.set_window_edited(self.active_tab().is_some_and(|tab| tab.dirty()));
     }
 }
