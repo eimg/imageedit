@@ -768,7 +768,14 @@ mod tests {
         let layer = content.top_layer_id();
         assert!(
             content
-                .fill(layer, 0, 1, ink, &crate::selection::Selection::Unrestricted)
+                .fill(
+                    layer,
+                    0,
+                    1,
+                    ink,
+                    &crate::selection::Selection::Unrestricted,
+                    0
+                )
                 .is_some()
         );
         let filled = content.composite();
@@ -780,7 +787,14 @@ mod tests {
         }
         assert!(
             content
-                .fill(layer, 0, 0, ink, &crate::selection::Selection::Unrestricted)
+                .fill(
+                    layer,
+                    0,
+                    0,
+                    ink,
+                    &crate::selection::Selection::Unrestricted,
+                    0
+                )
                 .is_none()
         );
     }
@@ -1041,6 +1055,7 @@ mod tests {
                     0,
                     solid_color(0x123456),
                     &crate::selection::Selection::Unrestricted,
+                    0,
                 )
                 .is_some()
         );

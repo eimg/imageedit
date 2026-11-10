@@ -43,13 +43,20 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   transparency. PNG and lossless WebP preserve transparency. JPEG saves
   against white. The working pixel format is 8-bit RGBA.
 - Drag a rectangle with **Crop** and press Return to apply it or Escape to
-  cancel. **Bucket Fill** uses the foreground color on connected pixels with
-  matching RGBA values. **Color Picker** samples the image at full resolution.
+  cancel. **Bucket Fill** uses the foreground color on connected pixels within
+  the shared tolerance. **Color Picker** samples the image at full resolution.
   **Select** (`R`) drags a rectangle. The outline is a dashed box with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
   deselect. The dashes move along the outline. The pointer becomes a resize
   arrow on a handle and a hand inside the box. Select All, Deselect, and Invert
   are in the Select menu and in the Select tool options.
+  **Free Select** (`F`) draws a freehand outline or a clicked polygon. Escape
+  drops an unfinished outline, and Return closes a polygon. **Magic Wand**
+  (`U`) selects a connected region. Its tolerance is shared with Bucket Fill:
+  zero matches every channel exactly, and a higher value allows that much
+  difference in the most changed channel. Hold Shift to add, Control to
+  subtract, or both to intersect. **Select → Feather**, **Grow**, and
+  **Shrink** change the current mask by one radius.
   Fill and **Edit → Clear to Transparency**
   change only selected pixels. With no selection, they change the whole image.
   **Image → Crop to Selection** uses the selection's bounding box and is
@@ -110,7 +117,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
-| Rectangle Select / Move | R / M |
+| Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |

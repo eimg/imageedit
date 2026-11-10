@@ -611,7 +611,7 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| match content.crop_image_to_content() {
                 LayerGeometry::Done(dirty) => {
-                    *selection = selection.rebase(
+                    *selection = selection.clone().rebase(
                         i64::from(crop.x),
                         i64::from(crop.y),
                         crop.width,

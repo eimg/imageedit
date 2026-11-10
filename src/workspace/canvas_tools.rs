@@ -97,6 +97,9 @@ impl Workspace {
             self.extend_selection(event.position, window.scale_factor(), cx);
             self.finish_selection(window, cx);
         }
+        if event.button == MouseButton::Left && !self.free_points.is_empty() {
+            self.finish_free(window, cx);
+        }
         if event.button == MouseButton::Left && self.move_drag.is_some() {
             self.extend_move(event.position, window.scale_factor(), cx);
             self.finish_move(window, cx);
@@ -165,7 +168,7 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| {
                 if content.crop(crop) {
-                    *selection = selection.rebase(
+                    *selection = selection.clone().rebase(
                         i64::from(crop.x),
                         i64::from(crop.y),
                         crop.width,
@@ -195,7 +198,7 @@ impl Workspace {
             return;
         };
         let layer = tab.active_layer;
-        let selection = tab.selection;
+        let selection = tab.selection.clone();
         let (width, height) = tab.document.content.size();
         if !selection.covers(i64::from(x), i64::from(y), width, height) {
             tab.notice = Some(if selection == crate::selection::Selection::Empty {
@@ -217,10 +220,11 @@ impl Workspace {
             return;
         }
         let color = solid_color(self.colors[0]);
+        let tolerance = self.tolerance;
         self.edit_content(
             move |content, _, selection| {
                 content
-                    .fill(layer, x, y, color, selection)
+                    .fill(layer, x, y, color, selection, tolerance)
                     .map(Dirty::Region)
                     .unwrap_or(Dirty::None)
             },

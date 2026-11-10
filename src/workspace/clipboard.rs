@@ -83,7 +83,7 @@ impl Workspace {
         }
         let pixels = layer.pixels.clone();
         let offset = layer.offset;
-        let selection = tab.selection;
+        let selection = tab.selection.clone();
         let canvas = tab.document.content.size();
         self.copy_token = self.copy_token.wrapping_add(1);
         let token = self.copy_token;

@@ -7,15 +7,29 @@ use crate::commands::{
 };
 use crate::document::CropRect;
 use crate::preview::{Dirty, PixelRect};
-use crate::selection::Selection;
+use crate::selection::{Selection, SelectionOp};
 
 const HANDLE_SLOP: f32 = 6.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FreeMode {
+    Freehand,
+    Polygon,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MaskEdit {
+    Feather,
+    Grow,
+    Shrink,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SelectionGesture {
     Create {
         origin: Point<Pixels>,
         anchor: Option<(u32, u32)>,
+        op: SelectionOp,
     },
     Move {
         rect: PixelRect,
@@ -53,13 +67,14 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        op: SelectionOp,
         cx: &mut Context<Self>,
     ) {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
         self.clear_selection_gesture();
-        let Some(selection) = self.active_tab().map(|tab| tab.selection) else {
+        let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
         };
         let gesture = if let Some(rect) = adjustable_rect(selection) {
@@ -100,12 +115,14 @@ impl Workspace {
                 SelectionHit::Outside => SelectionGesture::Create {
                     origin: position,
                     anchor: self.canvas_pixel(position, scale, false),
+                    op,
                 },
             }
         } else if let Some(anchor) = self.canvas_pixel(position, scale, false) {
             SelectionGesture::Create {
                 origin: position,
                 anchor: Some(anchor),
+                op,
             }
         } else {
             return;
@@ -127,19 +144,30 @@ impl Workspace {
             return;
         };
         let (width, height) = tab.document.content.size();
-        let previous = tab.selection;
+        let previous = tab.selection.clone();
         let pointer = self.pointer_pixel(position, scale);
         let preview = match drag {
             SelectionGesture::Create {
                 origin,
                 anchor: Some(start),
+                op,
             } => {
                 let delta = position - origin;
                 if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
                     None
                 } else {
                     pointer.map(|end| {
-                        Selection::rectangle(start, (end.0 as u32, end.1 as u32), width, height)
+                        let shape = Selection::rectangle(
+                            start,
+                            (end.0 as u32, end.1 as u32),
+                            width,
+                            height,
+                        );
+                        if op == SelectionOp::Replace {
+                            shape
+                        } else {
+                            previous.combine(shape, op, width, height)
+                        }
                     })
                 }
             }
@@ -181,7 +209,9 @@ impl Workspace {
         match gesture {
             // A click that misses the box clears it. A drag that never crosses the
             // threshold does the same, which is how a click outside deselects.
-            Some(SelectionGesture::Create { .. }) if preview.is_none() => {
+            Some(SelectionGesture::Create { op, .. })
+                if preview.is_none() && op == SelectionOp::Replace =>
+            {
                 self.select_none(window, cx);
             }
             Some(_) => {
@@ -206,7 +236,7 @@ impl Workspace {
         let Some(position) = self.canvas_cursor.position.get() else {
             return CursorStyle::Crosshair;
         };
-        let Some(selection) = self.active_tab().map(|tab| tab.selection) else {
+        let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return CursorStyle::Crosshair;
         };
         let Some(rect) = adjustable_rect(selection) else {
@@ -289,7 +319,7 @@ impl Workspace {
             return;
         };
         let (width, height) = tab.document.content.size();
-        let selection = tab.selection.invert(width, height);
+        let selection = tab.selection.clone().invert(width, height);
         self.commit_selection(selection, window, cx);
     }
 
@@ -338,7 +368,7 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| {
                 if content.crop(crop) {
-                    *selection = selection.rebase(
+                    *selection = selection.clone().rebase(
                         i64::from(crop.x),
                         i64::from(crop.y),
                         crop.width,
@@ -423,6 +453,197 @@ impl Workspace {
             cx,
         );
     }
+
+    pub(super) fn begin_free(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: &gpui::Modifiers,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab().is_none_or(|tab| tab.busy()) {
+            return;
+        }
+        let Some((x, y)) = self.unclamped_pointer_pixel(position, scale) else {
+            return;
+        };
+        let point = (
+            x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        );
+        match self.free_mode {
+            FreeMode::Freehand => {
+                self.free_points = vec![point];
+                self.free_op = selection_op(modifiers);
+            }
+            FreeMode::Polygon => {
+                if self.free_points.len() >= 3 && near_point(self.free_points[0], point) {
+                    self.close_free(window, cx);
+                    return;
+                }
+                if self.free_points.is_empty() {
+                    self.free_op = selection_op(modifiers);
+                }
+                self.free_points.push(point);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn extend_free(
+        &mut self,
+        position: Point<Pixels>,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.free_mode != FreeMode::Freehand || self.free_points.is_empty() {
+            return;
+        }
+        let Some((x, y)) = self.unclamped_pointer_pixel(position, scale) else {
+            return;
+        };
+        let point = (
+            x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        );
+        if self.free_points.last() != Some(&point) {
+            self.free_points.push(point);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn finish_free(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.free_mode != FreeMode::Freehand || self.free_points.is_empty() {
+            return;
+        }
+        if self.free_points.len() < 3 {
+            self.free_points.clear();
+            cx.notify();
+            return;
+        }
+        self.close_free(window, cx);
+    }
+
+    pub(super) fn close_free(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.free_points.len() < 3 {
+            return;
+        }
+        let points = std::mem::take(&mut self.free_points);
+        let Some((width, height, current)) = self.active_tab().map(|tab| {
+            let size = tab.document.content.size();
+            (size.0, size.1, tab.selection.clone())
+        }) else {
+            return;
+        };
+        let shape = Selection::polygon(&points, width, height);
+        let selection = if self.free_op == SelectionOp::Replace {
+            shape
+        } else {
+            current.combine(shape, self.free_op, width, height)
+        };
+        self.commit_selection(selection, window, cx);
+    }
+
+    pub(super) fn cancel_free(&mut self, cx: &mut Context<Self>) {
+        if self.free_points.is_empty() {
+            return;
+        }
+        self.free_points.clear();
+        cx.notify();
+    }
+
+    pub(super) fn wand_at(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: &gpui::Modifiers,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.canvas_pixel(position, scale, false) else {
+            return;
+        };
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        if tab.busy() {
+            return;
+        }
+        let layer_id = tab.active_layer;
+        let Some(layer) = tab.document.content.layer(layer_id) else {
+            return;
+        };
+        let local_x = i64::from(x) - i64::from(layer.offset.0);
+        let local_y = i64::from(y) - i64::from(layer.offset.1);
+        if local_x < 0
+            || local_y < 0
+            || local_x as u32 >= layer.pixels.width()
+            || local_y as u32 >= layer.pixels.height()
+        {
+            self.notice("The active layer does not cover that pixel.", cx);
+            return;
+        }
+        let pixels = layer.pixels.clone();
+        let offset = layer.offset;
+        let size = tab.document.content.size();
+        let current = tab.selection.clone();
+        let shape = Selection::flood(
+            &pixels,
+            local_x as u32,
+            local_y as u32,
+            self.tolerance,
+            offset,
+            size,
+        );
+        let op = selection_op(modifiers);
+        let selection = if op == SelectionOp::Replace {
+            shape
+        } else {
+            current.combine(shape, op, size.0, size.1)
+        };
+        self.commit_selection(selection, window, cx);
+    }
+
+    pub(super) fn reshape_selection(
+        &mut self,
+        edit: MaskEdit,
+        radius: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        if tab.busy() {
+            return;
+        }
+        let (width, height) = tab.document.content.size();
+        let current = tab.selection.clone();
+        if matches!(current, Selection::Unrestricted | Selection::Empty) {
+            self.notice("Select part of the image first.", cx);
+            return;
+        }
+        let selection = match edit {
+            MaskEdit::Feather => current.feather(radius, width, height),
+            MaskEdit::Grow => current.grow(radius, width, height),
+            MaskEdit::Shrink => current.shrink(radius, width, height),
+        };
+        self.commit_selection(selection, window, cx);
+    }
+}
+
+pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
+    match (modifiers.shift, modifiers.control) {
+        (true, true) => SelectionOp::Intersect,
+        (true, false) => SelectionOp::Add,
+        (false, true) => SelectionOp::Subtract,
+        (false, false) => SelectionOp::Replace,
+    }
+}
+
+fn near_point(origin: (i32, i32), point: (i32, i32)) -> bool {
+    (origin.0 - point.0).abs() <= 3 && (origin.1 - point.1).abs() <= 3
 }
 
 pub(super) fn adjustable_rect(selection: Selection) -> Option<PixelRect> {

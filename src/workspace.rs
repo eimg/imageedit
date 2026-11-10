@@ -60,7 +60,7 @@ impl Tab {
         State {
             content: self.document.content.clone(),
             active_layer: self.active_layer,
-            selection: self.selection,
+            selection: self.selection.clone(),
         }
     }
 }
@@ -97,6 +97,10 @@ pub struct Workspace {
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
+    tolerance: u8,
+    free_mode: selection::FreeMode,
+    free_points: Vec<(i32, i32)>,
+    free_op: crate::selection::SelectionOp,
     move_drag: Option<layers::MoveDrag>,
     move_overlay: Option<layers::MovePaint>,
     move_settled: Option<(i32, i32)>,
@@ -175,6 +179,10 @@ impl Workspace {
             crop: None,
             selection_drag: None,
             selection_preview: None,
+            tolerance: 0,
+            free_mode: selection::FreeMode::Freehand,
+            free_points: Vec::new(),
+            free_op: crate::selection::SelectionOp::Replace,
             move_drag: None,
             move_overlay: None,
             move_settled: None,
@@ -369,7 +377,7 @@ impl Workspace {
         let has_transparency = tab.document.canvas.preview.has_transparency;
         let levels = tab.document.canvas.level_caches();
         let mut active_layer = tab.active_layer;
-        let mut selection = tab.selection;
+        let mut selection = tab.selection.clone();
         let job = cx.background_executor().spawn(async move {
             let dirty = if session_only {
                 Dirty::Unpainted

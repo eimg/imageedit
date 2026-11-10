@@ -12,11 +12,12 @@ use gpui::{
 };
 
 use crate::commands::{
-    AlignLayer, ApplyCrop, BackgroundColor, CancelCrop, CancelMove, CloseTab, CropLayerToContent,
-    ExportJpeg, ExportPng, ExportWebp, ForegroundColor, InvertSelection, LayerToImageSize,
+    AlignLayer, ApplyCrop, BackgroundColor, CancelCrop, CancelFreeSelect, CancelMove,
+    CloseFreeSelect, CloseTab, CropLayerToContent, ExportJpeg, ExportPng, ExportWebp,
+    FeatherSelection, ForegroundColor, GrowSelection, InvertSelection, LayerToImageSize,
     MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors,
-    SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, SwapColors, TOOL_GROUPS,
-    ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors,
+    TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -65,6 +66,7 @@ impl Render for Workspace {
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;
+                        this.free_points.clear();
                         this.pan_drag = None;
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
@@ -134,6 +136,24 @@ impl Render for Workspace {
                         root.key_context("Move").on_action(cx.listener(
                             |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
                         ))
+                    })
+                    .on_action(cx.listener(|this, _: &FeatherSelection, window, cx| {
+                        this.radius_form(super::selection::MaskEdit::Feather, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &GrowSelection, window, cx| {
+                        this.radius_form(super::selection::MaskEdit::Grow, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &ShrinkSelection, window, cx| {
+                        this.radius_form(super::selection::MaskEdit::Shrink, window, cx);
+                    }))
+                    .when(!self.free_points.is_empty(), |root| {
+                        root.key_context("FreeSelect")
+                            .on_action(cx.listener(|this, _: &CancelFreeSelect, _, cx| {
+                                this.cancel_free(cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &CloseFreeSelect, window, cx| {
+                                this.close_free(window, cx);
+                            }))
                     })
                 },
             )
@@ -460,6 +480,7 @@ impl Workspace {
                                         cx,
                                     );
                                     this.extend_move(event.position, window.scale_factor(), cx);
+                                    this.extend_free(event.position, window.scale_factor(), cx);
                                 }
                             }
                         }),
@@ -480,7 +501,12 @@ impl Workspace {
                         area.cursor(self.selection_cursor(scale)).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_selection(event.position, window.scale_factor(), cx);
+                                this.begin_selection(
+                                    event.position,
+                                    window.scale_factor(),
+                                    super::selection::selection_op(&event.modifiers),
+                                    cx,
+                                );
                             }),
                         )
                     })
@@ -537,6 +563,33 @@ impl Workspace {
                                 }),
                             )
                     })
+                    .when(self.tool == Tool::FreeSelect && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_free(
+                                    event.position,
+                                    &event.modifiers,
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                    })
+                    .when(self.tool == Tool::MagicWand && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
+                            |this, event: &gpui::ClickEvent, window, cx| {
+                                this.wand_at(
+                                    event.position(),
+                                    &event.modifiers(),
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
                     .when(self.tool == Tool::BucketFill && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
@@ -554,9 +607,13 @@ impl Workspace {
                             show_grid: self.show_grid,
                             show_guides: self.show_guides,
                             crop: self.crop,
-                            selection: self.selection_preview.unwrap_or(tab.selection),
+                            selection: self
+                                .selection_preview
+                                .clone()
+                                .unwrap_or_else(|| tab.selection.clone()),
                             show_handles: self.tool == Tool::Select,
                             move_layer: self.move_paint(),
+                            free_path: self.free_points.clone(),
                         },
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
@@ -675,31 +732,42 @@ impl Workspace {
                                     .line_height(px(19.))
                                     .child(tool.description),
                             )
-                            .when(self.tool == Tool::Select, |panel| {
-                                let enabled = self.selection_command_enabled(
-                                    super::selection::SelectionCommand::None,
-                                );
-                                panel.child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(selection_button(
-                                            "Deselect",
-                                            enabled,
-                                            |window, cx| {
-                                                window.dispatch_action(Box::new(SelectNone), cx);
-                                            },
-                                        ))
-                                        .child(selection_button(
-                                            "Invert",
-                                            enabled,
-                                            |window, cx| {
-                                                window
-                                                    .dispatch_action(Box::new(InvertSelection), cx);
-                                            },
-                                        )),
-                                )
-                            })
+                            .when(
+                                matches!(
+                                    self.tool,
+                                    Tool::Select | Tool::FreeSelect | Tool::MagicWand
+                                ),
+                                |panel| {
+                                    let enabled = self.selection_command_enabled(
+                                        super::selection::SelectionCommand::None,
+                                    );
+                                    panel.child(selection_actions(enabled)).when(
+                                        self.tool == Tool::FreeSelect,
+                                        |panel| {
+                                            panel.child(div().flex().gap_2().children([
+                                                free_mode_button(
+                                                    "Freehand",
+                                                    self.free_mode
+                                                        == super::selection::FreeMode::Freehand,
+                                                    super::selection::FreeMode::Freehand,
+                                                    cx,
+                                                ),
+                                                free_mode_button(
+                                                    "Polygon",
+                                                    self.free_mode
+                                                        == super::selection::FreeMode::Polygon,
+                                                    super::selection::FreeMode::Polygon,
+                                                    cx,
+                                                ),
+                                            ]))
+                                        },
+                                    )
+                                },
+                            )
+                            .when(
+                                matches!(self.tool, Tool::MagicWand | Tool::BucketFill),
+                                |panel| panel.child(tolerance_row(self.tolerance, cx)),
+                            )
                             .when_some(self.crop, |panel, crop| {
                                 panel
                                     .child(format!("{} × {} px", crop.width, crop.height))
@@ -863,7 +931,7 @@ impl Workspace {
                     } else {
                         String::new()
                     };
-                    let selection = match tab.selection {
+                    let selection = match &tab.selection {
                         crate::selection::Selection::Unrestricted => String::new(),
                         crate::selection::Selection::Empty => "  ·  Empty selection".to_owned(),
                         crate::selection::Selection::Full => "  ·  All pixels".to_owned(),
@@ -873,6 +941,7 @@ impl Workspace {
                         crate::selection::Selection::Inverse(_) => {
                             "  ·  Inverted selection".to_owned()
                         }
+                        crate::selection::Selection::Mask(_) => "  ·  Custom selection".to_owned(),
                     };
                     format!(
                         "{}  ·  {} × {} px{selection}{state}",
@@ -1183,6 +1252,7 @@ struct CanvasDecorations {
     selection: crate::selection::Selection,
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
+    free_path: Vec<(i32, i32)>,
 }
 
 fn image_preview(
@@ -1197,6 +1267,7 @@ fn image_preview(
         selection,
         show_handles,
         move_layer,
+        free_path,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
@@ -1207,6 +1278,7 @@ fn image_preview(
     let zoom = tab.zoom;
     let pan = tab.pan;
     let contours = selection.contours(width, height);
+    let mask_edges = selection.outline_edges();
     let handle_rect = show_handles
         .then(|| super::selection::adjustable_rect(selection))
         .flatten();
@@ -1278,6 +1350,15 @@ fn image_preview(
                 }
             }
             paint_contours(window, &geometry, width, height, visible, &contours);
+            paint_segments(window, &geometry, width, height, visible, &mask_edges);
+            paint_segments(
+                window,
+                &geometry,
+                width,
+                height,
+                visible,
+                &free_segments(&free_path),
+            );
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
             }
@@ -1407,6 +1488,54 @@ fn paint_checkerboard(window: &mut Window, image: Bounds<Pixels>, visible: Bound
     }
 }
 
+fn selection_actions(enabled: bool) -> Div {
+    div()
+        .flex()
+        .gap_2()
+        .child(selection_button("Deselect", enabled, |window, cx| {
+            window.dispatch_action(Box::new(SelectNone), cx);
+        }))
+        .child(selection_button("Invert", enabled, |window, cx| {
+            window.dispatch_action(Box::new(InvertSelection), cx);
+        }))
+}
+
+fn free_mode_button(
+    label: &'static str,
+    selected: bool,
+    mode: super::selection::FreeMode,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
+        if this.free_mode != mode {
+            this.free_points.clear();
+            this.free_mode = mode;
+            cx.notify();
+        }
+    }))
+}
+
+fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child("Tolerance")
+        .child(
+            form_button("−", false).on_click(cx.listener(|this, _, _, cx| {
+                this.tolerance = this.tolerance.saturating_sub(1);
+                cx.notify();
+            })),
+        )
+        .child(value.to_string())
+        .child(
+            form_button("+", false).on_click(cx.listener(|this, _, _, cx| {
+                this.tolerance = this.tolerance.saturating_add(1);
+                cx.notify();
+            })),
+        )
+}
+
 fn selection_button(
     label: &'static str,
     enabled: bool,
@@ -1419,6 +1548,42 @@ fn selection_button(
         .when(!enabled, |button| {
             button.opacity(0.45).cursor(CursorStyle::Arrow)
         })
+}
+
+fn free_segments(points: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
+    let mut segments = Vec::new();
+    for pair in points.windows(2) {
+        segments.push((pair[0].0, pair[0].1, pair[1].0, pair[1].1));
+    }
+    if points.len() >= 3 {
+        let last = points[points.len() - 1];
+        let first = points[0];
+        segments.push((last.0, last.1, first.0, first.1));
+    }
+    segments
+}
+
+fn paint_segments(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    segments: &[(i32, i32, i32, i32)],
+) {
+    if segments.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    static START: OnceLock<Instant> = OnceLock::new();
+    let phase = marching_phase(START.get_or_init(Instant::now).elapsed());
+    let mut distance = 0.0;
+    for &(x0, y0, x1, y1) in segments {
+        let from = geometry.project(point(x0 as f32 / width as f32, y0 as f32 / height as f32));
+        let to = geometry.project(point(x1 as f32 / width as f32, y1 as f32 / height as f32));
+        paint_marching_span(window, from, to, phase, distance, visible);
+        distance += (x1 - x0).abs() as f32 + (y1 - y0).abs() as f32;
+    }
+    window.request_animation_frame();
 }
 
 fn paint_contours(

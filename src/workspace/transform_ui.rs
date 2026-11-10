@@ -47,7 +47,7 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| {
                 let old = content.size();
-                let previous = *selection;
+                let previous = selection.clone();
                 let turned = matches!(
                     action,
                     ImageAdjust::RotateLeft | ImageAdjust::RotateRight | ImageAdjust::RotateHalf
@@ -117,9 +117,13 @@ impl Workspace {
                     }
                 } else {
                     let old = content.size();
-                    let previous = *selection;
+                    let previous = selection.clone();
                     if !content.scale_image(width, height, resample) {
                         return Dirty::None;
+                    }
+                    if matches!(previous, Selection::Mask(_)) {
+                        *selection = previous.scale_mask(old, content.size());
+                        return Dirty::Canvas;
                     }
                     *selection = match previous {
                         Selection::Rect(rect) | Selection::Inverse(rect) => previous.moved_box(
@@ -151,10 +155,18 @@ impl Workspace {
         self.edit_content(
             move |content, _, selection| {
                 let old = content.size();
-                let previous = *selection;
+                let previous = selection.clone();
                 let Some(delta) = content.resize_canvas(width, height, anchor) else {
                     return Dirty::None;
                 };
+                if matches!(previous, Selection::Mask(_)) {
+                    let (dx, dy) = delta;
+                    *selection =
+                        previous.map_mask(content.size().0, content.size().1, move |x, y| {
+                            (x + dx, y + dy)
+                        });
+                    return Dirty::Canvas;
+                }
                 let source = match previous {
                     Selection::Full => crate::preview::PixelRect::new(0, 0, old.0, old.1),
                     Selection::Rect(rect) | Selection::Inverse(rect) => rect,
@@ -195,6 +207,26 @@ fn map_image_selection(
     new: (u32, u32),
     action: ImageAdjust,
 ) -> Selection {
+    if matches!(selection, Selection::Mask(_)) {
+        let (width, height) = (old.0 as i32, old.1 as i32);
+        return match action {
+            ImageAdjust::RotateLeft => {
+                selection.map_mask(new.0, new.1, move |x, y| (y, width - 1 - x))
+            }
+            ImageAdjust::RotateRight => {
+                selection.map_mask(new.0, new.1, move |x, y| (height - 1 - y, x))
+            }
+            ImageAdjust::RotateHalf => {
+                selection.map_mask(new.0, new.1, move |x, y| (width - 1 - x, height - 1 - y))
+            }
+            ImageAdjust::FlipHorizontal => {
+                selection.map_mask(new.0, new.1, move |x, y| (width - 1 - x, y))
+            }
+            ImageAdjust::FlipVertical => {
+                selection.map_mask(new.0, new.1, move |x, y| (x, height - 1 - y))
+            }
+        };
+    }
     let (Selection::Rect(rect) | Selection::Inverse(rect)) = selection else {
         return selection;
     };

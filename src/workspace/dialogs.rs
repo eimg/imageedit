@@ -11,6 +11,8 @@ use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
 
+use super::selection::MaskEdit;
+
 pub(super) struct Form {
     focus: FocusHandle,
     kind: FormKind,
@@ -58,6 +60,10 @@ enum FormKind {
         height: Field,
         active: usize,
         anchor: Anchor,
+    },
+    Radius {
+        edit: MaskEdit,
+        radius: Field,
     },
 }
 
@@ -328,6 +334,22 @@ impl Workspace {
         );
     }
 
+    pub(super) fn radius_form(
+        &mut self,
+        edit: MaskEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_form(
+            FormKind::Radius {
+                edit,
+                radius: Field::new("1".into()),
+            },
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn scale_image_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((width, height)) = self.active_tab().map(|tab| tab.document.content.size()) else {
             return;
@@ -562,6 +584,21 @@ impl Workspace {
                 self.dismiss_form(window, cx);
                 self.apply_canvas_size(width, height, anchor, window, cx);
             }
+            FormKind::Radius { edit, radius } => {
+                let Ok(radius) = radius.text.parse::<u32>() else {
+                    form.error = Some("Enter a radius from 0 to 128.".into());
+                    cx.notify();
+                    return;
+                };
+                if radius > 128 {
+                    form.error = Some("Enter a radius from 0 to 128.".into());
+                    cx.notify();
+                    return;
+                }
+                let edit = *edit;
+                self.dismiss_form(window, cx);
+                self.reshape_selection(edit, radius, window, cx);
+            }
             FormKind::LayerOpacity { id, percent } => {
                 let Some(percent) = percent
                     .text
@@ -617,6 +654,9 @@ impl Workspace {
                     }
                     FormKind::LayerOpacity { percent, .. } => {
                         percent.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
+                    FormKind::Radius { radius, .. } => {
+                        radius.handle_key(event, FieldMode::Digits { max: 3 }, cx)
                     }
                     FormKind::Scale {
                         width,
@@ -963,6 +1003,20 @@ impl Workspace {
                             )),
                         )
                         .child(resample_choices(*resample, cx)),
+                ),
+                FormKind::Radius { edit, radius } => (
+                    match edit {
+                        MaskEdit::Feather => "Feather Selection",
+                        MaskEdit::Grow => "Grow Selection",
+                        MaskEdit::Shrink => "Shrink Selection",
+                    },
+                    "Apply",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child("Radius (px)")
+                        .child(radius.view(true)),
                 ),
                 FormKind::Canvas {
                     width,

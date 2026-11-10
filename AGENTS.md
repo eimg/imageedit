@@ -12,9 +12,11 @@ and the latest pass handoff.
 ## Current product scope
 
 ImageEdit supports layered raster editing. Open or create an image, crop it,
-sample or set swatches, and fill connected regions on the active layer. Rectangle
-selection limits fill and Clear to Transparency, and Crop to Selection uses its
-bounds. Move repositions the active layer, and the Layer menu can center it,
+sample or set swatches, and fill connected regions on the active layer. Rectangle, freehand, polygon, and wand selections limit fill and Clear to
+Transparency, and Crop to Selection uses the selection bounds. Shift adds to
+the selection, Control subtracts, and Shift-Control intersects. The wand and
+bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
+Shrink edit the mask. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip,
 and the Image menu can scale the canvas, resize it from a nine-point anchor,
@@ -44,11 +46,13 @@ document is a single plain layer.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
-  a rectangle, or the inverse of a rectangle. `src/workspace/selection.rs`
-  drags the rectangle, resizes it from its handles, moves it from inside, and
-  clears it on a click outside. Over the box the painted crosshair gives way
-  to a hand or resize cursor. The outline is a dashed contour. Shift-add
-  waits for the mask in P12.
+a rectangle, the inverse of a rectangle, or a canvas-bounded coverage mask.
+`src/workspace/selection.rs` drags the rectangle, resizes it from its handles,
+moves it from inside, and clears it on a click outside. Free Select draws a
+freehand or clicked polygon, and the Magic Wand shares the bucket tolerance.
+Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
+painted crosshair gives way to a hand or resize cursor. The outline is a
+dashed contour.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels. Grayscale
   keeps alpha and is stored in the version 3 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies

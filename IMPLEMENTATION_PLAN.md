@@ -2,7 +2,18 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P11
+## Latest handoff · P12
+
+P12 adds free select, the magic wand, and mask editing on branch `p12-selection`, which starts from P11.
+
+- Free Select (`F`) has freehand and click-to-close polygon modes. Escape drops an unfinished outline, and Return closes a polygon of at least three points. The Magic Wand (`U`) and Bucket Fill share a tolerance from 0 to 255. Zero keeps an exact RGBA match. Both use four-neighbor connectivity and the largest channel difference.
+- A rectangle, polygon, or wand replaces the selection unless the gesture starts with Shift (add), Control (subtract), or both (intersect). The result stays a rectangle when it still is one. Anything else is a coverage mask bounded to the canvas.
+- Feather, Grow, and Shrink ask for a radius and record one selection change. Grow and shrink use a square neighborhood and stop at the canvas edge. Feather averages coverage and treats pixels outside the canvas as unselected.
+- Formatting, Clippy and locked tests passed. P11 ended with 83 tests and P12 ends with 86, plus the ignored release benchmark.
+- The gestures were not driven in the app.
+- **Next is P13**, interactive transforms.
+
+## Feature handoff · P11
 
 P11 adds fixed transforms, scaling, canvas size, and image mode on branch `p11-transform`, which starts from the P02–P09 follow-up on `main`.
 

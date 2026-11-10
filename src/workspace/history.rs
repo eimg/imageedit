@@ -253,6 +253,7 @@ mod tests {
                             0,
                             Rgba([color, 0, 0, 255]),
                             &Selection::Unrestricted,
+                            0,
                         )
                         .is_some()
                 },

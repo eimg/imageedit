@@ -5,7 +5,7 @@ use image::{Rgba, RgbaImage, imageops};
 
 use super::{MAX_IMAGE_BYTES, composite};
 use crate::preview::{Dirty, PixelRect};
-use crate::selection::Selection;
+use crate::selection::{Selection, within_tolerance};
 
 pub const IMPORTED_LAYER_NAME: &str = "Image";
 pub const MAX_LAYERS: usize = 128;
@@ -498,6 +498,7 @@ impl DocumentContent {
         y: u32,
         color: Rgba<u8>,
         selection: &Selection,
+        tolerance: u8,
     ) -> Option<PixelRect> {
         if x >= self.width || y >= self.height {
             return None;
@@ -525,8 +526,14 @@ impl DocumentContent {
                 canvas.1,
             )
         };
-        let (pixels, left, top, right, bottom) =
-            bucket_fill(&layer.pixels, local_x as u32, local_y as u32, color, covers)?;
+        let (pixels, left, top, right, bottom) = bucket_fill(
+            &layer.pixels,
+            local_x as u32,
+            local_y as u32,
+            color,
+            tolerance,
+            covers,
+        )?;
         layer.pixels = Arc::new(pixels);
         Some(PixelRect::new(
             origin_x + i64::from(left),
@@ -1020,6 +1027,7 @@ fn bucket_fill(
     x: u32,
     y: u32,
     color: Rgba<u8>,
+    tolerance: u8,
     covers: impl Fn(u32, u32) -> bool,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
     let target = *source.get_pixel(x, y);
@@ -1030,7 +1038,9 @@ fn bucket_fill(
 
     // Paint runs as they are queued, so a pixel is never queued twice.
     let height = image.height();
-    let mut pending = vec![paint_run(&mut image, x, y, target, color, &covers)];
+    let mut pending = vec![paint_run(
+        &mut image, x, y, target, color, tolerance, &covers,
+    )];
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
     while let Some((left, right, y)) = pending.pop() {
         min_x = min_x.min(left);
@@ -1043,8 +1053,8 @@ fn bucket_fill(
         {
             let mut x = left;
             while x <= right {
-                if *image.get_pixel(x, row) == target && covers(x, row) {
-                    let run = paint_run(&mut image, x, row, target, color, &covers);
+                if within_tolerance(*image.get_pixel(x, row), target, tolerance) && covers(x, row) {
+                    let run = paint_run(&mut image, x, row, target, color, tolerance, &covers);
                     x = run.1 + 1;
                     pending.push(run);
                 } else {
@@ -1062,9 +1072,11 @@ fn paint_run(
     y: u32,
     target: Rgba<u8>,
     color: Rgba<u8>,
+    tolerance: u8,
     covers: &impl Fn(u32, u32) -> bool,
 ) -> (u32, u32, u32) {
-    let paintable = |px: u32| *image.get_pixel(px, y) == target && covers(px, y);
+    let paintable =
+        |px: u32| within_tolerance(*image.get_pixel(px, y), target, tolerance) && covers(px, y);
     let mut left = x;
     let mut right = x;
     while left > 0 && paintable(left - 1) {
@@ -1321,9 +1333,9 @@ mod tests {
         let ink = Rgba([20, 30, 40, 255]);
 
         let open = Selection::Unrestricted;
-        assert!(content.fill(LayerId(1), 0, 0, ink, &open).is_none());
+        assert!(content.fill(LayerId(1), 0, 0, ink, &open, 0).is_none());
         assert_eq!(
-            content.fill(LayerId(1), 1, 0, ink, &open),
+            content.fill(LayerId(1), 1, 0, ink, &open, 0),
             Some(PixelRect::new(1, -1, 2, 2))
         );
         assert_eq!(*content.composite().get_pixel(1, 0), ink);
@@ -1343,7 +1355,7 @@ mod tests {
         image.put_pixel(0, 0, blank);
         image.put_pixel(1, 1, blank);
         let (filled, left, top, right, bottom) =
-            bucket_fill(&image, 0, 0, ink, |_, _| true).unwrap();
+            bucket_fill(&image, 0, 0, ink, 0, |_, _| true).unwrap();
         assert_eq!((left, top, right, bottom), (0, 0, 0, 0));
         assert_eq!(filled.into_raw(), [ink.0, wall.0, wall.0, blank.0].concat());
     }
@@ -1361,9 +1373,9 @@ mod tests {
         layer.pixels = Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255])));
         content.layers.push(layer);
         let selection = Selection::Rect(PixelRect::new(3, 4, 2, 1));
-        assert!(content.fill(LayerId(1), 2, 3, ink, &selection).is_none());
+        assert!(content.fill(LayerId(1), 2, 3, ink, &selection, 0).is_none());
         assert_eq!(
-            content.fill(LayerId(1), 3, 4, ink, &selection),
+            content.fill(LayerId(1), 3, 4, ink, &selection, 0),
             Some(PixelRect::new(3, 4, 2, 1))
         );
         let pixels = content.layers[1].pixels.clone();
@@ -1555,6 +1567,7 @@ mod tests {
                 0,
                 Rgba([255, 0, 0, 128]),
                 &Selection::Unrestricted,
+                0,
             )
             .unwrap();
         let filled = content.layers()[0].pixels.get_pixel(0, 0).0;
