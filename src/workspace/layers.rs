@@ -1,21 +1,47 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     Action, AnyView, App, BorderStyle, Bounds, ClickEvent, Context, CursorStyle, Div, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, SharedString, Stateful, Window,
-    canvas, div, img, point, prelude::*, px, quad, rgb, size,
+    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, RenderImage, SharedString, Stateful,
+    Window, canvas, div, img, point, prelude::*, px, quad, rgb, size,
 };
+use image::RgbaImage;
 
 use super::Workspace;
 use super::view::{
     ACCENT, BORDER, CANVAS, CHROME, DISABLED, HOVER, MUTED, SELECTED, TEXT, icon, section_label,
 };
 use crate::commands::{
-    DeleteLayer, DuplicateLayer, LayerOpacity, LowerLayer, MergeDown, NewLayer, RaiseLayer,
-    RenameLayer, ToggleLayerVisibility,
+    AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer, LayerOpacity,
+    LayerToImageSize, LowerLayer, MergeDown, NewLayer, RaiseLayer, RenameLayer,
+    ToggleLayerVisibility,
 };
-use crate::document::LayerId;
+use crate::document::{self, LayerGeometry, LayerId};
+use crate::geometry::{self, Axis, ContentCrop};
 use crate::preview::Dirty;
+
+pub(super) struct MoveDrag {
+    layer: LayerId,
+    origin: (i32, i32),
+    pub(super) offset: (i32, i32),
+    anchor: (i64, i64),
+    anchor_screen: Point<Pixels>,
+}
+
+pub(super) struct MoveOverlay {
+    base: Arc<RenderImage>,
+    sprite: Arc<RenderImage>,
+    offset: (i32, i32),
+    size: (u32, u32),
+}
+
+#[derive(Clone)]
+pub(super) struct MovePaint {
+    pub base: Arc<RenderImage>,
+    pub sprite: Arc<RenderImage>,
+    pub offset: (i32, i32),
+    pub size: (u32, u32),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum LayerCommand {
@@ -475,6 +501,323 @@ impl Workspace {
                 .size_full(),
             )
     }
+
+    pub(super) fn bind_geometry_actions(&self, root: Div, cx: &Context<Self>) -> Div {
+        let root = self.bind_align(root, AlignLayer::Horizontal, cx);
+        let root = self.bind_align(root, AlignLayer::Vertical, cx);
+        let root = self.bind_align(root, AlignLayer::Both, cx);
+        if !self.geometry_enabled() {
+            return root;
+        }
+        root.on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
+            this.layer_to_image_size(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CropLayerToContent, window, cx| {
+            this.crop_layer_to_content(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CropImageToContent, window, cx| {
+            this.crop_image_to_content(window, cx);
+        }))
+    }
+
+    fn bind_align(&self, root: Div, axis: AlignLayer, cx: &Context<Self>) -> Div {
+        if !self.geometry_enabled() {
+            return root;
+        }
+        root.on_action(cx.listener(move |this, action: &AlignLayer, window, cx| {
+            if *action == axis {
+                this.align_active(*action, window, cx);
+            }
+        }))
+    }
+
+    pub(super) fn geometry_enabled(&self) -> bool {
+        self.move_drag.is_none()
+            && self
+                .active_tab()
+                .is_some_and(|tab| !tab.busy() && self.form.is_none() && !self.dialog_open)
+    }
+
+    fn align_active(&mut self, axis: AlignLayer, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
+            return;
+        };
+        let axis = match axis {
+            AlignLayer::Horizontal => Axis::Horizontal,
+            AlignLayer::Vertical => Axis::Vertical,
+            AlignLayer::Both => Axis::Both,
+        };
+        self.edit_content(
+            move |content, _, _| content.align_layer(id, axis),
+            window,
+            cx,
+        );
+    }
+
+    fn layer_to_image_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
+            return;
+        };
+        self.edit_content(
+            move |content, _, _| content.layer_to_image_size(id),
+            window,
+            cx,
+        );
+    }
+
+    fn crop_layer_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let id = tab.active_layer;
+        let Some(layer) = tab.document.content.layer(id) else {
+            return;
+        };
+        if geometry::layer_content_crop(&layer.pixels) == ContentCrop::Empty {
+            self.notice("The layer has no pixels to crop.", cx);
+            return;
+        }
+        self.edit_content(
+            move |content, _, _| match content.crop_layer_to_content(id) {
+                LayerGeometry::Done(dirty) => dirty,
+                LayerGeometry::Empty | LayerGeometry::Unchanged => Dirty::None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn crop_image_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let rect = match tab.document.content.image_content_rect() {
+            ContentCrop::Empty => {
+                self.notice("The image has no pixels to crop.", cx);
+                return;
+            }
+            ContentCrop::Unchanged => return,
+            ContentCrop::Crop(rect) => rect,
+        };
+        let crop = document::CropRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        self.edit_content(
+            move |content, _, selection| match content.crop_image_to_content() {
+                LayerGeometry::Done(dirty) => {
+                    *selection = selection.rebase(
+                        i64::from(crop.x),
+                        i64::from(crop.y),
+                        crop.width,
+                        crop.height,
+                    );
+                    dirty
+                }
+                LayerGeometry::Empty | LayerGeometry::Unchanged => Dirty::None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn begin_move(
+        &mut self,
+        position: Point<Pixels>,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab().is_none_or(|tab| tab.busy()) {
+            return;
+        }
+        let Some(anchor) = self.pointer_pixel(position, scale) else {
+            return;
+        };
+        let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
+            return;
+        };
+        let Some(layer) = tab.document.content.layer(tab.active_layer) else {
+            return;
+        };
+        if !layer.visible {
+            tab.notice = Some("The active layer is hidden. Show it before moving.".into());
+            cx.notify();
+            return;
+        }
+        let id = layer.id;
+        let origin = layer.offset;
+        let size = layer.pixels.dimensions();
+        let opacity = layer.opacity;
+        let pixels = layer.pixels.clone();
+        let content = tab.document.content.clone();
+        self.move_token = self.move_token.wrapping_add(1);
+        let token = self.move_token;
+        self.drop_move_overlay(window, cx);
+        self.move_drag = Some(MoveDrag {
+            layer: id,
+            origin,
+            offset: origin,
+            anchor,
+            anchor_screen: position,
+        });
+        let job = cx.background_executor().spawn(async move {
+            let base = document::preview_render(&content.composite_without(id));
+            let sprite = document::preview_render(&with_layer_opacity(&pixels, opacity));
+            (base, sprite)
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let (base, sprite) = job.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.move_token != token {
+                    cx.drop_image(base, Some(window));
+                    cx.drop_image(sprite, Some(window));
+                    return;
+                }
+                let offset = workspace
+                    .move_drag
+                    .as_ref()
+                    .map(|drag| drag.offset)
+                    .or(workspace.move_settled)
+                    .unwrap_or(origin);
+                workspace.move_overlay = Some(MoveOverlay {
+                    base,
+                    sprite,
+                    offset,
+                    size,
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn extend_move(
+        &mut self,
+        position: Point<Pixels>,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.move_drag.as_ref() else {
+            return;
+        };
+        let delta = position - drag.anchor_screen;
+        let offset = if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
+            drag.origin
+        } else {
+            let Some(pointer) = self.pointer_pixel(position, scale) else {
+                return;
+            };
+            (
+                shift_offset(drag.origin.0, pointer.0 - drag.anchor.0),
+                shift_offset(drag.origin.1, pointer.1 - drag.anchor.1),
+            )
+        };
+        if self
+            .move_drag
+            .as_ref()
+            .is_some_and(|drag| drag.offset == offset)
+        {
+            return;
+        }
+        if let Some(drag) = self.move_drag.as_mut() {
+            drag.offset = offset;
+        }
+        if let Some(overlay) = self.move_overlay.as_mut() {
+            overlay.offset = offset;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn finish_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_some_and(|tab| tab.busy()) {
+            self.cancel_move(window, cx);
+            return;
+        }
+        let Some(drag) = self.move_drag.take() else {
+            return;
+        };
+        if drag.offset == drag.origin {
+            self.clear_move_preview(window, cx);
+            cx.notify();
+            return;
+        }
+        self.move_settled = Some(drag.offset);
+        if let Some(overlay) = self.move_overlay.as_mut() {
+            overlay.offset = drag.offset;
+        }
+        let id = drag.layer;
+        let offset = drag.offset;
+        self.edit_content(
+            move |content, _, _| content.set_offset(id, offset),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn cancel_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_drag.is_none() && self.move_overlay.is_none() {
+            return;
+        }
+        self.clear_move_preview(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn clear_move_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_token = self.move_token.wrapping_add(1);
+        self.move_drag = None;
+        self.drop_move_overlay(window, cx);
+    }
+
+    pub(super) fn drop_move_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_settled = None;
+        if let Some(overlay) = self.move_overlay.take() {
+            cx.drop_image(overlay.base, Some(window));
+            cx.drop_image(overlay.sprite, Some(window));
+        }
+    }
+
+    pub(super) fn move_paint(&self) -> Option<MovePaint> {
+        let overlay = self.move_overlay.as_ref()?;
+        let offset = self
+            .move_drag
+            .as_ref()
+            .map(|drag| drag.offset)
+            .unwrap_or(overlay.offset);
+        Some(MovePaint {
+            base: overlay.base.clone(),
+            sprite: overlay.sprite.clone(),
+            offset,
+            size: overlay.size,
+        })
+    }
+
+    fn notice(&mut self, message: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self.active {
+            self.tabs[index].notice = Some(message.into());
+            cx.notify();
+        }
+    }
+}
+
+fn shift_offset(origin: i32, delta: i64) -> i32 {
+    i64::from(origin)
+        .saturating_add(delta)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn with_layer_opacity(pixels: &RgbaImage, opacity: u8) -> RgbaImage {
+    if opacity == 255 {
+        return pixels.clone();
+    }
+    let mut image = pixels.clone();
+    for pixel in image.pixels_mut() {
+        pixel.0[3] = ((u16::from(pixel.0[3]) * u16::from(opacity)) / 255) as u8;
+    }
+    image
 }
 
 fn tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {

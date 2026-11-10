@@ -21,8 +21,8 @@ use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
 pub use content::{
-    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerId, MAX_LAYER_NAME_CHARS,
-    MAX_LAYERS, RasterLayer,
+    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, LayerGeometry, LayerId,
+    MAX_LAYER_NAME_CHARS, MAX_LAYERS, RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -524,6 +524,10 @@ pub fn decode_image(decoder: impl ImageDecoder) -> Result<DynamicImage> {
         "Invalid image dimensions or image is too large to open"
     );
     DynamicImage::from_decoder(decoder).context("Invalid image data")
+}
+
+pub(crate) fn preview_render(image: &RgbaImage) -> Arc<RenderImage> {
+    render_preview(image).image
 }
 
 fn render_thumbnail(image: &RgbaImage) -> Arc<RenderImage> {

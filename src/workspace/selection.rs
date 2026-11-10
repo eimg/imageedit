@@ -212,7 +212,7 @@ impl Workspace {
         }
     }
 
-    fn pointer_pixel(&self, position: Point<Pixels>, scale: f32) -> Option<(i64, i64)> {
+    pub(super) fn pointer_pixel(&self, position: Point<Pixels>, scale: f32) -> Option<(i64, i64)> {
         let tab = self.active_tab()?;
         let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
         let fraction = geometry.fraction(position);

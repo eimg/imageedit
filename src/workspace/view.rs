@@ -7,11 +7,11 @@ use gpui::{
 };
 
 use crate::commands::{
-    ApplyCrop, BackgroundColor, CancelCrop, CloseTab, ExportJpeg, ExportPng, ExportWebp,
-    ForegroundColor, InvertSelection, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
-    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
-    SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
-    ZoomWindow,
+    AlignLayer, ApplyCrop, BackgroundColor, CancelCrop, CancelMove, CloseTab, CropLayerToContent,
+    ExportJpeg, ExportPng, ExportWebp, ForegroundColor, InvertSelection, LayerToImageSize,
+    MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors,
+    SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, SwapColors, TOOL_GROUPS,
+    ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -53,12 +53,14 @@ impl Render for Workspace {
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
                 let root = self.bind_layer_actions(root, cx);
+                let root = self.bind_geometry_actions(root, cx);
                 let root = self.bind_selection_actions(root, cx);
-                root.on_action(cx.listener(|this, action: &SelectTool, _, cx| {
+                root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     if this.tool != action.0 {
                         this.tool = action.0;
                         this.pan_drag = None;
                         this.clear_selection_gesture();
+                        this.clear_move_preview(window, cx);
                         this.clear_crop();
                         cx.notify();
                     }
@@ -120,6 +122,11 @@ impl Render for Workspace {
                                 this.clear_crop();
                                 cx.notify();
                             }))
+                    })
+                    .when(self.tool == Tool::Move, |root| {
+                        root.key_context("Move").on_action(cx.listener(
+                            |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
+                        ))
                     })
                 },
             )
@@ -445,6 +452,7 @@ impl Workspace {
                                         window.scale_factor(),
                                         cx,
                                     );
+                                    this.extend_move(event.position, window.scale_factor(), cx);
                                 }
                             }
                         }),
@@ -466,6 +474,14 @@ impl Workspace {
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.begin_selection(event.position, window.scale_factor(), cx);
+                            }),
+                        )
+                    })
+                    .when(self.tool == Tool::Move && !tab.busy(), |area| {
+                        area.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_move(event.position, window.scale_factor(), window, cx);
                             }),
                         )
                     })
@@ -527,11 +543,14 @@ impl Workspace {
                     .child(image_preview(
                         tab,
                         self.viewport.clone(),
-                        self.show_grid,
-                        self.show_guides,
-                        self.crop,
-                        self.selection_preview.unwrap_or(tab.selection),
-                        self.tool == Tool::Select,
+                        CanvasDecorations {
+                            show_grid: self.show_grid,
+                            show_guides: self.show_guides,
+                            crop: self.crop,
+                            selection: self.selection_preview.unwrap_or(tab.selection),
+                            show_handles: self.tool == Tool::Select,
+                            move_layer: self.move_paint(),
+                        },
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
                         if *hovered {
@@ -544,17 +563,17 @@ impl Workspace {
                         window.refresh();
                     }))
                     .when(show_tool_cursor, |area| {
-                        // The painted crosshair hides the system pointer. A selection that can
+                        // The painted cursor hides the system pointer. A selection that can
                         // be moved or resized needs that pointer, so the hand and arrows show.
-                        let drag_cursor = self.tool == Tool::Select
+                        let native_cursor = self.tool == Tool::Select
                             && self.selection_cursor(scale) != CursorStyle::Crosshair;
-                        if drag_cursor {
+                        if native_cursor {
                             self.canvas_cursor.show_native(true);
                         }
-                        area.when(!drag_cursor && !cfg!(target_os = "macos"), |area| {
+                        area.when(!native_cursor && !cfg!(target_os = "macos"), |area| {
                             area.cursor(CursorStyle::None)
                         })
-                        .when(!drag_cursor, |area| {
+                        .when(!native_cursor, |area| {
                             area.child(tool_cursor(self.tool, self.canvas_cursor.clone()))
                         })
                     }),
@@ -693,6 +712,100 @@ impl Workspace {
                                             )),
                                     )
                             })
+                            .when(self.tool == Tool::Move, |panel| {
+                                let enabled = self.geometry_enabled();
+                                let offset =
+                                    self.move_drag.as_ref().map(|drag| drag.offset).or_else(|| {
+                                        self.active_tab().and_then(|tab| {
+                                            tab.document
+                                                .content
+                                                .layer(tab.active_layer)
+                                                .map(|layer| layer.offset)
+                                        })
+                                    });
+                                panel
+                                    .when_some(offset, |panel, offset| {
+                                        panel.child(format!("Offset {}, {}", offset.0, offset.1))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(
+                                                selection_button(
+                                                    "Center Horizontally",
+                                                    enabled,
+                                                    |window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(AlignLayer::Horizontal),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .w_full(),
+                                            )
+                                            .child(
+                                                selection_button(
+                                                    "Center Vertically",
+                                                    enabled,
+                                                    |window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(AlignLayer::Vertical),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .w_full(),
+                                            )
+                                            .child(
+                                                selection_button(
+                                                    "Center in Image",
+                                                    enabled,
+                                                    |window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(AlignLayer::Both),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .w_full(),
+                                            )
+                                            .child(
+                                                selection_button(
+                                                    "Layer to Image Size",
+                                                    enabled,
+                                                    |window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(LayerToImageSize),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .w_full(),
+                                            )
+                                            .child(
+                                                selection_button(
+                                                    "Crop to Content",
+                                                    enabled,
+                                                    |window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(CropLayerToContent),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .w_full(),
+                                            ),
+                                    )
+                                    .when(self.move_drag.is_some(), |panel| {
+                                        panel.child(form_button("Cancel", false).on_click(
+                                            |_, window, cx| {
+                                                window.dispatch_action(Box::new(CancelMove), cx);
+                                            },
+                                        ))
+                                    })
+                            })
                             .when(
                                 !matches!(
                                     self.tool,
@@ -702,6 +815,7 @@ impl Workspace {
                                         | Tool::Crop
                                         | Tool::BucketFill
                                         | Tool::Select
+                                        | Tool::Move
                                 ),
                                 |panel| {
                                     panel.child(
@@ -991,6 +1105,8 @@ pub(super) fn icon(path: &'static str, edge: f32) -> Icon {
 fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
     let icon = tool.info().icon;
     let outline = gpui::SharedString::from(format!("cursor-outline/{icon}"));
+    // Move is the four-arrow glyph itself. Other tools keep a crosshair and a side icon.
+    let centered = tool == Tool::Move;
     canvas(
         |_, _, _| {},
         move |bounds, _, window, cx| {
@@ -1009,6 +1125,24 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
                 return;
             };
 
+            if centered {
+                // The toolbox glyph, with a one-pixel shadow so it stays visible on the image.
+                // The thick cursor outline would close the arrow heads into a pen shape.
+                let edge = px(28.);
+                let icon_bounds = Bounds::centered_at(hotspot, size(edge, edge));
+                let shadow =
+                    Bounds::new(icon_bounds.origin + point(px(1.), px(1.)), icon_bounds.size);
+                for (bounds, color) in [(shadow, rgb(0x12151c)), (icon_bounds, rgb(0xffffff))] {
+                    let _ = window.paint_svg(
+                        bounds,
+                        icon.into(),
+                        TransformationMatrix::unit(),
+                        color.into(),
+                        cx,
+                    );
+                }
+                return;
+            }
             let horizontal = if hotspot.x + px(27.) < bounds.right() {
                 7.
             } else {
@@ -1051,15 +1185,28 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
     .size_full()
 }
 
-fn image_preview(
-    tab: &Tab,
-    viewport: Rc<Cell<Bounds<Pixels>>>,
+struct CanvasDecorations {
     show_grid: bool,
     show_guides: bool,
     crop: Option<CropRect>,
     selection: crate::selection::Selection,
     show_handles: bool,
+    move_layer: Option<super::layers::MovePaint>,
+}
+
+fn image_preview(
+    tab: &Tab,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    decorations: CanvasDecorations,
 ) -> impl IntoElement {
+    let CanvasDecorations {
+        show_grid,
+        show_guides,
+        crop,
+        selection,
+        show_handles,
+        move_layer,
+    } = decorations;
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
     let pixels = tab.document.canvas.pixels.clone();
@@ -1091,23 +1238,27 @@ fn image_preview(
             if has_transparency {
                 paint_checkerboard(window, image_bounds, visible);
             }
-            let pixel_width = image_bounds.size.width / width as f32;
-            let pixel_height = image_bounds.size.height / height as f32;
-            if pixel_width.min(pixel_height) >= px(8.) {
-                paint_source_pixels(window, &pixels, image_bounds, visible);
-            } else if !paint_tiles(
-                window,
-                &geometry,
-                width,
-                height,
-                window.scale_factor(),
-                visible,
-                &tile_sets,
-            ) && let Err(error) =
-                window.paint_image(image_bounds, Corners::default(), image, 0, false)
-            {
-                eprintln!("Could not paint image preview: {error}");
-                return;
+            if let Some(move_layer) = move_layer.clone() {
+                paint_moved_layer(window, &geometry, width, height, &move_layer);
+            } else {
+                let pixel_width = image_bounds.size.width / width as f32;
+                let pixel_height = image_bounds.size.height / height as f32;
+                if pixel_width.min(pixel_height) >= px(8.) {
+                    paint_source_pixels(window, &pixels, image_bounds, visible);
+                } else if !paint_tiles(
+                    window,
+                    &geometry,
+                    width,
+                    height,
+                    window.scale_factor(),
+                    visible,
+                    &tile_sets,
+                ) && let Err(error) =
+                    window.paint_image(image_bounds, Corners::default(), image.clone(), 0, false)
+                {
+                    eprintln!("Could not paint image preview: {error}");
+                    return;
+                }
             }
 
             if show_grid {
@@ -1318,6 +1469,48 @@ fn paint_contours(
     }
     if painted {
         window.request_animation_frame();
+    }
+}
+
+fn paint_moved_layer(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    move_layer: &super::layers::MovePaint,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let image_bounds = geometry.bounds;
+    if let Err(error) = window.paint_image(
+        image_bounds,
+        Corners::default(),
+        move_layer.base.clone(),
+        0,
+        false,
+    ) {
+        eprintln!("Could not paint the layer move preview: {error}");
+        return;
+    }
+    let (offset_x, offset_y) = move_layer.offset;
+    let (layer_width, layer_height) = move_layer.size;
+    let start = geometry.project(point(
+        offset_x as f32 / width as f32,
+        offset_y as f32 / height as f32,
+    ));
+    let end = geometry.project(point(
+        (offset_x as f32 + layer_width as f32) / width as f32,
+        (offset_y as f32 + layer_height as f32) / height as f32,
+    ));
+    if let Err(error) = window.paint_image(
+        Bounds::from_corners(start, end),
+        Corners::default(),
+        move_layer.sprite.clone(),
+        0,
+        false,
+    ) {
+        eprintln!("Could not paint the moved layer: {error}");
     }
 }
 

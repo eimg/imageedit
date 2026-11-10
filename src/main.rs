@@ -5,6 +5,7 @@
 
 mod commands;
 mod document;
+mod geometry;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;

@@ -425,6 +425,135 @@ impl DocumentContent {
             (max_y - min_y + 1) as u32,
         ))
     }
+
+    pub fn set_offset(&mut self, id: LayerId, offset: (i32, i32)) -> Dirty {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return Dirty::None;
+        };
+        if layer.offset == offset {
+            return Dirty::None;
+        }
+        let before = layer.bounds();
+        layer.offset = offset;
+        let after = layer.bounds();
+        region_from_bounds(before.union(after))
+    }
+
+    pub fn align_layer(&mut self, id: LayerId, axis: crate::geometry::Axis) -> Dirty {
+        let Some(layer) = self.layer(id) else {
+            return Dirty::None;
+        };
+        let offset = crate::geometry::centered_offset(
+            layer.offset,
+            layer.pixels.width(),
+            layer.pixels.height(),
+            self.width,
+            self.height,
+            axis,
+        );
+        self.set_offset(id, offset)
+    }
+
+    // Resizes the layer to the canvas. Pixels keep their canvas position; the rest is transparent.
+    pub fn layer_to_image_size(&mut self, id: LayerId) -> Dirty {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return Dirty::None;
+        };
+        let Some(pixels) = crate::geometry::layer_to_image_size(
+            layer.offset,
+            &layer.pixels,
+            self.width,
+            self.height,
+        ) else {
+            return Dirty::None;
+        };
+        layer.pixels = Arc::new(pixels);
+        layer.offset = (0, 0);
+        Dirty::Canvas
+    }
+
+    pub fn crop_layer_to_content(&mut self, id: LayerId) -> LayerGeometry {
+        let Some(index) = self.layer_index(id) else {
+            return LayerGeometry::Unchanged;
+        };
+        let crop = match crate::geometry::layer_content_crop(&self.layers[index].pixels) {
+            crate::geometry::ContentCrop::Empty => return LayerGeometry::Empty,
+            crate::geometry::ContentCrop::Unchanged => return LayerGeometry::Unchanged,
+            crate::geometry::ContentCrop::Crop(crop) => crop,
+        };
+        let layer = &mut self.layers[index];
+        let before = layer.bounds();
+        layer.pixels = Arc::new(
+            imageops::crop_imm(&*layer.pixels, crop.x, crop.y, crop.width, crop.height).to_image(),
+        );
+        layer.offset = (
+            layer.offset.0.saturating_add_unsigned(crop.x),
+            layer.offset.1.saturating_add_unsigned(crop.y),
+        );
+        let after = layer.bounds();
+        LayerGeometry::Done(region_from_bounds(before.union(after)))
+    }
+
+    pub fn image_content_rect(&self) -> crate::geometry::ContentCrop {
+        let samples: Vec<_> = self
+            .layers
+            .iter()
+            .map(|layer| crate::geometry::LayerSample {
+                offset: layer.offset,
+                pixels: layer.pixels.as_ref(),
+                visible: layer.visible,
+                opacity: layer.opacity,
+            })
+            .collect();
+        crate::geometry::image_content_crop(&samples, self.width, self.height)
+    }
+
+    pub fn crop_image_to_content(&mut self) -> LayerGeometry {
+        match self.image_content_rect() {
+            crate::geometry::ContentCrop::Empty => LayerGeometry::Empty,
+            crate::geometry::ContentCrop::Unchanged => LayerGeometry::Unchanged,
+            crate::geometry::ContentCrop::Crop(crop) => {
+                let cropped = self.crop(CropRect {
+                    x: crop.x,
+                    y: crop.y,
+                    width: crop.width,
+                    height: crop.height,
+                });
+                if cropped {
+                    LayerGeometry::Done(Dirty::Canvas)
+                } else {
+                    LayerGeometry::Unchanged
+                }
+            }
+        }
+    }
+
+    pub fn composite_without(&self, id: LayerId) -> RgbaImage {
+        let bounds = PixelBounds {
+            left: 0,
+            top: 0,
+            right: i64::from(self.width),
+            bottom: i64::from(self.height),
+        };
+        composite::flatten_region(self.layers.iter().filter(|layer| layer.id != id), bounds)
+    }
+}
+
+pub enum LayerGeometry {
+    Unchanged,
+    Empty,
+    Done(Dirty),
+}
+
+fn region_from_bounds(bounds: PixelBounds) -> Dirty {
+    let width = bounds.right.saturating_sub(bounds.left);
+    let height = bounds.bottom.saturating_sub(bounds.top);
+    match (u32::try_from(width), u32::try_from(height)) {
+        (Ok(width), Ok(height)) if width > 0 && height > 0 => {
+            Dirty::Region(PixelRect::new(bounds.left, bounds.top, width, height))
+        }
+        _ => Dirty::Canvas,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -831,5 +960,82 @@ mod tests {
         assert_eq!(content.layers[1].pixels.get_pixel(1, 1).0, [0, 0, 0, 0]);
         assert_eq!(content.layers[1].pixels.get_pixel(0, 0).0, [1, 2, 3, 255]);
         assert!(content.clear(LayerId(1), &Selection::Empty).is_none());
+    }
+
+    #[test]
+    fn moving_and_aligning_cover_the_old_and_new_layer_bounds() {
+        let mut content = DocumentContent::single_layer(
+            "Image".into(),
+            RgbaImage::from_pixel(4, 2, Rgba([1; 4])),
+        );
+        let id = content.top_layer_id();
+        content.layers[0].offset = (-1, 3);
+        assert_eq!(
+            content.set_offset(id, (2, 3)),
+            Dirty::Region(PixelRect::new(-1, 3, 7, 2))
+        );
+        assert_eq!(content.layers[0].offset, (2, 3));
+        assert_eq!(
+            content.align_layer(id, crate::geometry::Axis::Horizontal),
+            Dirty::Region(PixelRect::new(0, 3, 6, 2))
+        );
+        assert_eq!(content.layers[0].offset, (0, 3));
+        assert_eq!(content.set_offset(id, (0, 3)), Dirty::None);
+    }
+
+    #[test]
+    fn cropping_to_content_keeps_visible_pixels_and_rejects_a_clear_layer() {
+        let mut image = RgbaImage::new(4, 3);
+        image.put_pixel(1, 1, Rgba([4, 5, 6, 255]));
+        image.put_pixel(2, 1, Rgba([4, 5, 6, 128]));
+        let mut content = DocumentContent::single_layer("Image".into(), image);
+        let id = content.top_layer_id();
+        content.layers[0].offset = (5, -2);
+        assert!(matches!(
+            content.crop_layer_to_content(id),
+            LayerGeometry::Done(_)
+        ));
+        assert_eq!(content.layers[0].offset, (6, -1));
+        assert_eq!(content.layers[0].pixels.dimensions(), (2, 1));
+        assert_eq!(content.layers[0].pixels.get_pixel(0, 0).0, [4, 5, 6, 255]);
+
+        content.layers[0].pixels = Arc::new(RgbaImage::new(3, 3));
+        assert!(matches!(
+            content.crop_layer_to_content(id),
+            LayerGeometry::Empty
+        ));
+        assert_eq!(content.layers[0].pixels.dimensions(), (3, 3));
+    }
+
+    #[test]
+    fn cropping_the_image_uses_visible_pixels_and_leaves_a_clear_canvas() {
+        let mut content = DocumentContent::single_layer(
+            "Image".into(),
+            RgbaImage::from_pixel(6, 5, Rgba([0, 0, 0, 0])),
+        );
+        let id = content
+            .add_layer(content.top_layer_id(), "Mark".into(), Rgba([0, 0, 0, 0]))
+            .unwrap();
+        let mut mark = RgbaImage::new(3, 2);
+        mark.put_pixel(1, 0, Rgba([9, 0, 0, 255]));
+        content.layers[1].pixels = Arc::new(mark);
+        content.layers[1].offset = (2, 1);
+        content.layers[0].visible = false;
+        content.layers[0].pixels = Arc::new(RgbaImage::from_pixel(6, 5, Rgba([1, 1, 1, 255])));
+        assert!(matches!(
+            content.crop_image_to_content(),
+            LayerGeometry::Done(Dirty::Canvas)
+        ));
+        assert_eq!(content.size(), (1, 1));
+        assert_eq!(content.layer(id).unwrap().offset, (0, 0));
+        assert_eq!(content.layer(id).unwrap().pixels.get_pixel(0, 0).0[0], 9);
+
+        let clear = DocumentContent::single_layer("Image".into(), RgbaImage::new(4, 4));
+        let mut clear = clear;
+        assert!(matches!(
+            clear.crop_image_to_content(),
+            LayerGeometry::Empty
+        ));
+        assert_eq!(clear.size(), (4, 4));
     }
 }

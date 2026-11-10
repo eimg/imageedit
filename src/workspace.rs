@@ -94,6 +94,10 @@ pub struct Workspace {
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
+    move_drag: Option<layers::MoveDrag>,
+    move_overlay: Option<layers::MoveOverlay>,
+    move_settled: Option<(i32, i32)>,
+    move_token: u64,
     dialog_open: bool,
     form: Option<Form>,
     creating: bool,
@@ -166,6 +170,10 @@ impl Workspace {
             crop: None,
             selection_drag: None,
             selection_preview: None,
+            move_drag: None,
+            move_overlay: None,
+            move_settled: None,
+            move_token: 0,
             dialog_open: false,
             form: None,
             creating: false,
@@ -244,6 +252,7 @@ impl Workspace {
         if self.active != Some(index) {
             self.clear_crop();
             self.clear_selection_gesture();
+            self.clear_move_preview(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -267,6 +276,7 @@ impl Workspace {
         if self.active == Some(index) {
             self.clear_crop();
             self.clear_selection_gesture();
+            self.clear_move_preview(window, cx);
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -314,6 +324,7 @@ impl Workspace {
         if self.can_step_history(change) {
             self.clear_crop();
             self.clear_selection_gesture();
+            self.clear_move_preview(window, cx);
             self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }
@@ -325,6 +336,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.move_drag.is_some() {
+            return;
+        }
         let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
             return;
         };
@@ -382,6 +396,8 @@ impl Workspace {
         let Some(index) = self.tab_index(id) else {
             return;
         };
+        self.move_token = self.move_token.wrapping_add(1);
+        self.drop_move_overlay(window, cx);
         self.history_clock += 1;
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];

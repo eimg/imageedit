@@ -97,6 +97,10 @@ impl Workspace {
             self.extend_selection(event.position, window.scale_factor(), cx);
             self.finish_selection(window, cx);
         }
+        if event.button == MouseButton::Left && self.move_drag.is_some() {
+            self.extend_move(event.position, window.scale_factor(), cx);
+            self.finish_move(window, cx);
+        }
     }
 
     pub(super) fn pan_preview(&mut self, delta: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {

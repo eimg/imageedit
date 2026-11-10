@@ -53,6 +53,15 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   change only selected pixels. With no selection, they change the whole image.
   **Image → Crop to Selection** uses the selection's bounding box and is
   disabled when nothing is selected or the whole image is selected.
+  **Move** (`M`) drags the active layer. The pointer is the four-arrow move
+  glyph. The layer follows it, and releasing it saves one undo step. Escape or
+  Cancel puts it back. A hidden layer cannot be moved. The Move tool options
+  also center the layer, fit it to the canvas, and crop it to its opaque
+  pixels. **Layer → Align** centers the active layer on the
+  canvas, horizontally, vertically, or both. **Layer to Image Size** keeps
+  the pixels that already lie on the canvas and drops the rest. **Crop to
+  Content**, on the Layer and Image menus, trims to pixels that are not fully
+  transparent. A fully transparent layer or image is left unchanged.
   Click either color swatch for the hue and saturation wheel, brightness
   slider, and hex input. The last 12 distinct colors set or sampled in the
   workspace are available in Recent Colors. Click the swap icon between the
@@ -84,7 +93,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
-| Rectangle Select | R |
+| Rectangle Select / Move | R / M |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |
 | Swap / Reset colors | X / D |

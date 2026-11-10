@@ -35,6 +35,10 @@ actions!(
         InvertSelection,
         ClearToTransparency,
         CropToSelection,
+        CropLayerToContent,
+        CropImageToContent,
+        LayerToImageSize,
+        CancelMove,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -85,7 +89,7 @@ impl Tool {
             Self::Move => (
                 "Move",
                 "move",
-                "Reposition a layer or selection on the canvas.",
+                "Drag to reposition the active layer. Escape cancels.",
             ),
             Self::Pan => ("Pan", "hand", "Drag the canvas to navigate a zoomed image."),
             Self::Zoom => (
@@ -199,6 +203,14 @@ pub const TOOL_GROUPS: &[(&str, &[Tool])] = &[
 #[action(namespace = imageedit, no_json)]
 pub struct SelectTool(pub Tool);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
+#[action(namespace = imageedit, no_json)]
+pub enum AlignLayer {
+    Horizontal,
+    Vertical,
+    Both,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Action)]
 #[action(namespace = imageedit, no_json)]
 pub enum Zoom {
@@ -236,6 +248,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("-", ZoomOut, None),
         KeyBinding::new("1", Zoom::Percent(100.), None),
         KeyBinding::new("r", SelectTool(Tool::Select), None),
+        KeyBinding::new("m", SelectTool(Tool::Move), None),
+        KeyBinding::new("escape", CancelMove, Some("Move")),
         KeyBinding::new(&format!("{primary}-a"), SelectAll, None),
         KeyBinding::new(&format!("{primary}-shift-a"), SelectNone, None),
         KeyBinding::new(&format!("{primary}-i"), InvertSelection, None),
@@ -356,7 +370,7 @@ pub fn register(cx: &mut App) {
                 tool(Tool::Crop),
                 MenuItem::action("Apply Crop", ApplyCrop),
                 MenuItem::action("Crop to Selection", CropToSelection),
-                planned("Crop to Content"),
+                MenuItem::action("Crop to Content", CropImageToContent),
             ],
         ),
         menu(
@@ -377,14 +391,14 @@ pub fn register(cx: &mut App) {
                 MenuItem::submenu(menu(
                     "Align",
                     vec![
-                        planned("Center Horizontally in Image"),
-                        planned("Center Vertically in Image"),
-                        planned("Center in Image"),
+                        MenuItem::action("Center Horizontally in Image", AlignLayer::Horizontal),
+                        MenuItem::action("Center Vertically in Image", AlignLayer::Vertical),
+                        MenuItem::action("Center in Image", AlignLayer::Both),
                     ],
                 )),
                 planned("Scale Layer…"),
-                planned("Layer to Image Size"),
-                planned("Crop to Content"),
+                MenuItem::action("Layer to Image Size", LayerToImageSize),
+                MenuItem::action("Crop to Content", CropLayerToContent),
             ],
         ),
         menu(

@@ -14,9 +14,11 @@ and the latest pass handoff.
 ImageEdit supports layered raster editing. Open or create an image, crop it,
 sample or set swatches, and fill connected regions on the active layer. Rectangle
 selection limits fill and Clear to Transparency, and Crop to Selection uses its
-bounds. Each
-tab can undo and redo crops, fills and layer changes, and undoing back to the
-saved state clears the unsaved marker. Tabs retain zoom and pan. The canvas
+bounds. Move repositions the active layer, and the Layer menu can center it,
+fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
+does the same for the canvas. Each tab can undo and redo crops, fills and
+layer changes, and undoing back to the saved state clears the unsaved marker.
+Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. It also supports a grid and center guides. Save and Save As handle
 ImageEdit projects,
@@ -42,9 +44,12 @@ Clipboard workflows are placeholders.
   clears it on a click outside. Over the box the painted crosshair gives way
   to a hand or resize cursor. The outline is a dashed contour. Shift-add
   waits for the mask in P12.
+- `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
+  the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
-  It handles crop and layer-local bucket fill. `src/document/composite.rs`
-  blends visible layers for display, sampling, and raster output.
+  It handles crop, layer-local bucket fill, layer offsets, and content crops.
+  `src/document/composite.rs` blends visible layers for display, sampling, and
+  raster output.
 - `src/project.rs` reads and writes the version 2 project format and applies
  the same size limits in both directions. ImageEdit has not shipped, so older
  project versions are not supported. `fixtures/projects/` holds a golden
@@ -60,10 +65,13 @@ Clipboard workflows are placeholders.
   share layer pixels, and each shared buffer counts once toward the limits.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation.
-- `src/workspace/layers.rs` owns the Layers panel, layer commands and opacity
-  drag coalescing. `src/workspace/dialogs.rs` renders the canvas dimensions,
-  color, JPEG quality and layer dialogs. `src/workspace/color.rs` handles the
-  HSV wheel and brightness slider.
+- `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
+  drag coalescing, and the Move preview. The preview is display-only until
+  the pointer is released. Move's canvas cursor is the four-arrow glyph, and
+  its tool options repeat the align, fit, and content-crop commands.
+  `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality
+  and layer dialogs. `src/workspace/color.rs`
+  handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels. `src/workspace/view.rs` lays out the shell and paints the canvas
   using the same geometry.

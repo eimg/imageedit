@@ -454,4 +454,24 @@ mod tests {
         assert!(!session.history.is_dirty());
         assert_eq!(session.pixel(), [0, 0, 0, 0]);
     }
+
+    #[test]
+    fn undoing_a_layer_move_restores_the_offset_and_keeps_the_selection() {
+        let mut session = Session::new(true, 4);
+        let id = session.current.active_layer;
+        session.current.selection = Selection::Rect(crate::preview::PixelRect::new(1, 1, 1, 1));
+        session.edit(
+            |content| content.set_offset(id, (2, -1)) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        assert_eq!(session.current.content.layer(id).unwrap().offset, (2, -1));
+        assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.current.content.layer(id).unwrap().offset, (0, 0));
+        assert_eq!(
+            session.current.selection,
+            Selection::Rect(crate::preview::PixelRect::new(1, 1, 1, 1))
+        );
+        assert!(!session.history.is_dirty());
+    }
 }

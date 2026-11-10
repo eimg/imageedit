@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P08
+## Latest handoff · P09
+
+P09 adds layer movement and geometry on branch `p09-geometry`, which starts from P08's commit on `p08-selection`.
+
+- Move (`M`) drags the active layer. The canvas cursor is the four-arrow move glyph, centered on the pointer. The tool options repeat Center Horizontally, Center Vertically, Center in Image, Layer to Image Size, and the layer's Crop to Content; they disable while a drag or another edit is in progress. The offset is not written during the drag. The canvas paints a composite with that layer removed, plus the layer itself with its opacity baked into the preview, and the sprite may extend into the margin. Releasing commits one history entry when the offset changed. A press that moves fewer than 3 screen pixels does not. Escape, the Move tool's Cancel button, switching tools or tabs, and undo drop the preview and leave the stored offset alone. A hidden active layer shows a notice and does not start. If a save is in progress when the pointer is released, the preview is cancelled instead of committing.
+- Layer → Align centers on the canvas. One axis keeps the other coordinate. The new coordinate is `(canvas − layer) / 2`, truncating toward zero, so a layer larger than the canvas gets a negative offset. Layer to Image Size copies the on-canvas pixels into a canvas-sized layer at the origin and drops the rest. An exact fit is left unchanged.
+- Crop to Content uses pixels whose alpha is greater than zero. On a layer, the remaining pixels stay in the same canvas place. On the image, hidden layers, zero opacity, and pixels outside the canvas do not count, and the selection is rebased the way other canvas crops rebase it. Moving or aligning a layer does not move the selection. Fully transparent content keeps its dimensions and shows a notice. Content that is already tight is a silent no-op.
+- A move dirties the union of the old and new layer bounds. The project format is unchanged; layer offsets already round-trip. Scale Layer stays planned for P11.
+- Formatting, Clippy and locked tests passed. P08 ended with 51 tests and P09 ends with 59, plus the ignored release benchmark. The tests cover centering, partial alpha, on-canvas fitting, image crops that ignore hidden and off-canvas pixels, the dirty union, and an undo that restores an offset and leaves a saved document clean.
+- The drag, Cancel, and menu commands were not driven in the app.
+- **Next is P10**, clipboard and Open as Layers, or P11 once this geometry is the base it needs. P12 can proceed from P08 without this pass.
+
+## Previous handoff · P08
 
 P08 adds canvas-space selection on branch `p08-selection`, which starts from P07's commit on `p07-preview`.
 
