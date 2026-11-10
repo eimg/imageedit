@@ -38,7 +38,7 @@ pub(super) struct MovePaint {
 }
 
 impl MovePaint {
-    fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
+    pub(super) fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
         self.below
             .into_iter()
             .chain([self.sprite])
@@ -238,7 +238,7 @@ impl Workspace {
         );
     }
 
-    fn select_layer(&mut self, id: LayerId, cx: &mut Context<Self>) {
+    fn select_layer(&mut self, id: LayerId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
             return;
         };
@@ -246,6 +246,8 @@ impl Workspace {
             tab.active_layer = id;
             tab.notice = None;
             self.opacity_drag = None;
+            self.cancel_warp(window, cx);
+            self.begin_warp(window, cx);
             cx.notify();
         }
     }
@@ -345,7 +347,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|row| row.bg(rgb(HOVER)))
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.select_layer(id, cx);
+                    this.select_layer(id, window, cx);
                     if event.click_count() == 2 {
                         this.run_layer_command(LayerCommand::Rename, window, cx);
                     }
@@ -782,7 +784,9 @@ impl Workspace {
     }
 
     pub(super) fn move_paint(&self) -> Option<MovePaint> {
-        self.move_overlay.clone()
+        self.move_overlay
+            .clone()
+            .or_else(|| self.warp_overlay.clone())
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -799,7 +803,7 @@ fn shift_offset(origin: i32, delta: i64) -> i32 {
         .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
-fn with_layer_opacity(pixels: &RgbaImage, opacity: u8) -> RgbaImage {
+pub(super) fn with_layer_opacity(pixels: &RgbaImage, opacity: u8) -> RgbaImage {
     if opacity == 255 {
         return pixels.clone();
     }

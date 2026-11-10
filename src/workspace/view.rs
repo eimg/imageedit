@@ -12,15 +12,17 @@ use gpui::{
 };
 
 use crate::commands::{
-    AlignLayer, ApplyCrop, BackgroundColor, CancelCrop, CancelFreeSelect, CancelMove,
-    CloseFreeSelect, CloseTab, CropLayerToContent, ExportJpeg, ExportPng, ExportWebp,
-    FeatherSelection, ForegroundColor, GrowSelection, InvertSelection, LayerToImageSize,
-    MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors,
-    SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors,
-    TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    AlignLayer, ApplyCrop, ApplyTransform, BackgroundColor, CancelCrop, CancelFreeSelect,
+    CancelMove, CancelTransform, CloseFreeSelect, CloseTab, CropLayerToContent, ExportJpeg,
+    ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection, InvertSelection,
+    LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo,
+    ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection,
+    SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
+    ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
+use crate::transform::{Mirror, Resample};
 
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
@@ -64,14 +66,20 @@ impl Render for Workspace {
                 let root = self.bind_clipboard_actions(root, cx);
                 let root = self.bind_transform_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
-                    if this.tool != action.0 {
-                        this.tool = action.0;
+                    let tool = action.0;
+                    let changed = this.tool != tool;
+                    if changed {
+                        this.tool = tool;
                         this.pan_drag = None;
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
                         this.clear_crop();
-                        cx.notify();
                     }
+                    if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
+                        this.cancel_warp(window, cx);
+                        this.begin_warp(window, cx);
+                    }
+                    cx.notify();
                 }))
                 .when(!self.creating, |root| {
                     root.on_action(
@@ -136,6 +144,19 @@ impl Render for Workspace {
                             |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
                         ))
                     })
+                    .when(
+                        matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective),
+                        |root| {
+                            root.key_context("Transform")
+                                .on_action(cx.listener(|this, _: &ApplyTransform, window, cx| {
+                                    this.apply_warp(window, cx)
+                                }))
+                                .on_action(cx.listener(|this, _: &CancelTransform, window, cx| {
+                                    this.cancel_warp(window, cx);
+                                    cx.notify();
+                                }))
+                        },
+                    )
                     .on_action(cx.listener(|this, _: &FeatherSelection, window, cx| {
                         this.radius_form(super::selection::MaskEdit::Feather, window, cx);
                     }))
@@ -488,6 +509,12 @@ impl Workspace {
                                     );
                                     this.extend_move(event.position, window.scale_factor(), cx);
                                     this.extend_free(event.position, window.scale_factor(), cx);
+                                    this.extend_warp_drag(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
                                 }
                             }
                         }),
@@ -525,6 +552,18 @@ impl Workspace {
                             }),
                         )
                     })
+                    .when(
+                        matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective)
+                            && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_warp_drag(event.position, window.scale_factor(), cx);
+                                }),
+                            )
+                        },
+                    )
                     .when(self.tool == Tool::Crop && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
                             MouseButton::Left,
@@ -620,6 +659,7 @@ impl Workspace {
                                 .unwrap_or_else(|| tab.selection.clone()),
                             show_handles: self.tool == Tool::Select,
                             move_layer: self.move_paint(),
+                            warp: self.warp_frame(),
                             free_path: self.free_points.clone(),
                             polygon: self.free_mode == super::selection::FreeMode::Polygon,
                         },
@@ -888,6 +928,76 @@ impl Workspace {
                                             },
                                         ))
                                     })
+                            })
+                            .when_some(self.warp_status(), |panel, status| {
+                                let horizontal = status.horizontal;
+                                let resample = status.resample;
+                                let show_resample = self.tool != Tool::Flip;
+                                panel
+                                    .child(status.summary)
+                                    .when_some(status.error, |panel, error| {
+                                        panel.child(div().text_color(rgb(0xffb4ab)).child(error))
+                                    })
+                                    .when(self.tool == Tool::Flip, |panel| {
+                                        panel.child(div().flex().gap_2().children([
+                                            warp_choice(
+                                                "Horizontal",
+                                                horizontal,
+                                                Mirror::Horizontal,
+                                                cx,
+                                            ),
+                                            warp_choice(
+                                                "Vertical",
+                                                !horizontal,
+                                                Mirror::Vertical,
+                                                cx,
+                                            ),
+                                        ]))
+                                    })
+                                    .when(show_resample, |panel| {
+                                        panel.child(div().flex().gap_2().children([
+                                            resample_choice(
+                                                "Nearest",
+                                                Resample::Nearest,
+                                                resample,
+                                                cx,
+                                            ),
+                                            resample_choice(
+                                                "Bilinear",
+                                                Resample::Bilinear,
+                                                resample,
+                                                cx,
+                                            ),
+                                            resample_choice(
+                                                "Bicubic",
+                                                Resample::Bicubic,
+                                                resample,
+                                                cx,
+                                            ),
+                                        ]))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(form_button("Apply", true).w_full().on_click(
+                                                |_, window, cx| {
+                                                    window.dispatch_action(
+                                                        Box::new(ApplyTransform),
+                                                        cx,
+                                                    )
+                                                },
+                                            ))
+                                            .child(form_button("Cancel", false).w_full().on_click(
+                                                |_, window, cx| {
+                                                    window.dispatch_action(
+                                                        Box::new(CancelTransform),
+                                                        cx,
+                                                    )
+                                                },
+                                            )),
+                                    )
                             })
                             .when(
                                 !matches!(
@@ -1260,6 +1370,7 @@ struct CanvasDecorations {
     selection: crate::selection::Selection,
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
+    warp: Option<super::transform_ui::WarpFrame>,
     free_path: Vec<Point<f32>>,
     polygon: bool,
 }
@@ -1276,6 +1387,7 @@ fn image_preview(
         selection,
         show_handles,
         move_layer,
+        warp,
         free_path,
         polygon,
     } = decorations;
@@ -1370,6 +1482,9 @@ fn image_preview(
             paint_free_outline(window, &geometry, viewport, &free_path, polygon);
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
+            }
+            if let Some(frame) = warp {
+                paint_warp_frame(window, &geometry, viewport, width, height, frame);
             }
             if let Some(crop) = crop {
                 let start = geometry.project(point(
@@ -1521,6 +1636,28 @@ fn free_mode_button(
             this.free_mode = mode;
             cx.notify();
         }
+    }))
+}
+
+fn warp_choice(
+    label: &'static str,
+    selected: bool,
+    mirror: Mirror,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+        this.set_warp_mirror(mirror, window, cx);
+    }))
+}
+
+fn resample_choice(
+    label: &'static str,
+    resample: Resample,
+    selected: Resample,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, resample == selected).on_click(cx.listener(move |this, _, window, cx| {
+        this.set_warp_resample(resample, window, cx);
     }))
 }
 
@@ -1704,6 +1841,57 @@ fn paint_moved_layer(
     {
         eprintln!("Could not paint layers above the moved layer: {error}");
     }
+}
+
+fn paint_warp_frame(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    viewport: Bounds<Pixels>,
+    width: u32,
+    height: u32,
+    frame: super::transform_ui::WarpFrame,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let project = |corner: (f64, f64)| {
+        geometry.project(point(
+            corner.0 as f32 / width as f32,
+            corner.1 as f32 / height as f32,
+        ))
+    };
+    window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+        let outline = frame.outline.map(project);
+        for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
+            let mut path = PathBuilder::stroke(px(weight));
+            path.move_to(outline[0]);
+            for corner in outline.iter().skip(1) {
+                path.line_to(*corner);
+            }
+            path.line_to(outline[0]);
+            if let Some(axis) = frame.axis {
+                let axis = axis.map(project);
+                path.move_to(axis[0]);
+                path.line_to(axis[1]);
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        let scale = window.scale_factor();
+        let snap = |value: f32| (value * scale).round() / scale;
+        for grip in frame.grips.iter().take(frame.grip_count) {
+            let center = project(*grip);
+            let origin = point(
+                px(snap(f32::from(center.x) - 3.5)),
+                px(snap(f32::from(center.y) - 3.5)),
+            );
+            window.paint_quad(fill(
+                Bounds::new(origin, size(px(7.), px(7.))),
+                rgb(0xffffff),
+            ));
+        }
+    });
 }
 
 fn paint_handles(

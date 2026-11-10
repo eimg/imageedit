@@ -18,8 +18,10 @@ the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
-does the same for the canvas. Image and Layer transforms rotate and flip,
-and the Image menu can scale the canvas, resize it from a nine-point anchor,
+does the same for the canvas. Image and Layer transforms rotate and flip
+by quarter turns. Rotate, Flip, and Perspective preview the active layer and
+commit on Apply, leaving the selection in canvas coordinates. The Image menu
+can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. Each tab can undo and redo crops, fills, selections and
@@ -54,8 +56,9 @@ bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
 Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
 painted crosshair gives way to a hand or resize cursor. The outline is a
 dashed contour.
-- `src/transform.rs` turns, mirrors, scales, and anchors layer pixels. Grayscale
-  keeps alpha and is stored in the version 3 project.
+- `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
+  warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
+  is stored in the version 3 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.

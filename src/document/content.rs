@@ -605,6 +605,34 @@ impl DocumentContent {
         region_from_bounds(before.union(after))
     }
 
+    pub fn accepts_replacement(&self, id: LayerId, pixels: &RgbaImage) -> bool {
+        let Some(index) = self.layer_index(id) else {
+            return false;
+        };
+        let Some(added) = image_bytes(pixels) else {
+            return false;
+        };
+        let removed = image_bytes(&self.layers[index].pixels).unwrap_or(0);
+        self.fits_stack(removed, added)
+    }
+
+    // Replaces the layer's pixels and origin. The selection is left untouched.
+    pub fn place_layer(&mut self, id: LayerId, pixels: RgbaImage, offset: (i32, i32)) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let pixels = self.mode.constrain_image(pixels);
+        if self.layers[index].offset == offset && self.layers[index].pixels.as_ref() == &pixels {
+            return Dirty::None;
+        }
+        if !self.accepts_replacement(id, &pixels) {
+            return Dirty::None;
+        }
+        self.layers[index].pixels = Arc::new(pixels);
+        self.layers[index].offset = offset;
+        Dirty::Canvas
+    }
+
     pub fn align_layer(&mut self, id: LayerId, axis: crate::geometry::Axis) -> Dirty {
         let Some(layer) = self.layer(id) else {
             return Dirty::None;

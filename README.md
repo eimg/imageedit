@@ -82,6 +82,11 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   moves with it. **Layer → Transform** does the same to the active layer and
   leaves the selection where it is. **Scale Image** and **Scale Layer** resize
   with nearest, bilinear, or bicubic sampling and an optional aspect lock.
+  **Rotate** (`Shift+R`), **Flip** (`Shift+F`), and **Perspective** (`Shift+P`)
+  preview the active layer. Drag to turn it, choose or drag a flip direction,
+  or drag the perspective corners. Return applies the preview and Escape
+  cancels it. The selection stays in place. A flat, crossed, or oversized
+  shape is refused.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened
@@ -119,6 +124,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
 | Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
+| Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |

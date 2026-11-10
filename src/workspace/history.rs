@@ -539,6 +539,55 @@ mod tests {
     }
 
     #[test]
+    fn placing_a_rotated_layer_keeps_the_selection_and_undoes() {
+        use crate::preview::Dirty;
+        use crate::transform::{Resample, Warp, warp_layer};
+
+        let mut session = Session::new(true, 4);
+        let id = session.current.active_layer;
+        let selection = Selection::Rect(crate::preview::PixelRect::new(1, 1, 2, 2));
+        session.current.selection = selection.clone();
+        let mut image = image::RgbaImage::new(3, 1);
+        image.put_pixel(0, 0, Rgba([10, 0, 0, 255]));
+        image.put_pixel(1, 0, Rgba([20, 0, 0, 255]));
+        image.put_pixel(2, 0, Rgba([30, 0, 0, 255]));
+        let placed =
+            warp_layer(&image, (0, 0), Warp::Rotate(90.0), Resample::Nearest, None).unwrap();
+        let offset = placed.offset;
+        session.edit(
+            |content| content.place_layer(id, placed.pixels, offset) != Dirty::None,
+            &LIMITS,
+        );
+        assert_eq!(session.current.content.layer(id).unwrap().offset, (1, -1));
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(id)
+                .unwrap()
+                .pixels
+                .dimensions(),
+            (1, 3)
+        );
+        assert_eq!(session.current.selection, selection);
+        assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.current.content.layer(id).unwrap().offset, (0, 0));
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(id)
+                .unwrap()
+                .pixels
+                .dimensions(),
+            (4, 4)
+        );
+        assert_eq!(session.current.selection, selection);
+        assert!(!session.history.is_dirty());
+    }
+
+    #[test]
     fn undoing_a_layer_move_restores_the_offset_and_keeps_the_selection() {
         let mut session = Session::new(true, 4);
         let id = session.current.active_layer;

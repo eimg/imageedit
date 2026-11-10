@@ -2,6 +2,16 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
+## Latest handoff · P13
+
+P13 adds interactive Rotate, Flip, and Perspective on branch `p13-transform`, which starts from the P10–P12 follow-up.
+
+- Rotate (`Shift+R`), Flip (`Shift+F`), and Perspective (`Shift+P`) preview the whole active layer. Rotate drags around the layer center. Flip uses the tool options or a drag to choose the axis. Perspective drags the four corners. Return or Apply commits one layer change. Escape or Cancel discards the preview. The selection stays in canvas coordinates.
+- The preview and the committed layer use the same placement. Bilinear and bicubic resampling weight color by alpha. A quad that is flat, self-crossing, or larger than the image budget is refused, and Apply does not record history.
+- Formatting, Clippy and locked tests passed. The follow-up ended with 93 tests and P13 ends with 97, plus the ignored release benchmark.
+- The gestures were not driven in the app. Pan and zoom use the same canvas projection as the other tools.
+- **Next is P14**, the stroke engine and basic paint tools.
+
 ## P10–P12 follow-up
 
 Reviewed the three passes from the P12 checkout (`fd11be3`).
@@ -11,7 +21,7 @@ Reviewed the three passes from the P12 checkout (`fd11be3`).
 - Copy and Cut apply feather coverage to the clipboard image. Fill and Clear apply it to the edited pixels. Canvas Size translates an inverted selection within the old canvas area, leaving added space outside the selection.
 - Formatting, Clippy, and 93 locked tests passed. The macOS bundle passed strict signature verification. Native Free Select gestures and cross-app clipboard checks remain for the interactive pass.
 
-## Latest handoff · P12
+## Feature handoff · P12
 
 P12 adds free select, the magic wand, and mask editing on branch `p12-selection`, which starts from P11.
 

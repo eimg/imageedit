@@ -105,6 +105,14 @@ pub struct Workspace {
     move_overlay: Option<layers::MovePaint>,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
+    warp: Option<transform_ui::WarpSession>,
+    warp_overlay: Option<layers::MovePaint>,
+    warp_token: u64,
+    warp_busy: bool,
+    warp_dirty: bool,
+    warp_applying: bool,
+    warp_error: Option<&'static str>,
+    warp_resample: crate::transform::Resample,
     copy_token: u64,
     paste_token: u64,
     dialog_open: bool,
@@ -187,6 +195,14 @@ impl Workspace {
             move_overlay: None,
             move_settled: None,
             move_token: 0,
+            warp: None,
+            warp_overlay: None,
+            warp_token: 0,
+            warp_busy: false,
+            warp_dirty: false,
+            warp_applying: false,
+            warp_error: None,
+            warp_resample: crate::transform::Resample::Bilinear,
             copy_token: 0,
             paste_token: 0,
             dialog_open: false,
@@ -264,10 +280,12 @@ impl Workspace {
     }
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active != Some(index) {
+        let switched = self.active != Some(index);
+        if switched {
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
+            self.cancel_warp(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -275,6 +293,9 @@ impl Workspace {
         self.tab_scroll.scroll_to_item(index);
         self.update_title(window);
         self.ensure_preview_level(window.scale_factor(), window, cx);
+        if switched {
+            self.begin_warp(window, cx);
+        }
         cx.notify();
     }
 
@@ -288,10 +309,12 @@ impl Workspace {
 
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.pan_drag = None;
-        if self.active == Some(index) {
+        let closed_active = self.active == Some(index);
+        if closed_active {
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
+            self.cancel_warp(window, cx);
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -306,6 +329,9 @@ impl Workspace {
             self.tab_scroll.scroll_to_item(active);
         }
         self.update_title(window);
+        if closed_active && self.active.is_some() {
+            self.begin_warp(window, cx);
+        }
         cx.notify();
     }
 
@@ -340,6 +366,7 @@ impl Workspace {
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
+            self.cancel_warp(window, cx);
             self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }
