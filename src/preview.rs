@@ -157,15 +157,14 @@ impl TileCache {
                 retained: self.stored(),
             };
         }
-        let coverage = dirty.expand(self.apron);
         let mut rebuilt = 0;
         for row in 0..self.rows {
             for column in 0..self.cols {
-                if !self.coverage(column, row).overlaps(coverage) {
+                if !self.coverage(column, row).overlaps(dirty) {
                     continue;
                 }
                 let index = (row * self.cols + column) as usize;
-                let rect = self.stored_rect(column, row);
+                let rect = self.coverage(column, row);
                 let image = content.composite_rect(rect.x, rect.y, rect.width, rect.height);
                 self.tiles[index] = Some(Arc::new(box_downsample(&image, self.shift)));
                 rebuilt += 1;
@@ -240,7 +239,16 @@ impl TileCache {
     }
 
     fn stored_rect(&self, column: u32, row: u32) -> PixelRect {
-        self.coverage(column, row)
+        let source = self.coverage(column, row);
+        let scale = self.scale();
+        // A partial block at the canvas edge still occupies one texel in the image.
+        // Keep its drawn pitch consistent with the samples shared by adjacent tiles.
+        PixelRect::new(
+            source.x,
+            source.y,
+            source.width.div_ceil(scale) * scale,
+            source.height.div_ceil(scale) * scale,
+        )
     }
 }
 
@@ -261,21 +269,25 @@ pub fn box_downsample(source: &RgbaImage, shift: u32) -> RgbaImage {
     let width = source.width().div_ceil(factor);
     let height = source.height().div_ceil(factor);
     RgbaImage::from_fn(width, height, |x, y| {
-        let mut sum = [0u32; 4];
-        let mut count = 0u32;
-        for dy in 0..factor {
-            for dx in 0..factor {
-                let sx = x * factor + dx;
-                let sy = y * factor + dy;
-                if sx < source.width() && sy < source.height() {
-                    for (channel, value) in sum.iter_mut().zip(source.get_pixel(sx, sy).0) {
-                        *channel += u32::from(value);
-                    }
-                    count += 1;
+        let left = x * factor;
+        let top = y * factor;
+        let right = (left + factor).min(source.width());
+        let bottom = (top + factor).min(source.height());
+        let count = u64::from(right - left) * u64::from(bottom - top);
+        let mut rgb = [0u64; 3];
+        let mut alpha = 0u64;
+        for sy in top..bottom {
+            for sx in left..right {
+                let [r, g, b, a] = source.get_pixel(sx, sy).0;
+                let a = u64::from(a);
+                alpha += a;
+                for (sum, channel) in rgb.iter_mut().zip([r, g, b]) {
+                    *sum += u64::from(channel) * a;
                 }
             }
         }
-        Rgba(sum.map(|channel| (channel / count.max(1)) as u8))
+        let [r, g, b] = rgb.map(|sum| (sum / alpha.max(1)) as u8);
+        Rgba([r, g, b, (alpha / count) as u8])
     })
 }
 
@@ -309,7 +321,7 @@ pub fn time_updates(
         elapsed.push(started.elapsed().as_micros());
     }
     elapsed.sort_unstable();
-    let index = ((samples as usize).saturating_sub(1) * 95) / 100;
+    let index = (samples as usize * 95).div_ceil(100) - 1;
     TimedUpdate {
         tile,
         rebuilt,
@@ -369,6 +381,54 @@ mod tests {
         assert_eq!(cache.visible(PixelRect::new(0, 0, 100, 100)), 1);
         assert_eq!(cache.visible(PixelRect::new(200, 0, 100, 10)), 2);
         assert_eq!(cache.visible(PixelRect::new(600, 0, 20, 20)), 0);
+    }
+
+    #[test]
+    fn a_tile_only_rebuilds_for_pixels_inside_its_sampling_apron() {
+        let content = solid(512, 256, [1, 2, 3, 255]);
+        let mut cache = TileCache::new(512, 256, TILE_FINE, FILTER_APRON);
+        assert_eq!(
+            cache
+                .rebuild(&content, PixelRect::new(254, 10, 1, 1))
+                .rebuilt,
+            1
+        );
+        assert_eq!(
+            cache
+                .rebuild(&content, PixelRect::new(255, 10, 1, 1))
+                .rebuilt,
+            2
+        );
+    }
+
+    #[test]
+    fn an_odd_canvas_keeps_a_consistent_sampling_pitch_across_fit_tiles() {
+        let content = solid(19, 3, [1, 2, 3, 255]);
+        let mut cache = TileCache::leveled(19, 3, 4, FILTER_APRON, 1);
+        cache.rebuild(&content, PixelRect::new(0, 0, 19, 3));
+        let spans: Vec<_> = cache.spans().collect();
+        assert_eq!(spans[2].content.right(), 19);
+        assert_eq!(spans[2].stored.right(), 20);
+        for span in spans {
+            let tile = cache.slot(span.index).unwrap();
+            assert_eq!(span.stored.width, tile.width() * 2);
+            assert_eq!(span.stored.height, tile.height() * 2);
+        }
+    }
+
+    #[test]
+    fn fit_downsampling_weights_color_by_alpha() {
+        let source = RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 0])
+            }
+        });
+        assert_eq!(
+            box_downsample(&source, 1).get_pixel(0, 0).0,
+            [255, 0, 0, 127]
+        );
     }
 
     #[test]

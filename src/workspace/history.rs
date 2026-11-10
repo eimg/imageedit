@@ -78,23 +78,25 @@ impl History {
         self.saved = Some(revision);
     }
 
-    pub fn undo_target(&self) -> Option<&State> {
-        self.undo.back().map(|entry| &entry.state)
+    pub fn undo_target(&self) -> Option<(&State, Revision)> {
+        self.undo.back().map(|entry| (&entry.state, entry.revision))
     }
 
-    pub fn redo_target(&self) -> Option<&State> {
-        self.redo.last().map(|entry| &entry.state)
+    pub fn redo_target(&self) -> Option<(&State, Revision)> {
+        self.redo.last().map(|entry| (&entry.state, entry.revision))
     }
 
-    pub fn commit(&mut self, previous: State, stamp: u64) {
+    pub fn commit(&mut self, previous: State, stamp: u64, persistent: bool) {
         self.redo.clear();
         self.undo.push_back(Entry {
             state: previous,
             revision: self.revision,
             stamp,
         });
-        self.revision = Revision(self.next_revision);
-        self.next_revision += 1;
+        if persistent {
+            self.revision = Revision(self.next_revision);
+            self.next_revision += 1;
+        }
         self.generation += 1;
     }
 
@@ -234,7 +236,7 @@ mod tests {
             if edit(&mut next.content) {
                 let previous = std::mem::replace(&mut self.current, next);
                 let stamp = self.tick();
-                self.history.commit(previous, stamp);
+                self.history.commit(previous, stamp, true);
                 self.history
                     .enforce_tab_limits(&self.current.content, limits);
             }
@@ -376,8 +378,8 @@ mod tests {
         // Each 2 × 2 layer holds 16 bytes.
         let mut session = Session::new(true, 2);
         let shared = session.current.clone();
-        session.history.commit(shared.clone(), 1);
-        session.history.commit(shared, 2);
+        session.history.commit(shared.clone(), 1, true);
+        session.history.commit(shared, 2, true);
         assert_eq!(session.history.retained_bytes(&session.current.content), 0);
 
         let limits = Limits {
@@ -442,17 +444,31 @@ mod tests {
     }
 
     #[test]
-    fn undoing_a_selection_returns_a_saved_document_to_clean() {
+    fn selection_history_preserves_the_persistent_revision() {
         let mut session = Session::new(true, 2);
+        let saved = session.history.revision();
+        let generation = session.history.generation();
         let previous = session.current.clone();
         session.current.selection = Selection::Full;
         let stamp = session.tick();
-        session.history.commit(previous, stamp);
+        session.history.commit(previous, stamp, false);
+        assert_eq!(session.history.revision(), saved);
+        assert_ne!(session.history.generation(), generation);
+        assert!(!session.history.is_dirty());
+
+        session.fill(1, &LIMITS);
         assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.current.selection, Selection::Full);
+        assert!(!session.history.is_dirty());
         assert!(session.undo());
         assert_eq!(session.current.selection, Selection::Unrestricted);
         assert!(!session.history.is_dirty());
-        assert_eq!(session.pixel(), [0, 0, 0, 0]);
+        assert!(session.redo());
+        assert_eq!(session.current.selection, Selection::Full);
+        assert!(!session.history.is_dirty());
+        assert!(session.redo());
+        assert!(session.history.is_dirty());
     }
 
     #[test]

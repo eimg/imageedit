@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P10
+## P02–P09 follow-up
+
+Reviewed the P02–P09 acceptance criteria on top of the P10 checkout (`64e0360`).
+
+- P02 and P04. A project truncated during open returns an error. Save As and Export reject aliases that resolve to a different file extension. Export requires a separate destination and suggests an `-export` suffix when the default name would match the source. Open files and pending writes reserve their canonical paths. The v2 format and golden fixture are unchanged.
+- P03 and P08. Selection changes, including undo and redo, keep the saved revision and reuse the rendered canvas. They still advance the edit generation. An undo or redo whose target is evicted by another tab drops the prepared patch. Rectangle handles resize relative to the grab point, so a click leaves the bounds in place.
+- P05 and P09. New, Duplicate, Merge Down, and Layer to Image Size respect the project’s decoded pixel budget. Canvas rebuilds release thumbnails for removed layers. Move keeps upper layers above the sprite, shows newly exposed transparency, and tracks the pointer beyond the canvas edge. Edits finishing in other tabs leave the current Move preview intact.
+- P06 and P07. Fit builds one level at a time per tab and checks again after a stale build. Downsampling weights color by alpha and keeps a consistent texel pitch for partial blocks. Dirty edits invalidate tiles whose actual sampling footprint intersects the edit.
+- Cursor follow-up. Move uses the shared crosshair with a 20 px four-arrow badge. The selection outline measures its dash phase from a monotonic clock to keep the animation moving.
+- Verification. Formatting, Clippy, and locked tests passed with 74 tests. The release benchmark passed separately. On the 8192 × 8192 fixture, 256 px tiles measured 92 µs interior p95 (1 tile), 377 µs boundary p95 (4 tiles), and 112 ms for a full refresh. 512 px tiles measured 312 µs, 1449 µs, and 93 ms respectively. The benchmark measures CPU tile updates. The macOS bundle built and passed strict signature verification.
+- Deferred native checks include file dialogs and menu availability, opacity and reorder gestures, zooming and panning across tile seams, switching and closing tabs during preview work, and selection and Move gestures. P11 remains the next feature pass.
+
+## Feature handoff · P10
 
 P10 adds clipboard images and Open as Layers on branch `p10-clipboard`, which starts from P09's commit on `p09-geometry`.
 
@@ -137,7 +149,7 @@ This plan changes the sequencing and resolves the decisions that would otherwise
 | --- | --- |
 | Save | Save preserves the format of an existing raster-backed tab while its contents can be represented by that format. A tab with multiple layers or project-only content routes Save to an `.imageedit` destination. A project-backed tab stays project-backed. New documents default to `.imageedit`. |
 | Save As | Preserve the existing raster option for eligible single-layer raster documents. Use `.imageedit` for projects and documents with project-only content. Save Project As always writes `.imageedit`. A rejected raster destination leaves the source file, tab path, and saved revision intact. |
-| Export | PNG, JPEG and lossless WebP export the canvas composite and keep the current tab path, project format and saved revision. Prompt before replacing a destination and reject export over a file owned by another open tab or in-flight write. JPEG composites against white, with an explicit quality setting defaulting to 92. |
+| Export | PNG, JPEG and lossless WebP export the canvas composite and keep the current tab path, project format and saved revision. Prompt before replacing a destination and reject export over any open file or in-flight write. JPEG composites against white, with an explicit quality setting defaulting to 92. |
 | Layers | Bottom-to-top stack, signed integer canvas offsets, 8-bit RGBA, visibility and per-layer opacity. Start with Normal source-over. Multiply, Screen, Overlay and additional modes are follow-up features. |
 | Selection | Canvas-space coverage from 0 to 255. No selection means unrestricted editing. An explicitly empty selection affects zero pixels. Selection and active layer are session state. Selection changes can be undone and do not mark the project dirty by themselves. |
 | Move | Move changes the active layer offset and leaves the selection mask in canvas coordinates. Defer floating selections and anchoring. Cut/Paste as New Layer gives users an explicit selected-pixel move workflow. |

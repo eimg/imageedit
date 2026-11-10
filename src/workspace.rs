@@ -67,6 +67,7 @@ impl Tab {
 #[derive(Clone, Copy)]
 enum Change {
     Edit,
+    Selection,
     Undo,
     Redo,
 }
@@ -96,7 +97,7 @@ pub struct Workspace {
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
     move_drag: Option<layers::MoveDrag>,
-    move_overlay: Option<layers::MoveOverlay>,
+    move_overlay: Option<layers::MovePaint>,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
     copy_token: u64,
@@ -318,7 +319,7 @@ impl Workspace {
         self.active_tab().is_some_and(|tab| {
             !tab.busy()
                 && match change {
-                    Change::Edit => false,
+                    Change::Edit | Change::Selection => false,
                     Change::Undo => tab.history.undo_target().is_some(),
                     Change::Redo => tab.history.redo_target().is_some(),
                 }
@@ -350,14 +351,15 @@ impl Workspace {
         if tab.busy() {
             return;
         }
-        let source = match change {
-            Change::Edit => Some(&tab.document.content),
-            Change::Undo => tab.history.undo_target().map(|state| &state.content),
-            Change::Redo => tab.history.redo_target().map(|state| &state.content),
+        let target = match change {
+            Change::Edit | Change::Selection => None,
+            Change::Undo => tab.history.undo_target(),
+            Change::Redo => tab.history.redo_target(),
         };
-        let Some(mut content) = source.cloned() else {
-            return;
-        };
+        let mut content = target
+            .map_or(&tab.document.content, |(state, _)| &state.content)
+            .clone();
+        let session_only = target.is_some_and(|(_, revision)| revision == tab.history.revision());
         tab.editing = true;
         tab.notice = None;
         let id = tab.id;
@@ -368,7 +370,11 @@ impl Workspace {
         let mut active_layer = tab.active_layer;
         let mut selection = tab.selection;
         let job = cx.background_executor().spawn(async move {
-            let dirty = edit(&mut content, &mut active_layer, &mut selection);
+            let dirty = if session_only {
+                Dirty::Unpainted
+            } else {
+                edit(&mut content, &mut active_layer, &mut selection)
+            };
             RenderedCanvas::prepare_patch(&pixels, has_transparency, levels, &content, dirty)
                 .map(|patch| (content, active_layer, selection, patch))
         });
@@ -401,8 +407,10 @@ impl Workspace {
         let Some(index) = self.tab_index(id) else {
             return;
         };
-        self.move_token = self.move_token.wrapping_add(1);
-        self.drop_move_overlay(window, cx);
+        if self.active == Some(index) && self.move_settled.is_some() {
+            self.move_token = self.move_token.wrapping_add(1);
+            self.drop_move_overlay(window, cx);
+        }
         self.history_clock += 1;
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];
@@ -416,8 +424,9 @@ impl Workspace {
         }
         let current = tab.state();
         let (content, active_layer, selection) = match change {
-            Change::Edit => {
-                tab.history.commit(current, stamp);
+            Change::Edit | Change::Selection => {
+                tab.history
+                    .commit(current, stamp, matches!(change, Change::Edit));
                 (content, edited_layer, edited_selection)
             }
             Change::Undo | Change::Redo => {
@@ -426,7 +435,11 @@ impl Workspace {
                 } else {
                     tab.history.redo(current, stamp)
                 };
-                let state = state.expect("the generation guards the history target");
+                // Another tab can evict this history target while the patch is rendering.
+                let Some(state) = state else {
+                    drop_images(patch.into_images(), window, cx);
+                    return;
+                };
                 (state.content, state.active_layer, state.selection)
             }
         };
@@ -504,7 +517,7 @@ impl Workspace {
         let tab = &mut self.tabs[index];
         if shift == 0
             || tab.document.canvas.has_level(shift)
-            || tab.building_level == Some(shift)
+            || tab.building_level.is_some()
             || tab.busy()
         {
             return;
@@ -526,12 +539,11 @@ impl Workspace {
                 tab.building_level = None;
                 // A rename keeps the same composite. A painted edit replaces it, so this
                 // reduction belongs to the previous pixels and must not be installed.
-                if !Arc::ptr_eq(&tab.document.canvas.pixels, &source_pixels) {
-                    return;
+                if Arc::ptr_eq(&tab.document.canvas.pixels, &source_pixels) {
+                    let replaced = tab.document.canvas.install_cache(cache);
+                    drop_images(replaced, window, cx);
+                    cx.notify();
                 }
-                let replaced = tab.document.canvas.install_cache(cache);
-                drop_images(replaced, window, cx);
-                cx.notify();
                 workspace.ensure_preview_level(window.scale_factor(), window, cx);
             });
         })
@@ -551,7 +563,11 @@ fn preview_shift(tab: &Tab, viewport: Bounds<Pixels>, scale: f32) -> Option<u32>
     ))
 }
 
-fn drop_images(images: Vec<Arc<RenderImage>>, window: &mut Window, cx: &mut Context<Workspace>) {
+fn drop_images(
+    images: impl IntoIterator<Item = Arc<RenderImage>>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     for image in images {
         cx.drop_image(image, Some(window));
     }

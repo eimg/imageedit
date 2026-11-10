@@ -28,19 +28,22 @@ pub(super) struct MoveDrag {
     anchor_screen: Point<Pixels>,
 }
 
-pub(super) struct MoveOverlay {
-    base: Arc<RenderImage>,
-    sprite: Arc<RenderImage>,
-    offset: (i32, i32),
-    size: (u32, u32),
-}
-
 #[derive(Clone)]
 pub(super) struct MovePaint {
-    pub base: Arc<RenderImage>,
+    pub below: Option<Arc<RenderImage>>,
     pub sprite: Arc<RenderImage>,
+    pub above: Option<Arc<RenderImage>>,
     pub offset: (i32, i32),
     pub size: (u32, u32),
+}
+
+impl MovePaint {
+    fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
+        self.below
+            .into_iter()
+            .chain([self.sprite])
+            .chain(self.above)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,7 +112,8 @@ impl Workspace {
         let count = content.layers().len();
         let index = content.layer_index(tab.active_layer);
         match command {
-            LayerCommand::New | LayerCommand::Duplicate => content.can_add_layer(),
+            LayerCommand::New => content.can_create_layer(),
+            LayerCommand::Duplicate => content.can_duplicate_layer(tab.active_layer),
             LayerCommand::Rename | LayerCommand::ToggleVisibility | LayerCommand::Opacity => true,
             LayerCommand::MergeDown => content.can_merge_down(tab.active_layer),
             LayerCommand::Delete => count > 1,
@@ -503,13 +507,13 @@ impl Workspace {
     }
 
     pub(super) fn bind_geometry_actions(&self, root: Div, cx: &Context<Self>) -> Div {
-        let root = self.bind_align(root, AlignLayer::Horizontal, cx);
-        let root = self.bind_align(root, AlignLayer::Vertical, cx);
-        let root = self.bind_align(root, AlignLayer::Both, cx);
         if !self.geometry_enabled() {
             return root;
         }
-        root.on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
+        root.on_action(cx.listener(|this, action: &AlignLayer, window, cx| {
+            this.align_active(*action, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
             this.layer_to_image_size(window, cx);
         }))
         .on_action(cx.listener(|this, _: &CropLayerToContent, window, cx| {
@@ -517,17 +521,6 @@ impl Workspace {
         }))
         .on_action(cx.listener(|this, _: &CropImageToContent, window, cx| {
             this.crop_image_to_content(window, cx);
-        }))
-    }
-
-    fn bind_align(&self, root: Div, axis: AlignLayer, cx: &Context<Self>) -> Div {
-        if !self.geometry_enabled() {
-            return root;
-        }
-        root.on_action(cx.listener(move |this, action: &AlignLayer, window, cx| {
-            if *action == axis {
-                this.align_active(*action, window, cx);
-            }
         }))
     }
 
@@ -558,6 +551,16 @@ impl Workspace {
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
+        if self
+            .active_document()
+            .is_some_and(|document| !document.content.can_fit_layer(id))
+        {
+            self.notice(
+                "Fitting this layer would exceed the project pixel budget.",
+                cx,
+            );
+            return;
+        }
         self.edit_content(
             move |content, _, _| content.layer_to_image_size(id),
             window,
@@ -633,7 +636,7 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        let Some(anchor) = self.pointer_pixel(position, scale) else {
+        let Some(anchor) = self.unclamped_pointer_pixel(position, scale) else {
             return;
         };
         let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
@@ -664,30 +667,29 @@ impl Workspace {
             anchor_screen: position,
         });
         let job = cx.background_executor().spawn(async move {
-            let base = document::preview_render(&content.composite_without(id));
-            let sprite = document::preview_render(&with_layer_opacity(&pixels, opacity));
-            (base, sprite)
+            let (below, above) = content.composite_around(id);
+            MovePaint {
+                below: below.map(|image| document::preview_render(&image)),
+                sprite: document::preview_render(&with_layer_opacity(&pixels, opacity)),
+                above: above.map(|image| document::preview_render(&image)),
+                offset: origin,
+                size,
+            }
         });
         cx.spawn_in(window, async move |workspace, cx| {
-            let (base, sprite) = job.await;
+            let mut overlay = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
                 if workspace.move_token != token {
-                    cx.drop_image(base, Some(window));
-                    cx.drop_image(sprite, Some(window));
+                    super::drop_images(overlay.into_images(), window, cx);
                     return;
                 }
-                let offset = workspace
+                overlay.offset = workspace
                     .move_drag
                     .as_ref()
                     .map(|drag| drag.offset)
                     .or(workspace.move_settled)
                     .unwrap_or(origin);
-                workspace.move_overlay = Some(MoveOverlay {
-                    base,
-                    sprite,
-                    offset,
-                    size,
-                });
+                workspace.move_overlay = Some(overlay);
                 cx.notify();
             });
         })
@@ -708,12 +710,12 @@ impl Workspace {
         let offset = if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
             drag.origin
         } else {
-            let Some(pointer) = self.pointer_pixel(position, scale) else {
+            let Some(pointer) = self.unclamped_pointer_pixel(position, scale) else {
                 return;
             };
             (
-                shift_offset(drag.origin.0, pointer.0 - drag.anchor.0),
-                shift_offset(drag.origin.1, pointer.1 - drag.anchor.1),
+                shift_offset(drag.origin.0, pointer.0.saturating_sub(drag.anchor.0)),
+                shift_offset(drag.origin.1, pointer.1.saturating_sub(drag.anchor.1)),
             )
         };
         if self
@@ -775,24 +777,12 @@ impl Workspace {
     pub(super) fn drop_move_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.move_settled = None;
         if let Some(overlay) = self.move_overlay.take() {
-            cx.drop_image(overlay.base, Some(window));
-            cx.drop_image(overlay.sprite, Some(window));
+            super::drop_images(overlay.into_images(), window, cx);
         }
     }
 
     pub(super) fn move_paint(&self) -> Option<MovePaint> {
-        let overlay = self.move_overlay.as_ref()?;
-        let offset = self
-            .move_drag
-            .as_ref()
-            .map(|drag| drag.offset)
-            .unwrap_or(overlay.offset);
-        Some(MovePaint {
-            base: overlay.base.clone(),
-            sprite: overlay.sprite.clone(),
-            offset,
-            size: overlay.size,
-        })
+        self.move_overlay.clone()
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -815,7 +805,7 @@ fn with_layer_opacity(pixels: &RgbaImage, opacity: u8) -> RgbaImage {
     }
     let mut image = pixels.clone();
     for pixel in image.pixels_mut() {
-        pixel.0[3] = ((u16::from(pixel.0[3]) * u16::from(opacity)) / 255) as u8;
+        pixel.0[3] = ((u16::from(pixel.0[3]) * u16::from(opacity) + 127) / 255) as u8;
     }
     image
 }

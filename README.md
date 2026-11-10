@@ -34,8 +34,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   documents can only be saved as `.imageedit`. **Save Project As** suggests
   `.imageedit` when converting an opened image to a project.
 - **File → Export as PNG, JPEG, or WebP** writes a flattened copy of the
-  visible image. Exporting does not change the tab's file or its unsaved
-  marker. PNG and WebP keep transparency. JPEG asks for a quality from 1 to
+  visible image to a separate file and preserves the tab's unsaved marker.
+  Choose a destination that is closed in ImageEdit. PNG and WebP keep
+  transparency. JPEG asks for a quality from 1 to
   100 (default 92) and places transparent areas on white.
 - Projects preserve the canvas dimensions and the layer stack: each layer's
   order, name, position, visibility, opacity, and lossless pixels with
@@ -46,15 +47,15 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   matching RGBA values. **Color Picker** samples the image at full resolution.
   **Select** (`R`) drags a rectangle. The outline is a dashed box with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
-  deselect. The pointer becomes a resize arrow on a handle and a hand inside
-  the box. Select All, Deselect, and Invert are in the Select menu and in the
-  Select tool options.
+  deselect. The dashes move along the outline. The pointer becomes a resize
+  arrow on a handle and a hand inside the box. Select All, Deselect, and Invert
+  are in the Select menu and in the Select tool options.
   Fill and **Edit → Clear to Transparency**
   change only selected pixels. With no selection, they change the whole image.
   **Image → Crop to Selection** uses the selection's bounding box and is
   disabled when nothing is selected or the whole image is selected.
-  **Move** (`M`) drags the active layer. The pointer is the four-arrow move
-  glyph. The layer follows it, and releasing it saves one undo step. Escape or
+  **Move** (`M`) drags the active layer. Its crosshair has a four-arrow badge.
+  The layer follows the pointer, and releasing it saves one undo step. Escape or
   Cancel puts it back. A hidden layer cannot be moved. The Move tool options
   also center the layer, fit it to the canvas, and crop it to its opaque
   pixels. **Layer → Align** centers the active layer on the
@@ -81,6 +82,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   pixels. The cursor shows the selected tool beside the canvas crosshair.
 - **Edit → Undo** and **Redo** step through crops, fills, selections, and layer changes in
   the current tab. Undoing back to the last save clears the unsaved marker.
+  Selection changes preserve the document’s saved state.
   Each tab keeps up to 100 steps, and the oldest steps are dropped first when
   history uses too much memory.
 - The **Layers** panel lists layers top to bottom with thumbnails. Click a

@@ -220,9 +220,20 @@ impl DocumentContent {
         self.layers.len() < MAX_LAYERS
     }
 
+    pub fn can_create_layer(&self) -> bool {
+        self.can_add_layer() && self.fits_stack(0, self.canvas_bytes())
+    }
+
+    pub fn can_duplicate_layer(&self, id: LayerId) -> bool {
+        self.can_add_layer()
+            && self
+                .layer(id)
+                .is_some_and(|layer| self.fits_stack(0, layer.pixels.as_raw().len() as u64))
+    }
+
     // Inserts a canvas-sized layer above `above`, or at the top if it is missing.
     pub fn add_layer(&mut self, above: LayerId, name: String, fill: Rgba<u8>) -> Option<LayerId> {
-        if !self.can_add_layer() {
+        if !self.can_create_layer() {
             return None;
         }
         let id = self.next_layer_id()?;
@@ -337,8 +348,21 @@ impl DocumentContent {
         })
     }
 
+    fn canvas_bytes(&self) -> u64 {
+        (u64::from(self.width) * u64::from(self.height)).saturating_mul(4)
+    }
+
+    fn fits_stack(&self, removed_bytes: u64, added_bytes: u64) -> bool {
+        added_bytes <= MAX_IMAGE_BYTES
+            && self
+                .stack_bytes()
+                .saturating_sub(removed_bytes)
+                .saturating_add(added_bytes)
+                <= MAX_STACK_BYTES
+    }
+
     pub fn duplicate_layer(&mut self, id: LayerId) -> Option<LayerId> {
-        if !self.can_add_layer() {
+        if !self.can_duplicate_layer(id) {
             return None;
         }
         let index = self.layer_index(id)?;
@@ -418,7 +442,9 @@ impl DocumentContent {
         let bytes = u64::try_from(width)
             .ok()?
             .checked_mul(u64::try_from(height).ok()?)?;
-        (bytes.checked_mul(4)? <= MAX_IMAGE_BYTES).then_some((index, union))
+        let removed = lower.pixels.as_raw().len() as u64 + upper.pixels.as_raw().len() as u64;
+        self.fits_stack(removed, bytes.checked_mul(4)?)
+            .then_some((index, union))
     }
 
     // Replaces a layer and the one below it with their composite, keeping the lower ID and name.
@@ -549,8 +575,17 @@ impl DocumentContent {
         self.set_offset(id, offset)
     }
 
+    pub fn can_fit_layer(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|layer| {
+            self.fits_stack(layer.pixels.as_raw().len() as u64, self.canvas_bytes())
+        })
+    }
+
     // Resizes the layer to the canvas. Pixels keep their canvas position; the rest is transparent.
     pub fn layer_to_image_size(&mut self, id: LayerId) -> Dirty {
+        if !self.can_fit_layer(id) {
+            return Dirty::None;
+        }
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
             return Dirty::None;
         };
@@ -623,14 +658,29 @@ impl DocumentContent {
         }
     }
 
-    pub fn composite_without(&self, id: LayerId) -> RgbaImage {
+    // Flatten the layers on each side of a moving layer so it can be painted in stack order.
+    pub fn composite_around(&self, id: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
+        let index = self.layer_index(id).expect("the moving layer exists");
         let bounds = PixelBounds {
             left: 0,
             top: 0,
             right: i64::from(self.width),
             bottom: i64::from(self.height),
         };
-        composite::flatten_region(self.layers.iter().filter(|layer| layer.id != id), bounds)
+        let composite = |layers: &[RasterLayer]| {
+            layers
+                .iter()
+                .any(|layer| {
+                    layer.visible
+                        && layer.opacity != 0
+                        && layer.bounds().intersect(bounds).is_some()
+                })
+                .then(|| composite::flatten_region(layers, bounds))
+        };
+        (
+            composite(&self.layers[..index]),
+            composite(&self.layers[index + 1..]),
+        )
     }
 }
 
@@ -938,6 +988,43 @@ mod tests {
     }
 
     #[test]
+    fn layer_operations_respect_the_project_pixel_budget() {
+        // 85 shared 6 MiB images occupy 510 MiB in the project even though they share RAM.
+        let pixels = Arc::new(RgbaImage::new(1536, 1024));
+        let layers = (0..85)
+            .map(|id| RasterLayer {
+                id: LayerId(id),
+                name: "Large layer".into(),
+                pixels: pixels.clone(),
+                offset: (0, 0),
+                visible: true,
+                opacity: 255,
+                blend_mode: BlendMode::Normal,
+            })
+            .collect();
+        let mut content = DocumentContent::from_layers(1536, 1024, layers).unwrap();
+        assert!(content.can_add_layer());
+        assert!(
+            content
+                .add_layer(LayerId(0), "Extra".into(), Rgba([0; 4]))
+                .is_none()
+        );
+        assert!(content.duplicate_layer(LayerId(0)).is_none());
+
+        let tiny = ImageLayer {
+            name: "Tiny".into(),
+            pixels: RgbaImage::new(1, 1),
+        };
+        let lower = content.insert_centered_layer(LayerId(84), tiny).unwrap();
+        assert_eq!(content.layer_to_image_size(lower), Dirty::None);
+        let upper = content.duplicate_layer(lower).unwrap();
+        content.set_offset(upper, (1791, 1023));
+        content.set_offset(lower, (0, 0));
+        assert!(!content.can_merge_down(upper));
+        assert!(content.merge_down(upper).is_none());
+    }
+
+    #[test]
     fn merge_down_preserves_the_composite_over_the_union() {
         let mut content = DocumentContent::single_layer(
             "Base".into(),
@@ -1085,6 +1172,26 @@ mod tests {
         assert_eq!(content.layers[1].pixels.get_pixel(1, 1).0, [0, 0, 0, 0]);
         assert_eq!(content.layers[1].pixels.get_pixel(0, 0).0, [1, 2, 3, 255]);
         assert!(content.clear(LayerId(1), &Selection::Empty).is_none());
+    }
+
+    #[test]
+    fn a_move_preview_keeps_layers_below_and_above_the_sprite() {
+        let red = Rgba([255, 0, 0, 255]);
+        let green = Rgba([0, 255, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut content =
+            DocumentContent::single_layer("Lower".into(), RgbaImage::from_pixel(2, 2, red));
+        let moving = content
+            .add_layer(LayerId(0), "Moving".into(), green)
+            .unwrap();
+        let upper = content.add_layer(moving, "Upper".into(), blue).unwrap();
+
+        let (below, above) = content.composite_around(moving);
+        assert_eq!(*below.unwrap().get_pixel(0, 0), red);
+        assert_eq!(*above.unwrap().get_pixel(0, 0), blue);
+        assert!(content.composite_around(upper).1.is_none());
+        content.set_visible(upper, false);
+        assert!(content.composite_around(moving).1.is_none());
     }
 
     #[test]

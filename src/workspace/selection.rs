@@ -24,6 +24,7 @@ pub(super) enum SelectionGesture {
     Resize {
         rect: PixelRect,
         edges: SelectionEdges,
+        anchor: (i64, i64),
     },
 }
 
@@ -77,7 +78,16 @@ impl Workspace {
                 })
                 .unwrap_or(SelectionHit::Outside);
             match hit {
-                SelectionHit::Edge(edges) => SelectionGesture::Resize { rect, edges },
+                SelectionHit::Edge(edges) => {
+                    let Some(anchor) = self.unclamped_pointer_pixel(position, scale) else {
+                        return;
+                    };
+                    SelectionGesture::Resize {
+                        rect,
+                        edges,
+                        anchor,
+                    }
+                }
                 SelectionHit::Inside => {
                     let pixel = self
                         .pointer_pixel(position, scale)
@@ -142,10 +152,18 @@ impl Workspace {
                     height,
                 )
             }),
-            SelectionGesture::Resize { rect, edges } => pointer.map(|pixel| {
+            SelectionGesture::Resize {
+                rect,
+                edges,
+                anchor,
+            } => self.unclamped_pointer_pixel(position, scale).map(|pixel| {
+                let delta = (
+                    pixel.0.saturating_sub(anchor.0),
+                    pixel.1.saturating_sub(anchor.1),
+                );
                 placed_selection(
                     previous,
-                    resize_rect(rect, edges, pixel, width, height),
+                    resize_rect(rect, edges, delta, width, height),
                     width,
                     height,
                 )
@@ -212,7 +230,20 @@ impl Workspace {
         }
     }
 
-    pub(super) fn pointer_pixel(&self, position: Point<Pixels>, scale: f32) -> Option<(i64, i64)> {
+    fn pointer_pixel(&self, position: Point<Pixels>, scale: f32) -> Option<(i64, i64)> {
+        let (x, y) = self.unclamped_pointer_pixel(position, scale)?;
+        let (width, height) = self.active_document()?.content.size();
+        Some((
+            x.clamp(0, i64::from(width) - 1),
+            y.clamp(0, i64::from(height) - 1),
+        ))
+    }
+
+    pub(super) fn unclamped_pointer_pixel(
+        &self,
+        position: Point<Pixels>,
+        scale: f32,
+    ) -> Option<(i64, i64)> {
         let tab = self.active_tab()?;
         let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
         let fraction = geometry.fraction(position);
@@ -382,7 +413,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.edit_content(
+        self.start_change(
+            super::Change::Selection,
             move |_, _, current| {
                 *current = selection;
                 Dirty::Unpainted
@@ -451,7 +483,7 @@ fn move_rect(
 fn resize_rect(
     rect: PixelRect,
     edges: SelectionEdges,
-    pointer: (i64, i64),
+    delta: (i64, i64),
     width: u32,
     height: u32,
 ) -> PixelRect {
@@ -462,16 +494,16 @@ fn resize_rect(
     let mut x1 = rect.right().saturating_sub(1);
     let mut y1 = rect.bottom().saturating_sub(1);
     if edges.left {
-        x0 = clamp_x(pointer.0);
+        x0 = clamp_x(x0.saturating_add(delta.0));
     }
     if edges.right {
-        x1 = clamp_x(pointer.0);
+        x1 = clamp_x(x1.saturating_add(delta.0));
     }
     if edges.top {
-        y0 = clamp_y(pointer.1);
+        y0 = clamp_y(y0.saturating_add(delta.1));
     }
     if edges.bottom {
-        y1 = clamp_y(pointer.1);
+        y1 = clamp_y(y1.saturating_add(delta.1));
     }
     let left = x0.min(x1);
     let right = x0.max(x1);
@@ -486,15 +518,7 @@ fn resize_rect(
 }
 
 fn fraction_pixel(fraction: f32, edge: u32) -> i64 {
-    if edge == 0 {
-        return 0;
-    }
-    let scaled = fraction * edge as f32;
-    if scaled <= 0. {
-        0
-    } else {
-        (scaled.floor() as i64).min(i64::from(edge) - 1)
-    }
+    (fraction * edge as f32).floor() as i64
 }
 
 fn hit_selection(
@@ -611,9 +635,10 @@ mod tests {
             bottom: false,
         };
         assert_eq!(
-            resize_rect(rect, right, (50, 20), 100, 100),
+            resize_rect(rect, right, (11, 0), 100, 100),
             PixelRect::new(10, 20, 41, 40)
         );
+        assert_eq!(resize_rect(rect, right, (0, 0), 100, 100), rect);
         let left = SelectionEdges {
             left: true,
             right: false,
@@ -621,7 +646,7 @@ mod tests {
             bottom: false,
         };
         assert_eq!(
-            resize_rect(rect, left, (50, 20), 100, 100),
+            resize_rect(rect, left, (40, 0), 100, 100),
             PixelRect::new(39, 20, 12, 40)
         );
     }
@@ -644,9 +669,9 @@ mod tests {
     }
 
     #[test]
-    fn a_fraction_outside_the_image_clamps_to_the_near_edge() {
-        assert_eq!(fraction_pixel(-0.2, 10), 0);
+    fn pointer_coordinates_extend_past_the_canvas() {
+        assert_eq!(fraction_pixel(-0.2, 10), -2);
         assert_eq!(fraction_pixel(0.15, 10), 1);
-        assert_eq!(fraction_pixel(3., 10), 9);
+        assert_eq!(fraction_pixel(3., 10), 30);
     }
 }

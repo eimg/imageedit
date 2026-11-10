@@ -29,6 +29,12 @@ enum WriteKind {
     },
 }
 
+impl WriteKind {
+    fn destination_reserved(self, source_tab: bool, open: bool, writing: bool) -> bool {
+        writing || (open && (!source_tab || matches!(self, Self::Export { .. })))
+    }
+}
+
 // Raster formats are offered only while they hold everything in the document.
 fn save_route(mode: SaveMode, has_path: bool, format: FileFormat, raster_ok: bool) -> SaveRoute {
     let project_only = mode == SaveMode::ProjectAs || !raster_ok;
@@ -156,7 +162,14 @@ impl Workspace {
             return;
         }
         let id = tab.id;
-        let suggested = suggested_name(&tab.document, format);
+        let mut suggested = suggested_name(&tab.document, format);
+        if tab.document.path.is_some() && suggested == tab.document.name {
+            let stem = Path::new(&suggested)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(&suggested);
+            suggested = format!("{stem}-export.{}", format.extension());
+        }
         self.prompt_destination(suggested, window, cx, move |workspace, path, window, cx| {
             match prepare_export(&path, format) {
                 Ok(path) => {
@@ -224,12 +237,18 @@ impl Workspace {
         let Some(index) = self.tab_index(id) else {
             return;
         };
+        if self.tabs[index].busy() {
+            return;
+        }
         if self.tabs.iter().any(|tab| {
-            tab.id != id
-                && (tab.document.path.as_ref() == Some(&path) || tab.saving.as_ref() == Some(&path))
+            kind.destination_reserved(
+                tab.id == id,
+                tab.document.path.as_ref() == Some(&path),
+                tab.saving.as_ref() == Some(&path),
+            )
         }) {
             self.errors.push(format!(
-                "{} is already open in another tab.",
+                "{} is already open or being written by ImageEdit.",
                 file_name(&path)
             ));
             cx.notify();
@@ -393,7 +412,7 @@ fn prepare_destination(path: &Path, project_only: bool) -> Result<(PathBuf, File
         !project_only || format == FileFormat::Project,
         "Use a .imageedit filename. To save a PNG, JPEG, or WebP copy, use File → Export."
     );
-    Ok((canonical_destination(path)?, format))
+    Ok((destination_for_format(path, format)?, format))
 }
 
 fn prepare_export(path: &Path, format: FileFormat) -> Result<PathBuf> {
@@ -403,7 +422,16 @@ fn prepare_export(path: &Path, format: FileFormat) -> Result<PathBuf> {
         format.extension(),
         format.label()
     );
-    canonical_destination(path)
+    destination_for_format(path, format)
+}
+
+fn destination_for_format(path: &Path, format: FileFormat) -> Result<PathBuf> {
+    let destination = canonical_destination(path)?;
+    anyhow::ensure!(
+        save_format(&destination).ok() == Some(format),
+        "The destination resolves to a file with a different extension."
+    );
+    Ok(destination)
 }
 
 fn canonical_destination(path: &Path) -> Result<PathBuf> {
@@ -438,6 +466,35 @@ mod tests {
         assert_eq!(save_route(As, true, Png, false), prompt(true));
         assert_eq!(save_route(As, true, Project, false), prompt(true));
         assert_eq!(save_route(ProjectAs, true, Png, true), prompt(true));
+    }
+
+    #[test]
+    fn writes_respect_open_files_and_in_flight_destinations() {
+        let save = WriteKind::Save(FileFormat::Png);
+        let export = WriteKind::Export {
+            format: FileFormat::Png,
+            jpeg_quality: 92,
+        };
+        assert!(!save.destination_reserved(true, true, false));
+        assert!(save.destination_reserved(false, true, false));
+        assert!(export.destination_reserved(true, true, false));
+        assert!(export.destination_reserved(false, true, false));
+        for kind in [save, export] {
+            assert!(kind.destination_reserved(false, false, true));
+            assert!(!kind.destination_reserved(false, false, false));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_cannot_write_a_different_format_over_their_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("original.imageedit");
+        std::fs::write(&project, b"original").unwrap();
+        let alias = directory.path().join("alias.png");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        assert!(prepare_destination(&alias, false).is_err());
+        assert!(prepare_export(&alias, FileFormat::Png).is_err());
     }
 
     #[test]

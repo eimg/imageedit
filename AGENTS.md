@@ -18,15 +18,17 @@ bounds. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
 does the same for the canvas. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
-the same way. Each tab can undo and redo crops, fills and
-layer changes, and undoing back to the saved state clears the unsaved marker.
+the same way. Each tab can undo and redo crops, fills, selections and
+layer changes. Selection changes preserve the saved revision, and undoing
+back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. It also supports a grid and center guides. Save and Save As handle
 ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack with lossless pixels.
-Export writes flattened PNG, JPEG, or WebP copies without changing the tab's
-file. Raster Save is offered only while a document is a single plain layer.
+Export writes flattened PNG, JPEG, or WebP copies to a separate destination
+and preserves the tab’s saved state. Raster Save is offered only while a
+document is a single plain layer.
 
 ## Code map
 
@@ -70,7 +72,7 @@ file. Raster Save is offered only while a document is a single plain layer.
   background saving and export, and unsaved-change confirmation.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
   drag coalescing, and the Move preview. The preview is display-only until
-  the pointer is released. Move's canvas cursor is the four-arrow glyph, and
+  the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options repeat the align, fit, and content-crop commands.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality
   and layer dialogs. `src/workspace/color.rs`

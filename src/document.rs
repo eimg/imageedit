@@ -220,14 +220,12 @@ impl RenderedCanvas {
         if let Some(preview) = patch.preview {
             dropped.push(std::mem::replace(&mut self.preview.image, preview.image));
         }
-        for (id, image) in patch.thumbnails {
-            if let Some((_, slot)) = self.thumbnails.iter_mut().find(|(layer, _)| *layer == id) {
-                dropped.push(std::mem::replace(slot, image));
-            } else {
-                self.thumbnails.push((id, image));
-            }
-        }
         if patch.replace_levels {
+            dropped.extend(
+                std::mem::replace(&mut self.thumbnails, patch.thumbnails)
+                    .into_iter()
+                    .map(|(_, image)| image),
+            );
             for level in self.levels.drain(..) {
                 dropped.extend(level.images.into_iter().flatten());
             }
@@ -235,6 +233,13 @@ impl RenderedCanvas {
                 self.install_level(level_images(cache));
             }
             return dropped;
+        }
+        for (id, image) in patch.thumbnails {
+            if let Some((_, slot)) = self.thumbnails.iter_mut().find(|(layer, _)| *layer == id) {
+                dropped.push(std::mem::replace(slot, image));
+            } else {
+                self.thumbnails.push((id, image));
+            }
         }
         let shifts: Vec<u32> = patch.levels.iter().map(TileCache::shift).collect();
         for cache in patch.levels {
@@ -817,6 +822,33 @@ mod tests {
             Vec::<usize>::new()
         );
         assert!(Arc::ptr_eq(&canvas.pixels, &pixels));
+    }
+
+    #[test]
+    fn a_structural_patch_releases_the_removed_layers_thumbnail() {
+        let mut content = DocumentContent::single_layer("Base".into(), RgbaImage::new(2, 2));
+        let id = content
+            .add_layer(content.top_layer_id(), "Top".into(), Rgba([0; 4]))
+            .unwrap();
+        let mut canvas = RenderedCanvas::new(&content);
+        let removed = canvas.thumbnail(id).unwrap().clone();
+        content.delete_layer(id).unwrap();
+        let patch = RenderedCanvas::prepare_patch(
+            &canvas.pixels,
+            canvas.preview.has_transparency,
+            canvas.level_caches(),
+            &content,
+            Dirty::Canvas,
+        )
+        .unwrap();
+        assert!(
+            canvas
+                .apply(patch)
+                .iter()
+                .any(|image| Arc::ptr_eq(image, &removed))
+        );
+        assert!(canvas.thumbnail(id).is_none());
+        assert!(canvas.thumbnail(content.top_layer_id()).is_some());
     }
 
     fn tile_images(canvas: &RenderedCanvas) -> Vec<Arc<RenderImage>> {

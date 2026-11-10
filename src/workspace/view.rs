@@ -1,4 +1,9 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, ContentMask, Context, Corners, CursorStyle, Div,
@@ -1106,8 +1111,6 @@ pub(super) fn icon(path: &'static str, edge: f32) -> Icon {
 fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
     let icon = tool.info().icon;
     let outline = gpui::SharedString::from(format!("cursor-outline/{icon}"));
-    // Move is the four-arrow glyph itself. Other tools keep a crosshair and a side icon.
-    let centered = tool == Tool::Move;
     canvas(
         |_, _, _| {},
         move |bounds, _, window, cx| {
@@ -1126,24 +1129,6 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
                 return;
             };
 
-            if centered {
-                // The toolbox glyph, with a one-pixel shadow so it stays visible on the image.
-                // The thick cursor outline would close the arrow heads into a pen shape.
-                let edge = px(28.);
-                let icon_bounds = Bounds::centered_at(hotspot, size(edge, edge));
-                let shadow =
-                    Bounds::new(icon_bounds.origin + point(px(1.), px(1.)), icon_bounds.size);
-                for (bounds, color) in [(shadow, rgb(0x12151c)), (icon_bounds, rgb(0xffffff))] {
-                    let _ = window.paint_svg(
-                        bounds,
-                        icon.into(),
-                        TransformationMatrix::unit(),
-                        color.into(),
-                        cx,
-                    );
-                }
-                return;
-            }
             let horizontal = if hotspot.x + px(27.) < bounds.right() {
                 7.
             } else {
@@ -1158,17 +1143,21 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
                 hotspot + point(px(horizontal), px(vertical)),
                 size(px(20.), px(20.)),
             );
-            for (path, color) in [
-                (outline.clone(), rgb(0x12151c)),
-                (icon.into(), rgb(0xffffff)),
+            let (shadow_bounds, shadow_path) = if tool == Tool::Move {
+                // A small shadow keeps the arrowheads readable at badge size.
+                (
+                    Bounds::new(icon_bounds.origin + point(px(1.), px(1.)), icon_bounds.size),
+                    icon.into(),
+                )
+            } else {
+                (icon_bounds, outline.clone())
+            };
+            for (bounds, path, color) in [
+                (shadow_bounds, shadow_path, rgb(0x12151c)),
+                (icon_bounds, icon.into(), rgb(0xffffff)),
             ] {
-                let _ = window.paint_svg(
-                    icon_bounds,
-                    path,
-                    TransformationMatrix::unit(),
-                    color.into(),
-                    cx,
-                );
+                let _ =
+                    window.paint_svg(bounds, path, TransformationMatrix::unit(), color.into(), cx);
             }
             for (length, weight, color) in [(11., 3., rgb(0x12151c)), (9., 1., rgb(0xffffff))] {
                 window.paint_quad(fill(
@@ -1236,7 +1225,7 @@ fn image_preview(
             if visible.is_empty() {
                 return;
             }
-            if has_transparency {
+            if has_transparency || move_layer.is_some() {
                 paint_checkerboard(window, image_bounds, visible);
             }
             if let Some(move_layer) = move_layer.clone() {
@@ -1442,12 +1431,8 @@ fn paint_contours(
     if contours.is_empty() || width == 0 || height == 0 {
         return;
     }
-    // The dash walks in screen pixels, about 24 px per second, matching the usual ants.
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs_f32())
-        .unwrap_or(0.);
-    let phase = (elapsed * 24.) % 8.;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let phase = marching_phase(START.get_or_init(Instant::now).elapsed());
     let mut painted = false;
     for rect in contours {
         if rect.width == 0 || rect.height == 0 {
@@ -1480,19 +1465,11 @@ fn paint_moved_layer(
     height: u32,
     move_layer: &super::layers::MovePaint,
 ) {
-    if width == 0 || height == 0 {
-        return;
-    }
-    let image_bounds = geometry.bounds;
-    if let Err(error) = window.paint_image(
-        image_bounds,
-        Corners::default(),
-        move_layer.base.clone(),
-        0,
-        false,
-    ) {
-        eprintln!("Could not paint the layer move preview: {error}");
-        return;
+    if let Some(below) = &move_layer.below
+        && let Err(error) =
+            window.paint_image(geometry.bounds, Corners::default(), below.clone(), 0, false)
+    {
+        eprintln!("Could not paint layers below the moved layer: {error}");
     }
     let (offset_x, offset_y) = move_layer.offset;
     let (layer_width, layer_height) = move_layer.size;
@@ -1512,6 +1489,12 @@ fn paint_moved_layer(
         false,
     ) {
         eprintln!("Could not paint the moved layer: {error}");
+    }
+    if let Some(above) = &move_layer.above
+        && let Err(error) =
+            window.paint_image(geometry.bounds, Corners::default(), above.clone(), 0, false)
+    {
+        eprintln!("Could not paint layers above the moved layer: {error}");
     }
 }
 
@@ -1695,16 +1678,23 @@ fn paint_marching_span(
     }
 }
 
+const SELECTION_DASH: f32 = 4.;
+const SELECTION_DASH_PERIOD: f32 = SELECTION_DASH * 2.;
+
+fn marching_phase(elapsed: Duration) -> f32 {
+    // Three cycles per second keeps the calculation within the fractional second.
+    let seconds = elapsed.subsec_micros() as f32 / 1_000_000.;
+    (seconds * (SELECTION_DASH_PERIOD * 3.)) % SELECTION_DASH_PERIOD
+}
+
 /// Whether the dash at this point on the outline is white, and how far that dash continues.
 /// `distance` carries the phase around corners. Snapping to the dash period would cancel `phase`.
 fn dash_at(travel: f32, distance: f32, phase: f32) -> (bool, f32) {
-    const DASH: f32 = 4.;
-    const PERIOD: f32 = DASH * 2.;
-    let cycle = (travel + distance - phase).rem_euclid(PERIOD);
-    if cycle < DASH {
-        (true, DASH - cycle)
+    let cycle = (travel + distance - phase).rem_euclid(SELECTION_DASH_PERIOD);
+    if cycle < SELECTION_DASH {
+        (true, SELECTION_DASH - cycle)
     } else {
-        (false, PERIOD - cycle)
+        (false, SELECTION_DASH_PERIOD - cycle)
     }
 }
 
@@ -1786,7 +1776,14 @@ fn dot_grid() -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{dash_at, span_draw_range};
+    use super::{Duration, dash_at, marching_phase, span_draw_range};
+
+    #[test]
+    fn selection_phase_changes_between_frames_even_at_large_clock_values() {
+        let elapsed = Duration::from_secs(2_000_000_000);
+        assert_eq!(marching_phase(elapsed + Duration::from_millis(125)), 3.);
+        assert_eq!(marching_phase(elapsed + Duration::from_millis(250)), 6.);
+    }
 
     #[test]
     fn a_backward_edge_still_covers_its_visible_span() {

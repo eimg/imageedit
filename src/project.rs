@@ -96,7 +96,10 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     check_limits(&manifest)?;
 
     let start = reader.stream_position()?;
-    let mut remaining = reader.seek(SeekFrom::End(0))? - start;
+    let mut remaining = reader
+        .seek(SeekFrom::End(0))?
+        .checked_sub(start)
+        .context("Project was truncated while opening")?;
     reader.seek(SeekFrom::Start(start))?;
     let mut payload_budget = MAX_PAYLOAD_BYTES;
     let mut layers = Vec::with_capacity(manifest.layers.len());
