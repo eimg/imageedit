@@ -19,9 +19,9 @@ use tempfile::NamedTempFile;
 
 use crate::project;
 
-pub use content::{CropRect, DocumentContent, LayerId};
+pub use content::{BlendMode, CropRect, DocumentContent, LayerId, RasterLayer};
 
-const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_NEW_EDGE: u32 = 16_384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,9 +83,8 @@ impl Document {
         let path = path.canonicalize().context("The file could not be found")?;
         ensure!(path.is_file(), "Choose an image file");
         let mut reader = BufReader::new(File::open(&path).context("The file could not be opened")?);
-        let (format, pixels, layer_name) = if reader.fill_buf()?.starts_with(project::MAGIC) {
-            let (pixels, layer_name) = project::read(reader)?;
-            (FileFormat::Project, pixels, layer_name)
+        let (format, content) = if reader.fill_buf()?.starts_with(project::MAGIC) {
+            (FileFormat::Project, project::read(reader)?)
         } else {
             let reader = ImageReader::new(reader)
                 .with_guessed_format()
@@ -100,9 +99,9 @@ impl Document {
             let orientation = decoder.orientation().context("Invalid image metadata")?;
             let mut image = decode_image(decoder)?;
             image.apply_orientation(orientation);
-            (format, image.into_rgba8(), "Image".to_owned())
+            let content = DocumentContent::single_layer("Image".to_owned(), image.into_rgba8());
+            (format, content)
         };
-        let content = DocumentContent::single_layer(layer_name, pixels);
         Ok(Self {
             name: file_name(&path),
             path: Some(path),
@@ -214,10 +213,7 @@ pub fn save_image(content: &DocumentContent, path: &Path, format: FileFormat) ->
     {
         let mut writer = BufWriter::new(temporary.as_file_mut());
         if format == FileFormat::Project {
-            let layer = content.full_canvas_layer().context(
-                "Project version 1 requires a single full-canvas layer at default opacity",
-            )?;
-            project::write(&mut writer, &layer.pixels, &layer.name)?;
+            project::write(&mut writer, content)?;
         } else {
             let pixels = content.composite();
             write_raster(&mut writer, &pixels, format)?;
@@ -344,11 +340,36 @@ mod tests {
         let replacement = RgbaImage::from_pixel(1, 1, solid_color(0x000000));
         let replacement = DocumentContent::single_layer("x".repeat(65_536), replacement);
         assert!(save_image(&replacement, &path, FileFormat::Project).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), previous_bytes);
+
+        let mut crowded = original.clone();
+        for id in 1..=128 {
+            let mut layer = crowded.layers[0].clone();
+            layer.id = LayerId(id);
+            crowded.layers.push(layer);
+        }
+        assert!(save_image(&crowded, &path, FileFormat::Project).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous_bytes);
+        let reopened = Document::open(&path).unwrap();
+        assert_eq!(reopened.content.layers().len(), 1);
+        assert_eq!(reopened.canvas.pixels.get_pixel(1, 0).0, [255, 85, 0, 255]);
+        let leftovers = std::fs::read_dir(directory.path()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]
-    fn raster_save_uses_the_composite_and_v1_refuses_layer_offsets() {
+    fn malformed_project_does_not_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken.imageedit");
+        let content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(2, 2));
+        save_image(&content, &path, FileFormat::Project).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 1);
+        std::fs::write(&path, bytes).unwrap();
+        assert!(Document::open(&path).is_err());
+    }
+
+    #[test]
+    fn raster_save_uses_the_composite_and_projects_keep_layer_offsets() {
         let directory = tempfile::tempdir().unwrap();
         let mut content = DocumentContent::single_layer(
             "Image".into(),
@@ -362,8 +383,11 @@ mod tests {
         assert_eq!(opened.canvas.pixels.get_pixel(1, 0).0, [70, 80, 90, 255]);
 
         let project = directory.path().join("offset.imageedit");
-        assert!(save_image(&content, &project, FileFormat::Project).is_err());
-        assert!(!project.exists());
+        save_image(&content, &project, FileFormat::Project).unwrap();
+        let reopened = Document::open(&project).unwrap();
+        assert_eq!(reopened.format, FileFormat::Project);
+        assert_eq!(reopened.content.layers()[0].offset, (1, 0));
+        assert_eq!(*reopened.canvas.pixels, *opened.canvas.pixels);
     }
 
     #[test]

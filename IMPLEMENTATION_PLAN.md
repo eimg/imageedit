@@ -2,7 +2,19 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P01
+## Latest handoff · P02
+
+P02 switched project saves to the v2 wire format and kept the v1 reader. It is on branch `p02-project-v2`. The first commit, `590f1bc`, adds a v1 golden fixture written by the baseline v1 writer. The P02 commit follows it. No menu, shortcut or tab behavior changed.
+
+- `fixtures/projects/v1-single-layer.imageedit` is the baseline-written 3 × 2 v1 file with opaque, translucent and fully transparent pixels. `fixtures/projects/v2-two-layers.imageedit` is a P02-written stack with non-sequential IDs, a non-ASCII name, a negative offset, a hidden layer, opacity 77 and translucent pixels. Tests read both. Do not regenerate them with a newer writer.
+- `src/project.rs` dispatches on the manifest `version`. It reads v1 unchanged and imports its layer with ID 0. It reads and writes v2 as specified under *Project v2 wire format*. The v2 manifest and layer entries reject unknown fields. One `check_limits` function enforces the canvas, layer count, per-layer and total decoded size caps, and unique IDs for both reads and writes before any pixel buffer is allocated. The reader rejects a payload length that is zero or exceeds the remaining file, enforces the 768 MiB encoded total, checks PNG dimensions against the manifest, and rejects trailing bytes. The writer encodes one layer at a time into a reused buffer.
+- `src/document/content.rs` adds `DocumentContent::from_layers`, which requires a non-empty canvas, at least one layer, non-empty layer pixels and unique IDs. It also adds the read-only `size()` and `layers()` accessors. `src/document.rs` exports `BlendMode`, `RasterLayer` and `MAX_IMAGE_BYTES`, and its save adapter writes every project through `project::write`. The v1 full-canvas restriction is gone. Atomic same-directory replacement and recent-document handling are unchanged.
+- Formatting, Clippy and locked tests passed before and after the change. The baseline had 12 tests and the final run had 19. New tests cover the v1 golden file and its v2 rewrite, v2 round-trips against the writer and the golden file, 17 malformed manifests, 12 malformed payload or framing cases, writer limits, a failed save that leaves the original file reopenable with no leftover temporary file, a truncated project failing `Document::open`, and the constructor's validation. A malformed file fails in `Document::open` before a tab exists, so no tab can be mutated.
+- The release bundle built and passed `codesign --verify --strict`. It launched with both fixtures and a truncated project from a temporary directory. The UI smoke test did not run because Computer Use lacked Accessibility and Screen Recording permission. The opened tabs, the error for the truncated file, and a Save and reopen through the UI remain unverified.
+- Known gap for P04 and P05: opening a multi-layer v2 file makes the top layer active even if it is hidden, so Bucket Fill can edit an invisible layer. Save As to PNG, JPEG or WebP flattens a layered tab and switches it to that raster format. P04 owns that routing.
+- **Next is P03.** Add transactions, history and save identity on top of the current crop and fill edits.
+
+## Previous handoff · P01
 
 P01 introduced the layer stack and Normal compositor behind the existing single-layer UI. It is the commit immediately after baseline `5c4cfcf`, and it was verified against that baseline before commit.
 

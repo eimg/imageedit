@@ -14,9 +14,10 @@ and the latest pass handoff.
 ImageEdit supports single-layer raster editing. Open or create an image,
 crop it, sample or set swatches, and fill connected regions. Tabs retain zoom
 and pan. The canvas supports a grid and center guides. Save and Save As handle
-ImageEdit projects, PNG, JPEG, and WebP. A version 1 project stores a named
-layer with lossless pixels. Layer management, clipboard workflows, undo, and
-separate export commands are placeholders.
+ImageEdit projects, PNG, JPEG, and WebP. Projects are written as version 2,
+which stores the layer stack with lossless pixels, and version 1 files still
+open. The UI does not create layers yet. Layer management, clipboard
+workflows, undo, and separate export commands are placeholders.
 
 ## Code map
 
@@ -30,7 +31,10 @@ separate export commands are placeholders.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
   It handles crop and layer-local bucket fill. `src/document/composite.rs`
   blends visible layers for display, sampling, and raster output.
-- `src/project.rs` reads and writes the versioned ImageEdit project container.
+- `src/project.rs` reads project versions 1 and 2, writes version 2, and
+ applies the same size limits to both directions. `fixtures/projects/` holds
+ golden files for each shipped version. Never regenerate an existing fixture
+ with a newer writer.
 - `src/workspace.rs` owns tabs, view state, and background open and edit jobs.
   The canonical path identifies an already open file.
 - `src/workspace/files.rs` handles native file dialogs, background saving,

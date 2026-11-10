@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
+use anyhow::{Result, ensure};
 use image::{Rgba, RgbaImage, imageops};
 
 use super::composite;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u64);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendMode {
     Normal,
 }
@@ -60,6 +61,33 @@ impl DocumentContent {
                 blend_mode: BlendMode::Normal,
             }],
         }
+    }
+
+    pub fn from_layers(width: u32, height: u32, layers: Vec<RasterLayer>) -> Result<Self> {
+        ensure!(width > 0 && height > 0, "The canvas must not be empty");
+        ensure!(!layers.is_empty(), "A document needs at least one layer");
+        let mut ids = HashSet::with_capacity(layers.len());
+        for layer in &layers {
+            ensure!(
+                layer.pixels.width() > 0 && layer.pixels.height() > 0,
+                "Layer \"{}\" has no pixels",
+                layer.name
+            );
+            ensure!(ids.insert(layer.id), "Layer ID {} is repeated", layer.id.0);
+        }
+        Ok(Self {
+            width,
+            height,
+            layers,
+        })
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub fn layers(&self) -> &[RasterLayer] {
+        &self.layers
     }
 
     pub fn layer(&self, id: LayerId) -> Option<&RasterLayer> {
@@ -308,6 +336,20 @@ mod tests {
                 assert_eq!(pixel.0, [0, 0, 255, 128]);
             }
         }
+    }
+
+    #[test]
+    fn from_layers_rejects_invalid_stacks() {
+        let layer =
+            DocumentContent::single_layer("Layer".into(), RgbaImage::new(2, 2)).layers[0].clone();
+        let mut other = layer.clone();
+        other.id = LayerId(1);
+        assert!(DocumentContent::from_layers(2, 2, vec![layer.clone(), other.clone()]).is_ok());
+        assert!(DocumentContent::from_layers(2, 2, vec![]).is_err());
+        assert!(DocumentContent::from_layers(0, 2, vec![layer.clone()]).is_err());
+        assert!(DocumentContent::from_layers(2, 2, vec![layer.clone(), layer.clone()]).is_err());
+        other.pixels = Arc::new(RgbaImage::new(0, 3));
+        assert!(DocumentContent::from_layers(2, 2, vec![layer, other]).is_err());
     }
 
     #[test]
