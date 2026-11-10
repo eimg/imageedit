@@ -1,0 +1,19 @@
+[package]
+name = "imageedit"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight desktop image editor"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+smallvec = "1"
+url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage", "NSResponder", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "std"] }
