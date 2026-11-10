@@ -52,7 +52,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - Use the Zoom tool, View menu, or status bar to zoom. Control-scroll zooms
   around the pointer. Scroll or use a middle-button drag to pan a zoomed
   image. Pan is also available from the toolbox for left-button dragging.
-  The cursor shows the selected tool beside the canvas crosshair.
+  Fitting or zooming out uses a reduced preview; zooming in shows source
+  pixels. The cursor shows the selected tool beside the canvas crosshair.
 - **Edit → Undo** and **Redo** step through crops, fills and layer changes in
   the current tab. Undoing back to the last save clears the unsaved marker.
   Each tab keeps up to 100 steps, and the oldest steps are dropped first when

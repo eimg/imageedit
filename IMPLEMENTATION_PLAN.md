@@ -2,7 +2,20 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P06
+## Latest handoff · P07
+
+P07 paints the 256 px tiles from P06 on branch `p07-preview`, which starts from P06's commit on `p06-preview`.
+
+- The canvas paints cached tiles instead of the single 4096 px preview. Each tile is drawn into its stored rectangle and clipped to its content rectangle, so the one-pixel apron is what the linear sampler reads and neighboring tiles do not cover the same pixels. Tiles outside the viewport are skipped. At 8 screen pixels per source pixel or more, the canvas still paints source pixels. If the preferred reduction is missing, the full-resolution tiles are shown until it arrives.
+- Fit and zoom choose a shift with `fit_level_shift`, using the image's on-screen edge in physical pixels. Level 0 is built with the document. Other shifts are built one at a time on a background job. The job installs only while the composite `Arc` is still the one it started from, so a rename does not cancel it and a painted edit does. A painted edit also drops a level that arrived after that edit's patch was prepared.
+- `RenderedCanvas::prepare_patch` runs on the edit job. `Dirty::Region` (fill, opacity, visibility) rebuilds tiles that meet the dirty rectangle, including the apron, and patches the full composite used by the eyedropper and the high-zoom path. `Dirty::Canvas` (crop, undo, redo, and structural layer edits) replaces the levels with a new base cache. `Dirty::Unpainted` (rename) keeps the composite and the tile images. `apply` returns the GPU images it replaced, and the workspace drops those. Closing a tab still releases every image the canvas owns, including tiles.
+- Opacity drags and the crop overlay still commit one edit on release, so a gesture does not rebuild tiles on each pointer move. Preview work does not change the saved revision.
+- A 600 × 300 document test checks the accept path: a 64 × 64 region at `(300, 20)` replaces one base-level GPU image, a rect crossing `x = 256` replaces two, and a rename replaces none. The P06 CPU benchmark was not re-timed; shift 0 still composites the dirty rectangle and the ignored `preview_benchmark` harness is unchanged.
+- Formatting, Clippy and locked tests passed. P06 ended with 37 tests and P07 ends with 38, plus the ignored release benchmark.
+- Computer Use could screenshot the app. An 800×600 gradient fitted in the window showed a continuous grid across the 256 px boundaries. The window stayed covered, so pan, zoom, tab switch, and close were not driven.
+- **Next is P08**, selection basics. P09 waits on both P07 and P08.
+
+## Previous handoff · P06
 
 P06 measured a tiled preview on branch `p06-preview` and left the canvas renderer unchanged. `main` was fast-forwarded through P05 before this branch.
 
@@ -14,7 +27,7 @@ P06 measured a tiled preview on branch `p06-preview` and left the canvas rendere
 - The native zoom and pan seam was not checked in the app, because this pass does not paint tiles. The seam check above is the CPU equivalent of the linear sample.
 - **Next is P07.** It should paint 256 px tiles, drop replaced images, and keep the Fit level from this pass.
 
-## Previous handoff · P05
+## Earlier handoff · P05
 
 P05 added the Layers panel and layer commands on branch `p05-layers`, which starts from P04's branch `p04-export`.
 

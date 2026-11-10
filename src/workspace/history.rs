@@ -240,7 +240,11 @@ mod tests {
         fn fill(&mut self, color: u8, limits: &Limits) {
             let layer = self.current.active_layer;
             self.edit(
-                |content| content.fill(layer, 0, 0, Rgba([color, 0, 0, 255])),
+                |content| {
+                    content
+                        .fill(layer, 0, 0, Rgba([color, 0, 0, 255]))
+                        .is_some()
+                },
                 limits,
             );
         }

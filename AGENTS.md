@@ -15,7 +15,9 @@ ImageEdit supports layered raster editing. Open or create an image, crop it,
 sample or set swatches, and fill connected regions on the active layer. Each
 tab can undo and redo crops, fills and layer changes, and undoing back to the
 saved state clears the unsaved marker. Tabs retain zoom and pan. The canvas
-supports a grid and center guides. Save and Save As handle ImageEdit projects,
+paints 256 px tiles and builds a coarser level when the image is fitted or
+zoomed out. It also supports a grid and center guides. Save and Save As handle
+ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies without changing the tab's
 file. Raster Save is offered only while a document is a single plain layer.
@@ -29,9 +31,9 @@ Clipboard workflows are placeholders.
   metadata. Reuse those actions for UI entry points. A `Planned` menu action
   stays disabled until there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
-  full-resolution composite and bounded BGRA preview for GPUI.
-- `src/preview.rs` measures tiled preview updates. The canvas still paints
-  one image; the next preview pass owns the switch.
+  full-resolution composite, tile images and bounded BGRA preview for GPUI.
+- `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
+  and the Fit level choice. The canvas paints those tiles.
 - `src/document/content.rs` owns the canvas dimensions and raster layer stack.
   It handles crop and layer-local bucket fill. `src/document/composite.rs`
   blends visible layers for display, sampling, and raster output.
@@ -42,7 +44,9 @@ Clipboard workflows are placeholders.
  format intentionally changes.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
-  unchanged. The canonical path identifies an already open file.
+  unchanged. A coarser preview level publishes only while the composite it
+  was built from is still current. The canonical path identifies an already
+  open file.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.

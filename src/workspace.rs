@@ -7,15 +7,17 @@ mod history;
 mod layers;
 mod view;
 
-use std::{cell::Cell, path::PathBuf, rc::Rc};
+use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};
 
 use futures::{StreamExt, channel::mpsc};
-use gpui::{Bounds, Context, FocusHandle, Pixels, Point, ScrollHandle, Window};
+use gpui::{Bounds, Context, FocusHandle, Pixels, Point, RenderImage, ScrollHandle, Window};
 
 use crate::commands::{Tool, Zoom};
 use crate::document::{
-    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, LayerId, RenderedCanvas, file_name,
+    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, LayerId, RenderedCanvas,
+    build_level, file_name,
 };
+use crate::preview::{self, Dirty};
 
 use self::{
     cursor::CanvasCursor,
@@ -37,6 +39,7 @@ struct Tab {
     saving: Option<PathBuf>,
     exporting: bool,
     notice: Option<String>,
+    building_level: Option<u32>,
 }
 
 impl Tab {
@@ -210,6 +213,7 @@ impl Workspace {
             saving: None,
             exporting: false,
             notice: None,
+            building_level: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -236,6 +240,7 @@ impl Workspace {
         self.pan_drag = None;
         self.tab_scroll.scroll_to_item(index);
         self.update_title(window);
+        self.ensure_preview_level(window.scale_factor(), window, cx);
         cx.notify();
     }
 
@@ -276,7 +281,7 @@ impl Workspace {
     // The edit may also choose a new active layer.
     fn edit_content(
         &mut self,
-        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> bool + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> Dirty + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -297,14 +302,14 @@ impl Workspace {
     fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_step_history(change) {
             self.clear_crop();
-            self.start_change(change, |_, _| true, window, cx);
+            self.start_change(change, |_, _| Dirty::Canvas, window, cx);
         }
     }
 
     fn start_change(
         &mut self,
         change: Change,
-        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> bool + Send + 'static,
+        edit: impl FnOnce(&mut DocumentContent, &mut LayerId) -> Dirty + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -326,12 +331,14 @@ impl Workspace {
         tab.notice = None;
         let id = tab.id;
         let generation = tab.history.generation();
+        let pixels = tab.document.canvas.pixels.clone();
+        let has_transparency = tab.document.canvas.preview.has_transparency;
+        let levels = tab.document.canvas.level_caches();
         let mut active_layer = tab.active_layer;
         let job = cx.background_executor().spawn(async move {
-            edit(&mut content, &mut active_layer).then(|| {
-                let canvas = RenderedCanvas::new(&content);
-                (content, active_layer, canvas)
-            })
+            let dirty = edit(&mut content, &mut active_layer);
+            RenderedCanvas::prepare_patch(&pixels, has_transparency, levels, &content, dirty)
+                .map(|patch| (content, active_layer, patch))
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
@@ -350,7 +357,7 @@ impl Workspace {
         id: usize,
         generation: u64,
         change: Change,
-        result: Option<(DocumentContent, LayerId, RenderedCanvas)>,
+        result: Option<(DocumentContent, LayerId, crate::document::CanvasPatch)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -361,11 +368,11 @@ impl Workspace {
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];
         tab.editing = false;
-        let Some((content, edited_layer, canvas)) = result else {
+        let Some((content, edited_layer, patch)) = result else {
             return;
         };
         if tab.history.generation() != generation {
-            drop_canvas(canvas, window, cx);
+            drop_images(patch.into_images(), window, cx);
             return;
         }
         let current = tab.state();
@@ -393,8 +400,8 @@ impl Workspace {
             tab.pan = Point::default();
         }
         tab.document.content = content;
-        let old = std::mem::replace(&mut tab.document.canvas, canvas);
-        drop_canvas(old, window, cx);
+        let replaced = tab.document.canvas.apply(patch);
+        drop_images(replaced, window, cx);
         tab.history
             .enforce_tab_limits(&tab.document.content, &LIMITS);
         history::enforce_app_budget(
@@ -404,6 +411,7 @@ impl Workspace {
             &LIMITS,
         );
         self.update_title(window);
+        self.ensure_preview_level(window.scale_factor(), window, cx);
     }
 
     fn update_title(&self, window: &mut Window) {
@@ -416,6 +424,96 @@ impl Workspace {
         );
         window.set_window_title(&title);
         window.set_window_edited(self.active_tab().is_some_and(|tab| tab.dirty()));
+    }
+}
+
+impl Workspace {
+    fn request_preview_level(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scale = window.scale_factor();
+        let Some(index) = self.active else {
+            return;
+        };
+        let tab = &self.tabs[index];
+        let Some(shift) = preview_shift(tab, self.viewport.get(), scale) else {
+            return;
+        };
+        if shift == 0
+            || tab.document.canvas.has_level(shift)
+            || tab.building_level.is_some()
+            || tab.busy()
+        {
+            return;
+        }
+        cx.defer_in(window, move |workspace, window, cx| {
+            workspace.ensure_preview_level(scale, window, cx);
+        });
+    }
+
+    pub(super) fn ensure_preview_level(
+        &mut self,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.active else {
+            return;
+        };
+        let Some(shift) = preview_shift(&self.tabs[index], self.viewport.get(), scale) else {
+            return;
+        };
+        let tab = &mut self.tabs[index];
+        if shift == 0
+            || tab.document.canvas.has_level(shift)
+            || tab.building_level == Some(shift)
+            || tab.busy()
+        {
+            return;
+        }
+        tab.building_level = Some(shift);
+        let id = tab.id;
+        let source_pixels = Arc::clone(&tab.document.canvas.pixels);
+        let content = tab.document.content.clone();
+        let job = cx
+            .background_executor()
+            .spawn(async move { build_level(&content, shift) });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let cache = job.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                let Some(index) = workspace.tab_index(id) else {
+                    return;
+                };
+                let tab = &mut workspace.tabs[index];
+                tab.building_level = None;
+                // A rename keeps the same composite. A painted edit replaces it, so this
+                // reduction belongs to the previous pixels and must not be installed.
+                if !Arc::ptr_eq(&tab.document.canvas.pixels, &source_pixels) {
+                    return;
+                }
+                let replaced = tab.document.canvas.install_cache(cache);
+                drop_images(replaced, window, cx);
+                cx.notify();
+                workspace.ensure_preview_level(window.scale_factor(), window, cx);
+            });
+        })
+        .detach();
+    }
+}
+
+fn preview_shift(tab: &Tab, viewport: Bounds<Pixels>, scale: f32) -> Option<u32> {
+    let geometry = canvas_tools::PreviewGeometry::for_tab(tab, viewport, scale)?;
+    let display = f32::from(geometry.bounds.size.width)
+        .max(f32::from(geometry.bounds.size.height))
+        .max(1.)
+        * scale;
+    Some(preview::fit_level_shift(
+        tab.document.width().max(tab.document.height()),
+        display as u32,
+    ))
+}
+
+fn drop_images(images: Vec<Arc<RenderImage>>, window: &mut Window, cx: &mut Context<Workspace>) {
+    for image in images {
+        cx.drop_image(image, Some(window));
     }
 }
 

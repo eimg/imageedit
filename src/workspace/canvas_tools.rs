@@ -3,6 +3,7 @@ use gpui::{Bounds, Context, MouseButton, MouseUpEvent, Pixels, Point, Window, po
 use super::{CropDrag, Tab, Workspace};
 use crate::commands::Zoom;
 use crate::document::{CropRect, solid_color};
+use crate::preview::Dirty;
 
 impl Workspace {
     pub(super) fn step_zoom(
@@ -10,6 +11,7 @@ impl Workspace {
         multiplier: f32,
         anchor: Option<Point<Pixels>>,
         scale: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let viewport = self.viewport.get();
@@ -51,6 +53,7 @@ impl Workspace {
         }
         self.pan_drag = None;
         self.crop_drag = None;
+        self.ensure_preview_level(scale, window, cx);
         cx.notify();
     }
 
@@ -151,7 +154,17 @@ impl Workspace {
             return;
         };
         self.crop_drag = None;
-        self.edit_content(move |content, _| content.crop(crop), window, cx);
+        self.edit_content(
+            move |content, _| {
+                if content.crop(crop) {
+                    Dirty::Canvas
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -180,7 +193,12 @@ impl Workspace {
         }
         let color = solid_color(self.colors[0]);
         self.edit_content(
-            move |content, _| content.fill(layer, x, y, color),
+            move |content, _| {
+                content
+                    .fill(layer, x, y, color)
+                    .map(Dirty::Region)
+                    .unwrap_or(Dirty::None)
+            },
             window,
             cx,
         );
@@ -265,7 +283,7 @@ impl PreviewGeometry {
         })
     }
 
-    fn for_tab(tab: &Tab, viewport: Bounds<Pixels>, scale: f32) -> Option<Self> {
+    pub(super) fn for_tab(tab: &Tab, viewport: Bounds<Pixels>, scale: f32) -> Option<Self> {
         Self::new(
             tab.document.width(),
             tab.document.height(),

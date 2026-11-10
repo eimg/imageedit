@@ -8,6 +8,7 @@ use super::color::{ColorControl, Hsv, control};
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
 use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
+use crate::preview::Dirty;
 
 pub(super) struct Form {
     focus: FocusHandle,
@@ -403,10 +404,12 @@ impl Workspace {
                 };
                 self.edit_content(
                     move |content, active| {
-                        content
-                            .add_layer(above, name, fill)
-                            .map(|id| *active = id)
-                            .is_some()
+                        if let Some(id) = content.add_layer(above, name, fill) {
+                            *active = id;
+                            Dirty::Canvas
+                        } else {
+                            Dirty::None
+                        }
                     },
                     window,
                     cx,
@@ -427,7 +430,17 @@ impl Workspace {
                 let id = *id;
                 let name = name.to_owned();
                 self.dismiss_form(window, cx);
-                self.edit_content(move |content, _| content.rename_layer(id, name), window, cx);
+                self.edit_content(
+                    move |content, _| {
+                        if content.rename_layer(id, name) {
+                            Dirty::Unpainted
+                        } else {
+                            Dirty::None
+                        }
+                    },
+                    window,
+                    cx,
+                );
             }
             FormKind::LayerOpacity { id, percent } => {
                 let Some(percent) = percent
@@ -444,7 +457,13 @@ impl Workspace {
                 let opacity = opacity_from_percent(percent);
                 self.dismiss_form(window, cx);
                 self.edit_content(
-                    move |content, _| content.set_opacity(id, opacity),
+                    move |content, _| {
+                        if content.set_opacity(id, opacity) {
+                            content.layer_dirty(id)
+                        } else {
+                            Dirty::None
+                        }
+                    },
                     window,
                     cx,
                 );

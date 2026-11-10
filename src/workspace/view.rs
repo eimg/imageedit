@@ -1,9 +1,9 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, Context, Corners, CursorStyle, Div, ExternalPaths,
-    MouseButton, Pixels, Point, Transformation, TransformationMatrix, Window, canvas, div, fill,
-    percentage, point, prelude::*, px, rgb, rgba, size, svg,
+    Animation, AnimationExt as _, App, Bounds, ContentMask, Context, Corners, CursorStyle, Div,
+    ExternalPaths, MouseButton, Pixels, Point, Transformation, TransformationMatrix, Window,
+    canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba, size, svg,
 };
 
 use crate::commands::{
@@ -12,7 +12,8 @@ use crate::commands::{
     ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectTool, SwapColors, TOOL_GROUPS,
     ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
-use crate::document::{CropRect, FileFormat};
+use crate::document::{CropRect, DrawnTile, FileFormat};
+use crate::preview;
 
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
@@ -35,6 +36,7 @@ const SWATCH_HEIGHT: f32 = 28.;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_preview_level(window, cx);
         let interactive = self.form.is_none() && !self.dialog_open;
         let active = self.active_tab();
         div()
@@ -129,20 +131,21 @@ impl Render for Workspace {
                 }))
             })
             .when(interactive && active.is_some(), |root| {
-                root.on_action(cx.listener(|this, zoom: &Zoom, _, cx| {
+                root.on_action(cx.listener(|this, zoom: &Zoom, window, cx| {
                     if let Some(index) = this.active {
                         this.tabs[index].zoom = *zoom;
                         this.tabs[index].pan = Point::default();
                         this.pan_drag = None;
                         this.crop_drag = None;
+                        this.ensure_preview_level(window.scale_factor(), window, cx);
                         cx.notify();
                     }
                 }))
                 .on_action(cx.listener(|this, _: &ZoomIn, window, cx| {
-                    this.step_zoom(1.25, None, window.scale_factor(), cx)
+                    this.step_zoom(1.25, None, window.scale_factor(), window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ZoomOut, window, cx| {
-                    this.step_zoom(0.8, None, window.scale_factor(), cx)
+                    this.step_zoom(0.8, None, window.scale_factor(), window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleGrid, _, cx| {
                     this.show_grid = !this.show_grid;
@@ -396,6 +399,7 @@ impl Workspace {
                                         multiplier,
                                         Some(event.position),
                                         window.scale_factor(),
+                                        window,
                                         cx,
                                     );
                                 }
@@ -473,6 +477,7 @@ impl Workspace {
                                     multiplier,
                                     Some(event.position()),
                                     window.scale_factor(),
+                                    window,
                                     cx,
                                 );
                             }))
@@ -483,6 +488,7 @@ impl Workspace {
                                         0.8,
                                         Some(event.position),
                                         window.scale_factor(),
+                                        window,
                                         cx,
                                     );
                                 }),
@@ -985,6 +991,7 @@ fn image_preview(
     crop: Option<CropRect>,
 ) -> impl IntoElement {
     let image = tab.document.canvas.preview.image.clone();
+    let tile_sets = tab.document.canvas.tile_sets();
     let pixels = tab.document.canvas.pixels.clone();
     let has_transparency = tab.document.canvas.preview.has_transparency;
     let width = tab.document.width();
@@ -1014,7 +1021,15 @@ fn image_preview(
             let pixel_height = image_bounds.size.height / height as f32;
             if pixel_width.min(pixel_height) >= px(8.) {
                 paint_source_pixels(window, &pixels, image_bounds, visible);
-            } else if let Err(error) =
+            } else if !paint_tiles(
+                window,
+                &geometry,
+                width,
+                height,
+                window.scale_factor(),
+                visible,
+                &tile_sets,
+            ) && let Err(error) =
                 window.paint_image(image_bounds, Corners::default(), image, 0, false)
             {
                 eprintln!("Could not paint image preview: {error}");
@@ -1060,6 +1075,58 @@ fn image_preview(
         },
     )
     .size_full()
+}
+
+fn paint_tiles(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    scale: f32,
+    visible: Bounds<Pixels>,
+    tile_sets: &[(u32, Vec<DrawnTile>)],
+) -> bool {
+    let display = f32::from(geometry.bounds.size.width)
+        .max(f32::from(geometry.bounds.size.height))
+        .max(1.)
+        * scale;
+    let wanted = preview::fit_level_shift(width.max(height), display as u32);
+    let Some((_, tiles)) = tile_sets
+        .iter()
+        .find(|(shift, _)| *shift == wanted)
+        .or_else(|| tile_sets.first())
+    else {
+        return false;
+    };
+    if tiles.is_empty() {
+        return false;
+    }
+    let canvas_bounds = |rect: preview::PixelRect| {
+        let start = geometry.project(point(
+            rect.x as f32 / width as f32,
+            rect.y as f32 / height as f32,
+        ));
+        let end = geometry.project(point(
+            rect.right() as f32 / width as f32,
+            rect.bottom() as f32 / height as f32,
+        ));
+        Bounds::from_corners(start, end)
+    };
+    for tile in tiles {
+        let content = canvas_bounds(tile.content);
+        if content.intersect(&visible).is_empty() {
+            continue;
+        }
+        let stored = canvas_bounds(tile.stored);
+        window.with_content_mask(Some(ContentMask { bounds: content }), |window| {
+            if let Err(error) =
+                window.paint_image(stored, Corners::default(), tile.image.clone(), 0, false)
+            {
+                eprintln!("Could not paint image tile: {error}");
+            }
+        });
+    }
+    true
 }
 
 fn paint_source_pixels(

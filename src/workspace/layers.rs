@@ -15,6 +15,7 @@ use crate::commands::{
     RenameLayer, ToggleLayerVisibility,
 };
 use crate::document::LayerId;
+use crate::preview::Dirty;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum LayerCommand {
@@ -135,36 +136,48 @@ impl Workspace {
             LayerCommand::Opacity => self.layer_opacity_form(id, window, cx),
             LayerCommand::Duplicate => self.edit_content(
                 move |content, active| {
-                    content
-                        .duplicate_layer(id)
-                        .map(|copy| *active = copy)
-                        .is_some()
+                    if let Some(copy) = content.duplicate_layer(id) {
+                        *active = copy;
+                        Dirty::Canvas
+                    } else {
+                        Dirty::None
+                    }
                 },
                 window,
                 cx,
             ),
             LayerCommand::Delete => self.edit_content(
                 move |content, active| {
-                    content
-                        .delete_layer(id)
-                        .map(|next| *active = next)
-                        .is_some()
+                    if let Some(next) = content.delete_layer(id) {
+                        *active = next;
+                        Dirty::Canvas
+                    } else {
+                        Dirty::None
+                    }
                 },
                 window,
                 cx,
             ),
             LayerCommand::MergeDown => self.edit_content(
                 move |content, active| {
-                    content
-                        .merge_down(id)
-                        .map(|merged| *active = merged)
-                        .is_some()
+                    if let Some(merged) = content.merge_down(id) {
+                        *active = merged;
+                        Dirty::Canvas
+                    } else {
+                        Dirty::None
+                    }
                 },
                 window,
                 cx,
             ),
             LayerCommand::ToggleVisibility => self.edit_content(
-                move |content, _| content.set_visible(id, !visible),
+                move |content, _| {
+                    if content.set_visible(id, !visible) {
+                        content.layer_dirty(id)
+                    } else {
+                        Dirty::None
+                    }
+                },
                 window,
                 cx,
             ),
@@ -182,7 +195,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_content(move |content, _| content.move_layer(id, index), window, cx);
+        self.edit_content(
+            move |content, _| {
+                if content.move_layer(id, index) {
+                    Dirty::Canvas
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     fn select_layer(&mut self, id: LayerId, cx: &mut Context<Self>) {
@@ -206,7 +229,13 @@ impl Workspace {
             return;
         };
         self.edit_content(
-            move |content, _| content.set_visible(id, !visible),
+            move |content, _| {
+                if content.set_visible(id, !visible) {
+                    content.layer_dirty(id)
+                } else {
+                    Dirty::None
+                }
+            },
             window,
             cx,
         );
@@ -234,7 +263,13 @@ impl Workspace {
     fn end_opacity_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((id, opacity)) = self.opacity_drag.take() {
             self.edit_content(
-                move |content, _| content.set_opacity(id, opacity),
+                move |content, _| {
+                    if content.set_opacity(id, opacity) {
+                        content.layer_dirty(id)
+                    } else {
+                        Dirty::None
+                    }
+                },
                 window,
                 cx,
             );

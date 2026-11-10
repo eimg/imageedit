@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{sync::Arc, time::Instant};
 
 use image::{Rgba, RgbaImage};
@@ -7,6 +5,7 @@ use image::{Rgba, RgbaImage};
 use crate::document::DocumentContent;
 
 pub const TILE_FINE: u32 = 256;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const TILE_COARSE: u32 = 512;
 // GPUI samples atlas textures with a linear filter, so a tile keeps one source
 // pixel past each edge. Without it, a seam blends against the neighboring atlas tile.
@@ -31,11 +30,11 @@ impl PixelRect {
         }
     }
 
-    fn right(self) -> i64 {
+    pub fn right(self) -> i64 {
         self.x.saturating_add(i64::from(self.width))
     }
 
-    fn bottom(self) -> i64 {
+    pub fn bottom(self) -> i64 {
         self.y.saturating_add(i64::from(self.height))
     }
 
@@ -43,7 +42,7 @@ impl PixelRect {
         self.width == 0 || self.height == 0
     }
 
-    fn intersects(self, other: Self) -> bool {
+    pub fn overlaps(self, other: Self) -> bool {
         self.x < other.right()
             && other.x < self.right()
             && self.y < other.bottom()
@@ -67,6 +66,22 @@ pub struct TileUpdate {
     pub retained: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dirty {
+    None,
+    // The document changed, but its pixels did not.
+    Unpainted,
+    Region(PixelRect),
+    Canvas,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileSpan {
+    pub index: usize,
+    pub content: PixelRect,
+    pub stored: PixelRect,
+}
+
 // Coarsest power-of-two reduction that still covers the viewport.
 // 8192 canvas pixels in a 1600 pixel window uses shift 2 (2048 source pixels).
 pub fn fit_level_shift(canvas_edge: u32, viewport_edge: u32) -> u32 {
@@ -80,11 +95,13 @@ pub fn fit_level_shift(canvas_edge: u32, viewport_edge: u32) -> u32 {
     shift
 }
 
+#[derive(Clone)]
 pub struct TileCache {
     tile: u32,
     apron: u32,
-    width: u32,
-    height: u32,
+    shift: u32,
+    canvas_width: u32,
+    canvas_height: u32,
     cols: u32,
     rows: u32,
     tiles: Vec<Option<Arc<RgbaImage>>>,
@@ -92,20 +109,41 @@ pub struct TileCache {
 
 impl TileCache {
     pub fn new(width: u32, height: u32, tile: u32, apron: u32) -> Self {
+        Self::leveled(width, height, tile, apron, 0)
+    }
+
+    // `shift` is the Fit reduction: each level pixel covers `1 << shift` canvas pixels.
+    pub fn leveled(width: u32, height: u32, tile: u32, apron: u32, shift: u32) -> Self {
+        let shift = shift.min(MAX_FIT_SHIFT);
+        let scale = 1u32 << shift;
         let tile = tile.max(1);
-        let cols = width.div_ceil(tile).max(1);
-        let rows = height.div_ceil(tile).max(1);
+        let cols = width.div_ceil(scale).max(1).div_ceil(tile).max(1);
+        let rows = height.div_ceil(scale).max(1).div_ceil(tile).max(1);
         Self {
             tile,
             apron,
-            width,
-            height,
+            shift,
+            canvas_width: width,
+            canvas_height: height,
             cols,
             rows,
             tiles: vec![None; (cols as usize).saturating_mul(rows as usize)],
         }
     }
 
+    pub fn shift(&self) -> u32 {
+        self.shift
+    }
+
+    pub fn spans(&self) -> impl Iterator<Item = TileSpan> + '_ {
+        (0..self.rows).flat_map(move |row| (0..self.cols).map(move |column| self.span(column, row)))
+    }
+
+    pub fn slot(&self, index: usize) -> Option<&Arc<RgbaImage>> {
+        self.tiles.get(index).and_then(|tile| tile.as_ref())
+    }
+
+    #[cfg(test)]
     pub fn tile(&self, column: u32, row: u32) -> Option<&Arc<RgbaImage>> {
         self.index(column, row)
             .and_then(|index| self.tiles[index].as_ref())
@@ -123,17 +161,13 @@ impl TileCache {
         let mut rebuilt = 0;
         for row in 0..self.rows {
             for column in 0..self.cols {
-                if !self.coverage(column, row).intersects(coverage) {
+                if !self.coverage(column, row).overlaps(coverage) {
                     continue;
                 }
                 let index = (row * self.cols + column) as usize;
                 let rect = self.stored_rect(column, row);
-                self.tiles[index] = Some(Arc::new(content.composite_rect(
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                )));
+                let image = content.composite_rect(rect.x, rect.y, rect.width, rect.height);
+                self.tiles[index] = Some(Arc::new(box_downsample(&image, self.shift)));
                 rebuilt += 1;
             }
         }
@@ -143,6 +177,7 @@ impl TileCache {
         }
     }
 
+    #[cfg(test)]
     pub fn visible(&self, view: PixelRect) -> u32 {
         if view.is_empty() {
             return 0;
@@ -150,7 +185,7 @@ impl TileCache {
         let mut count = 0;
         for row in 0..self.rows {
             for column in 0..self.cols {
-                if self.content_rect(column, row).intersects(view) {
+                if self.content_rect(column, row).overlaps(view) {
                     count += 1;
                 }
             }
@@ -162,26 +197,45 @@ impl TileCache {
         self.tiles.iter().filter(|tile| tile.is_some()).count() as u32
     }
 
+    #[cfg(test)]
     fn index(&self, column: u32, row: u32) -> Option<usize> {
         (column < self.cols && row < self.rows).then_some((row * self.cols + column) as usize)
     }
 
+    fn span(&self, column: u32, row: u32) -> TileSpan {
+        TileSpan {
+            index: (row * self.cols + column) as usize,
+            content: self.content_rect(column, row),
+            stored: self.stored_rect(column, row),
+        }
+    }
+
+    fn scale(&self) -> u32 {
+        1u32 << self.shift
+    }
+
     fn content_rect(&self, column: u32, row: u32) -> PixelRect {
-        let x = i64::from(column * self.tile);
-        let y = i64::from(row * self.tile);
+        let scale = u64::from(self.scale());
+        let origin_x = u64::from(column) * u64::from(self.tile) * scale;
+        let origin_y = u64::from(row) * u64::from(self.tile) * scale;
+        let width = (u64::from(self.tile) * scale)
+            .min(u64::from(self.canvas_width).saturating_sub(origin_x));
+        let height = (u64::from(self.tile) * scale)
+            .min(u64::from(self.canvas_height).saturating_sub(origin_y));
         PixelRect::new(
-            x,
-            y,
-            (self.tile).min(self.width.saturating_sub(column * self.tile)),
-            (self.tile).min(self.height.saturating_sub(row * self.tile)),
+            origin_x as i64,
+            origin_y as i64,
+            width as u32,
+            height as u32,
         )
     }
 
     fn coverage(&self, column: u32, row: u32) -> PixelRect {
         clip_to_canvas(
-            self.content_rect(column, row).expand(self.apron),
-            self.width,
-            self.height,
+            self.content_rect(column, row)
+                .expand(self.apron.saturating_mul(self.scale())),
+            self.canvas_width,
+            self.canvas_height,
         )
     }
 
@@ -225,6 +279,7 @@ pub fn box_downsample(source: &RgbaImage, shift: u32) -> RgbaImage {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
 pub struct TimedUpdate {
     pub tile: u32,
@@ -233,6 +288,7 @@ pub struct TimedUpdate {
     pub samples: u32,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn time_updates(
     content: &DocumentContent,
     tile: u32,

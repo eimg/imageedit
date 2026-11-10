@@ -17,6 +17,7 @@ use image::{
 use smallvec::smallvec;
 use tempfile::NamedTempFile;
 
+use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
 pub use content::{
@@ -68,22 +69,67 @@ pub struct RenderedCanvas {
     pub pixels: Arc<RgbaImage>,
     pub preview: Preview,
     pub thumbnails: Vec<(LayerId, Arc<RenderImage>)>,
+    levels: Vec<TileLevel>,
+}
+
+struct TileLevel {
+    cache: TileCache,
+    images: Vec<Option<Arc<RenderImage>>>,
+}
+
+impl TileLevel {
+    fn drawn(&self) -> Vec<DrawnTile> {
+        self.cache
+            .spans()
+            .filter_map(|span| {
+                Some(DrawnTile {
+                    image: self.images.get(span.index)?.clone()?,
+                    content: span.content,
+                    stored: span.stored,
+                })
+            })
+            .collect()
+    }
+}
+
+pub struct DrawnTile {
+    pub image: Arc<RenderImage>,
+    pub content: PixelRect,
+    pub stored: PixelRect,
+}
+
+impl CanvasPatch {
+    pub(crate) fn into_images(self) -> Vec<Arc<RenderImage>> {
+        self.preview
+            .map(|preview| preview.image)
+            .into_iter()
+            .chain(self.thumbnails.into_iter().map(|(_, image)| image))
+            .collect()
+    }
+}
+
+pub struct CanvasPatch {
+    pixels: Arc<RgbaImage>,
+    has_transparency: bool,
+    preview: Option<Preview>,
+    levels: Vec<TileCache>,
+    replace_levels: bool,
+    // False for a history-only change such as a rename. A later level can stay.
+    tiles_changed: bool,
+    thumbnails: Vec<(LayerId, Arc<RenderImage>)>,
 }
 
 impl RenderedCanvas {
     pub fn new(content: &DocumentContent) -> Self {
         let pixels = content.composite();
-        let preview = render_preview(&pixels);
-        let thumbnails = content
-            .layers()
-            .iter()
-            .map(|layer| (layer.id, render_thumbnail(&layer.pixels)))
-            .collect();
-        Self {
+        let mut canvas = Self {
+            preview: render_preview(&pixels),
+            thumbnails: thumbnails(content),
+            levels: Vec::new(),
             pixels,
-            preview,
-            thumbnails,
-        }
+        };
+        canvas.install_level(level_images(filled_cache(content)));
+        canvas
     }
 
     pub fn thumbnail(&self, id: LayerId) -> Option<&Arc<RenderImage>> {
@@ -92,11 +138,300 @@ impl RenderedCanvas {
             .find_map(|(layer, image)| (*layer == id).then_some(image))
     }
 
+    pub fn level_caches(&self) -> Vec<TileCache> {
+        self.levels
+            .iter()
+            .map(|level| level.cache.clone())
+            .collect()
+    }
+
+    pub fn has_level(&self, shift: u32) -> bool {
+        self.levels.iter().any(|level| level.cache.shift() == shift)
+    }
+
+    // One entry per built reduction. The first is the full-resolution level.
+    pub fn tile_sets(&self) -> Vec<(u32, Vec<DrawnTile>)> {
+        self.levels
+            .iter()
+            .map(|level| (level.cache.shift(), level.drawn()))
+            .collect()
+    }
+
+    pub fn prepare_patch(
+        pixels: &Arc<RgbaImage>,
+        has_transparency: bool,
+        mut levels: Vec<TileCache>,
+        content: &DocumentContent,
+        dirty: Dirty,
+    ) -> Option<CanvasPatch> {
+        if dirty == Dirty::None {
+            return None;
+        }
+        let (width, height) = content.size();
+        let size_changed = (width, height) != pixels.dimensions();
+        if dirty == Dirty::Unpainted && !size_changed {
+            return Some(CanvasPatch {
+                pixels: pixels.clone(),
+                has_transparency,
+                preview: None,
+                levels,
+                replace_levels: false,
+                tiles_changed: false,
+                thumbnails: Vec::new(),
+            });
+        }
+        if size_changed || dirty == Dirty::Canvas {
+            let pixels = content.composite();
+            return Some(CanvasPatch {
+                has_transparency: pixels.pixels().any(|pixel| pixel.0[3] < 255),
+                preview: Some(render_preview(&pixels)),
+                levels: vec![filled_cache(content)],
+                replace_levels: true,
+                tiles_changed: true,
+                thumbnails: thumbnails(content),
+                pixels,
+            });
+        }
+        let Dirty::Region(rect) = dirty else {
+            return None;
+        };
+        if levels.is_empty() {
+            levels.push(filled_cache(content));
+        }
+        for cache in &mut levels {
+            cache.rebuild(content, rect);
+        }
+        let pixels = patch_pixels(pixels, content, rect);
+        Some(CanvasPatch {
+            has_transparency: has_transparency || rect_has_transparency(&pixels, rect),
+            preview: None,
+            levels,
+            replace_levels: false,
+            tiles_changed: true,
+            thumbnails: thumbnails_touching(content, rect),
+            pixels,
+        })
+    }
+
+    pub fn apply(&mut self, patch: CanvasPatch) -> Vec<Arc<RenderImage>> {
+        self.pixels = patch.pixels;
+        self.preview.has_transparency = patch.has_transparency;
+        let mut dropped = Vec::new();
+        if let Some(preview) = patch.preview {
+            dropped.push(std::mem::replace(&mut self.preview.image, preview.image));
+        }
+        for (id, image) in patch.thumbnails {
+            if let Some((_, slot)) = self.thumbnails.iter_mut().find(|(layer, _)| *layer == id) {
+                dropped.push(std::mem::replace(slot, image));
+            } else {
+                self.thumbnails.push((id, image));
+            }
+        }
+        if patch.replace_levels {
+            for level in self.levels.drain(..) {
+                dropped.extend(level.images.into_iter().flatten());
+            }
+            for cache in patch.levels {
+                self.install_level(level_images(cache));
+            }
+            return dropped;
+        }
+        let shifts: Vec<u32> = patch.levels.iter().map(TileCache::shift).collect();
+        for cache in patch.levels {
+            if let Some(level) = self
+                .levels
+                .iter_mut()
+                .find(|level| level.cache.shift() == cache.shift())
+            {
+                dropped.extend(level.sync(cache));
+            } else {
+                self.install_level(level_images(cache));
+            }
+        }
+        // A level built after this patch was prepared is not in the patch. Drop it when the
+        // edit changed pixels; a rename leaves that level alone.
+        if patch.tiles_changed {
+            self.levels.retain(|level| {
+                if shifts.contains(&level.cache.shift()) {
+                    true
+                } else {
+                    dropped.extend(level.images.iter().flatten().cloned());
+                    false
+                }
+            });
+        }
+        dropped
+    }
+
+    pub fn install_cache(&mut self, cache: TileCache) -> Vec<Arc<RenderImage>> {
+        let shift = cache.shift();
+        let mut dropped = Vec::new();
+        if let Some(level) = self
+            .levels
+            .iter_mut()
+            .find(|level| level.cache.shift() == shift)
+        {
+            dropped.extend(level.sync(cache));
+        } else {
+            self.install_level(level_images(cache));
+        }
+        dropped
+    }
+
+    fn install_level(&mut self, level: (TileCache, Vec<Option<Arc<RenderImage>>>)) {
+        self.levels.push(TileLevel {
+            cache: level.0,
+            images: level.1,
+        });
+    }
+
     // Every GPU image this canvas owns, for release when it is replaced or closed.
     pub fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
         std::iter::once(self.preview.image)
             .chain(self.thumbnails.into_iter().map(|(_, image)| image))
+            .chain(
+                self.levels
+                    .into_iter()
+                    .flat_map(|level| level.images.into_iter().flatten()),
+            )
     }
+}
+
+impl TileLevel {
+    fn sync(&mut self, cache: TileCache) -> Vec<Arc<RenderImage>> {
+        let mut dropped = Vec::new();
+        if self.images.len() != cache.spans().count() {
+            dropped.extend(self.images.drain(..).flatten());
+            self.images = cache
+                .spans()
+                .map(|span| cache.slot(span.index).map(render_tile))
+                .collect();
+            self.cache = cache;
+            return dropped;
+        }
+        for span in cache.spans() {
+            let same = match (self.cache.slot(span.index), cache.slot(span.index)) {
+                (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                continue;
+            }
+            if let Some(image) = self.images[span.index].take() {
+                dropped.push(image);
+            }
+            self.images[span.index] = cache.slot(span.index).map(render_tile);
+        }
+        self.cache = cache;
+        dropped
+    }
+}
+
+fn filled_cache(content: &DocumentContent) -> TileCache {
+    let (width, height) = content.size();
+    let mut cache = TileCache::new(width, height, preview::TILE_FINE, preview::FILTER_APRON);
+    cache.rebuild(content, PixelRect::new(0, 0, width, height));
+    cache
+}
+
+pub(crate) fn build_level(content: &DocumentContent, shift: u32) -> TileCache {
+    let (width, height) = content.size();
+    let mut cache = TileCache::leveled(
+        width,
+        height,
+        preview::TILE_FINE,
+        preview::FILTER_APRON,
+        shift,
+    );
+    cache.rebuild(content, PixelRect::new(0, 0, width, height));
+    cache
+}
+
+fn render_tile(image: &Arc<RgbaImage>) -> Arc<RenderImage> {
+    let mut pixels = (**image).clone();
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(smallvec![Frame::new(pixels)]))
+}
+
+fn level_images(cache: TileCache) -> (TileCache, Vec<Option<Arc<RenderImage>>>) {
+    let images = cache
+        .spans()
+        .map(|span| cache.slot(span.index).map(render_tile))
+        .collect();
+    (cache, images)
+}
+
+fn thumbnails(content: &DocumentContent) -> Vec<(LayerId, Arc<RenderImage>)> {
+    content
+        .layers()
+        .iter()
+        .map(|layer| (layer.id, render_thumbnail(&layer.pixels)))
+        .collect()
+}
+
+fn thumbnails_touching(
+    content: &DocumentContent,
+    dirty: PixelRect,
+) -> Vec<(LayerId, Arc<RenderImage>)> {
+    content
+        .layers()
+        .iter()
+        .filter(|layer| {
+            let rect = PixelRect::new(
+                i64::from(layer.offset.0),
+                i64::from(layer.offset.1),
+                layer.pixels.width(),
+                layer.pixels.height(),
+            );
+            rect.overlaps(dirty)
+        })
+        .map(|layer| (layer.id, render_thumbnail(&layer.pixels)))
+        .collect()
+}
+
+fn patch_pixels(pixels: &RgbaImage, content: &DocumentContent, dirty: PixelRect) -> Arc<RgbaImage> {
+    let clipped = clip_rect(dirty, pixels.width(), pixels.height());
+    let Some(clipped) = clipped else {
+        return Arc::new(pixels.clone());
+    };
+    let region = content.composite_rect(clipped.x, clipped.y, clipped.width, clipped.height);
+    let mut image = pixels.clone();
+    blit(&mut image, &region, clipped.x as u32, clipped.y as u32);
+    Arc::new(image)
+}
+
+fn clip_rect(rect: PixelRect, width: u32, height: u32) -> Option<PixelRect> {
+    let right = rect.right().clamp(0, i64::from(width));
+    let bottom = rect.bottom().clamp(0, i64::from(height));
+    let x = rect.x.clamp(0, i64::from(width));
+    let y = rect.y.clamp(0, i64::from(height));
+    (x < right && y < bottom).then_some(PixelRect::new(
+        x,
+        y,
+        (right - x) as u32,
+        (bottom - y) as u32,
+    ))
+}
+
+fn rect_has_transparency(pixels: &RgbaImage, rect: PixelRect) -> bool {
+    let Some(rect) = clip_rect(rect, pixels.width(), pixels.height()) else {
+        return false;
+    };
+    for y in rect.y as u32..(rect.y as u32 + rect.height) {
+        for x in rect.x as u32..(rect.x as u32 + rect.width) {
+            if pixels.get_pixel(x, y).0[3] < 255 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn blit(dest: &mut RgbaImage, src: &RgbaImage, x: u32, y: u32) {
+    imageops::replace(dest, src, i64::from(x), i64::from(y));
 }
 
 pub struct Preview {
@@ -370,7 +705,7 @@ mod tests {
 
         assert!(content.crop(CropRect::between((4999, 2), (4997, 0))));
         let layer = content.top_layer_id();
-        assert!(content.fill(layer, 0, 1, ink));
+        assert!(content.fill(layer, 0, 1, ink).is_some());
         let filled = content.composite();
         assert_eq!(filled.dimensions(), (3, 3));
         for y in 0..3 {
@@ -378,7 +713,83 @@ mod tests {
             assert_eq!(filled.get_pixel(1, y).0, wall.0);
             assert_eq!(filled.get_pixel(2, y).0, background.0);
         }
-        assert!(!content.fill(layer, 0, 0, ink));
+        assert!(content.fill(layer, 0, 0, ink).is_none());
+    }
+
+    #[test]
+    fn region_edit_replaces_only_the_dirty_tiles() {
+        let content = DocumentContent::single_layer(
+            "Image".into(),
+            RgbaImage::from_pixel(600, 300, Rgba([10, 20, 30, 255])),
+        );
+        let mut canvas = RenderedCanvas::new(&content);
+        let before = tile_images(&canvas);
+        assert_eq!(before.len(), 6);
+        let preview = Arc::clone(&canvas.preview.image);
+
+        let dropped = apply_region(&mut canvas, &content, PixelRect::new(300, 20, 64, 64));
+        let changed = changed_tiles(&before, &tile_images(&canvas));
+        assert_eq!(changed, vec![1]);
+        assert!(dropped.iter().any(|image| Arc::ptr_eq(image, &before[1])));
+        assert!(Arc::ptr_eq(&canvas.preview.image, &preview));
+
+        let before = tile_images(&canvas);
+        let dropped = apply_region(&mut canvas, &content, PixelRect::new(240, 20, 32, 32));
+        assert_eq!(changed_tiles(&before, &tile_images(&canvas)), vec![0, 1]);
+        assert!(dropped.iter().any(|image| Arc::ptr_eq(image, &before[0])));
+        assert!(dropped.iter().any(|image| Arc::ptr_eq(image, &before[1])));
+
+        let before = tile_images(&canvas);
+        let pixels = Arc::clone(&canvas.pixels);
+        let patch = RenderedCanvas::prepare_patch(
+            &pixels,
+            canvas.preview.has_transparency,
+            canvas.level_caches(),
+            &content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(canvas.apply(patch).is_empty());
+        assert_eq!(
+            changed_tiles(&before, &tile_images(&canvas)),
+            Vec::<usize>::new()
+        );
+        assert!(Arc::ptr_eq(&canvas.pixels, &pixels));
+    }
+
+    fn tile_images(canvas: &RenderedCanvas) -> Vec<Arc<RenderImage>> {
+        canvas.tile_sets()[0]
+            .1
+            .iter()
+            .map(|tile| Arc::clone(&tile.image))
+            .collect()
+    }
+
+    fn changed_tiles(before: &[Arc<RenderImage>], after: &[Arc<RenderImage>]) -> Vec<usize> {
+        before
+            .iter()
+            .zip(after)
+            .enumerate()
+            .filter(|(_, (left, right))| !Arc::ptr_eq(left, right))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn apply_region(
+        canvas: &mut RenderedCanvas,
+        content: &DocumentContent,
+        dirty: PixelRect,
+    ) -> Vec<Arc<RenderImage>> {
+        let pixels = Arc::clone(&canvas.pixels);
+        let patch = RenderedCanvas::prepare_patch(
+            &pixels,
+            canvas.preview.has_transparency,
+            canvas.level_caches(),
+            content,
+            Dirty::Region(dirty),
+        )
+        .unwrap();
+        canvas.apply(patch)
     }
 
     #[test]
@@ -525,7 +936,12 @@ mod tests {
         let mut document = Document::open(&path).unwrap();
         assert!(document.can_save_as_raster());
         let layer = document.content.top_layer_id();
-        assert!(document.content.fill(layer, 0, 0, solid_color(0x123456)));
+        assert!(
+            document
+                .content
+                .fill(layer, 0, 0, solid_color(0x123456))
+                .is_some()
+        );
         assert!(document.content.crop(CropRect::between((0, 0), (0, 1))));
         assert!(document.can_save_as_raster());
 

@@ -4,6 +4,7 @@ use anyhow::{Result, ensure};
 use image::{Rgba, RgbaImage, imageops};
 
 use super::{MAX_IMAGE_BYTES, composite};
+use crate::preview::{Dirty, PixelRect};
 
 pub const IMPORTED_LAYER_NAME: &str = "Image";
 pub const MAX_LAYERS: usize = 128;
@@ -95,6 +96,18 @@ impl DocumentContent {
         &self.layers
     }
 
+    pub fn layer_dirty(&self, id: LayerId) -> Dirty {
+        let Some(layer) = self.layer(id) else {
+            return Dirty::Canvas;
+        };
+        Dirty::Region(PixelRect::new(
+            i64::from(layer.offset.0),
+            i64::from(layer.offset.1),
+            layer.pixels.width(),
+            layer.pixels.height(),
+        ))
+    }
+
     pub fn layer(&self, id: LayerId) -> Option<&RasterLayer> {
         self.layers.iter().find(|layer| layer.id == id)
     }
@@ -142,8 +155,6 @@ impl DocumentContent {
     }
 
     // Composites a canvas-space rectangle. Coordinates may extend outside the canvas.
-    // The tiled preview prototype is the only caller until P07 paints these tiles.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn composite_rect(&self, x: i64, y: i64, width: u32, height: u32) -> RgbaImage {
         let bounds = PixelBounds {
             left: x,
@@ -329,25 +340,30 @@ impl DocumentContent {
         Some(merged.id)
     }
 
-    pub fn fill(&mut self, id: LayerId, x: u32, y: u32, color: Rgba<u8>) -> bool {
+    // The rectangle covers every pixel the fill changed, in canvas coordinates.
+    pub fn fill(&mut self, id: LayerId, x: u32, y: u32, color: Rgba<u8>) -> Option<PixelRect> {
         if x >= self.width || y >= self.height {
-            return false;
+            return None;
         }
-        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
-            return false;
-        };
-        let x = i64::from(x) - i64::from(layer.offset.0);
-        let y = i64::from(y) - i64::from(layer.offset.1);
-        if !(0..i64::from(layer.pixels.width())).contains(&x)
-            || !(0..i64::from(layer.pixels.height())).contains(&y)
+        let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
+        let local_x = i64::from(x) - i64::from(layer.offset.0);
+        let local_y = i64::from(y) - i64::from(layer.offset.1);
+        if !(0..i64::from(layer.pixels.width())).contains(&local_x)
+            || !(0..i64::from(layer.pixels.height())).contains(&local_y)
         {
-            return false;
+            return None;
         }
-        let Some(pixels) = bucket_fill(&layer.pixels, x as u32, y as u32, color) else {
-            return false;
-        };
+        let (pixels, left, top, right, bottom) =
+            bucket_fill(&layer.pixels, local_x as u32, local_y as u32, color)?;
+        let origin_x = i64::from(layer.offset.0);
+        let origin_y = i64::from(layer.offset.1);
         layer.pixels = Arc::new(pixels);
-        true
+        Some(PixelRect::new(
+            origin_x + i64::from(left),
+            origin_y + i64::from(top),
+            right - left + 1,
+            bottom - top + 1,
+        ))
     }
 }
 
@@ -430,7 +446,12 @@ fn copy_name(name: &str) -> String {
     copy
 }
 
-fn bucket_fill(source: &RgbaImage, x: u32, y: u32, color: Rgba<u8>) -> Option<RgbaImage> {
+fn bucket_fill(
+    source: &RgbaImage,
+    x: u32,
+    y: u32,
+    color: Rgba<u8>,
+) -> Option<(RgbaImage, u32, u32, u32, u32)> {
     let target = *source.get_pixel(x, y);
     if target == color {
         return None;
@@ -440,7 +461,12 @@ fn bucket_fill(source: &RgbaImage, x: u32, y: u32, color: Rgba<u8>) -> Option<Rg
     // Paint runs as they are queued, so a pixel is never queued twice.
     let height = image.height();
     let mut pending = vec![paint_run(&mut image, x, y, target, color)];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
     while let Some((left, right, y)) = pending.pop() {
+        min_x = min_x.min(left);
+        max_x = max_x.max(right);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
         for row in [y.checked_sub(1), (y + 1 < height).then_some(y + 1)]
             .into_iter()
             .flatten()
@@ -457,7 +483,7 @@ fn bucket_fill(source: &RgbaImage, x: u32, y: u32, color: Rgba<u8>) -> Option<Rg
             }
         }
     }
-    Some(image)
+    Some((image, min_x, min_y, max_x, max_y))
 }
 
 fn paint_run(
@@ -685,8 +711,11 @@ mod tests {
         let before = content.clone();
         let ink = Rgba([20, 30, 40, 255]);
 
-        assert!(!content.fill(LayerId(1), 0, 0, ink));
-        assert!(content.fill(LayerId(1), 1, 0, ink));
+        assert!(content.fill(LayerId(1), 0, 0, ink).is_none());
+        assert_eq!(
+            content.fill(LayerId(1), 1, 0, ink),
+            Some(PixelRect::new(1, -1, 2, 2))
+        );
         assert_eq!(*content.composite().get_pixel(1, 0), ink);
         assert_eq!(before.composite().get_pixel(1, 0).0, [0; 4]);
         assert!(Arc::ptr_eq(
@@ -703,7 +732,8 @@ mod tests {
         let mut image = RgbaImage::from_pixel(2, 2, wall);
         image.put_pixel(0, 0, blank);
         image.put_pixel(1, 1, blank);
-        let filled = bucket_fill(&image, 0, 0, ink).unwrap();
+        let (filled, left, top, right, bottom) = bucket_fill(&image, 0, 0, ink).unwrap();
+        assert_eq!((left, top, right, bottom), (0, 0, 0, 0));
         assert_eq!(filled.into_raw(), [ink.0, wall.0, wall.0, blank.0].concat());
     }
 }
