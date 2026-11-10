@@ -33,9 +33,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   `.imageedit` when converting an opened image to a project.
 - Projects preserve the canvas dimensions and the layer stack: each layer's
   order, name, position, visibility, opacity, and lossless pixels with
-  transparency. ImageEdit writes version 2 projects and still opens version 1
-  projects. PNG and lossless WebP preserve transparency. JPEG saves against
-  white. The working pixel format is 8-bit RGBA.
+  transparency. PNG and lossless WebP preserve transparency. JPEG saves
+  against white. The working pixel format is 8-bit RGBA.
 - Drag a rectangle with **Crop** and press Return to apply it or Escape to
   cancel. **Bucket Fill** uses the foreground color on connected pixels with
   matching RGBA values. **Color Picker** samples the image at full resolution.

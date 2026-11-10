@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use image::{ExtendedColorType, ImageDecoder, ImageEncoder, codecs::png};
 use serde::{Deserialize, Serialize};
 
@@ -19,23 +19,6 @@ const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
 const MAX_LAYERS: usize = 128;
 const MAX_LAYER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
-
-#[derive(Deserialize)]
-struct Header {
-    version: u32,
-}
-
-#[derive(Deserialize)]
-struct ManifestV1 {
-    width: u32,
-    height: u32,
-    layers: Vec<LayerV1>,
-}
-
-#[derive(Deserialize)]
-struct LayerV1 {
-    name: String,
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -83,9 +66,8 @@ impl From<WireBlendMode> for BlendMode {
     }
 }
 
-// Every version starts with the magic and a little-endian u32 JSON manifest length.
-// Version 1 follows the manifest with one unframed PNG. Version 2 follows it with
-// one little-endian u64 length-prefixed PNG per layer, in manifest order.
+// A project starts with the magic and a little-endian u32 JSON manifest length,
+// followed by one little-endian u64 length-prefixed PNG per layer in manifest order.
 pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let mut magic = [0; MAGIC.len()];
     reader
@@ -105,33 +87,13 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     reader
         .read_exact(&mut manifest)
         .context("Incomplete project manifest")?;
-    let Header { version } =
-        serde_json::from_slice(&manifest).context("Invalid project manifest")?;
-    match version {
-        1 => read_v1(&manifest, reader),
-        VERSION => read_v2(&manifest, reader),
-        version => bail!("Unsupported ImageEdit project version {version}"),
-    }
-}
-
-fn read_v1(manifest: &[u8], reader: impl BufRead + Seek) -> Result<DocumentContent> {
-    let manifest: ManifestV1 =
-        serde_json::from_slice(manifest).context("Invalid project manifest")?;
-    let [layer] = manifest.layers.as_slice() else {
-        bail!("Version 1 projects have exactly one layer");
-    };
-    let decoder = png::PngDecoder::new(reader).context("Invalid project layer")?;
-    ensure!(
-        decoder.dimensions() == (manifest.width, manifest.height),
-        "Project canvas and layer dimensions do not match"
-    );
-    let pixels = decode_image(decoder)?.into_rgba8();
-    Ok(DocumentContent::single_layer(layer.name.clone(), pixels))
-}
-
-fn read_v2(manifest: &[u8], mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let manifest: Manifest =
-        serde_json::from_slice(manifest).context("Invalid project manifest")?;
+        serde_json::from_slice(&manifest).context("Invalid project manifest")?;
+    ensure!(
+        manifest.version == VERSION,
+        "Unsupported ImageEdit project version {}",
+        manifest.version
+    );
     check_limits(&manifest)?;
 
     let start = reader.stream_position()?;
@@ -276,10 +238,6 @@ mod tests {
 
     use super::*;
 
-    const V1_GOLDEN: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/projects/v1-single-layer.imageedit"
-    ));
     const V2_GOLDEN: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/projects/v2-two-layers.imageedit"
@@ -342,7 +300,7 @@ mod tests {
         serde_json::from_slice(&bytes[12..12 + length]).unwrap()
     }
 
-    // Replaces the manifest of a valid v2 file and keeps its payloads.
+    // Replaces the manifest of a valid project and keeps its payloads.
     fn with_manifest(bytes: &[u8], manifest: &serde_json::Value) -> Vec<u8> {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let manifest = serde_json::to_vec(manifest).unwrap();
@@ -369,35 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_golden_file_opens_as_one_default_layer() {
-        let content = read_bytes(V1_GOLDEN).unwrap();
-        assert_eq!(content.size(), (3, 2));
-        let [layer] = content.layers() else {
-            panic!("expected one layer");
-        };
-        assert_eq!(layer.id, LayerId(0));
-        assert_eq!(layer.name, "Background");
-        assert_eq!(layer.offset, (0, 0));
-        assert!(layer.visible);
-        assert_eq!(layer.opacity, 255);
-        assert_eq!(layer.blend_mode, BlendMode::Normal);
-        let expected = [
-            [0x14, 0xb8, 0xa6, 255],
-            [200, 40, 10, 128],
-            [9, 99, 199, 0],
-            [255, 255, 255, 255],
-            [0, 0, 0, 255],
-            [12, 34, 56, 1],
-        ];
-        assert_eq!(layer.pixels.as_raw().as_slice(), expected.concat());
-
-        let rewritten = write_bytes(&content).unwrap();
-        assert_eq!(manifest_json(&rewritten)["version"], 2);
-        assert_same(&read_bytes(&rewritten).unwrap(), &content);
-    }
-
-    #[test]
-    fn v2_round_trips_layer_order_ids_offsets_alpha_and_properties() {
+    fn round_trips_layer_order_ids_offsets_alpha_and_properties() {
         let content = two_layers();
         let bytes = write_bytes(&content).unwrap();
         assert_same(&read_bytes(&bytes).unwrap(), &content);
