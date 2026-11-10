@@ -733,7 +733,7 @@ impl Workspace {
         }
     }
 
-    fn canvas_point(&self, position: Point<Pixels>, scale: f32) -> Option<(f64, f64)> {
+    pub(super) fn canvas_point(&self, position: Point<Pixels>, scale: f32) -> Option<(f64, f64)> {
         let tab = self.active_tab()?;
         let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
         let fraction = geometry.fraction(position);

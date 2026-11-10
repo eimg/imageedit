@@ -539,6 +539,43 @@ mod tests {
     }
 
     #[test]
+    fn undoing_a_stroke_restores_every_painted_pixel() {
+        use crate::paint::{Brush, Stroke, StrokeKind};
+        use crate::preview::Dirty;
+
+        let mut session = Session::new(true, 16);
+        let id = session.current.active_layer;
+        let selection = Selection::Rect(crate::preview::PixelRect::new(0, 0, 16, 1));
+        session.current.selection = selection.clone();
+        let image = session.current.content.layer(id).unwrap().pixels.clone();
+        let mut stroke = Stroke::new(
+            StrokeKind::Paint,
+            Rgba([0, 0, 0, 255]),
+            Brush {
+                diameter: 1,
+                spacing: 100,
+                hardness: 100,
+                opacity: 100,
+            },
+        );
+        stroke.sample(0.5, 0.5, &image, |_, _| 255);
+        stroke.sample(8.5, 0.5, &image, |_, _| 255);
+        session.edit(
+            |content| content.apply_stroke(id, &stroke) != Dirty::None,
+            &LIMITS,
+        );
+        let painted = session.current.content.layer(id).unwrap();
+        assert_eq!(painted.pixels.get_pixel(0, 0).0[3], 255);
+        assert_eq!(painted.pixels.get_pixel(8, 0).0[3], 255);
+        assert_eq!(session.current.selection, selection);
+        assert!(session.undo());
+        let restored = session.current.content.layer(id).unwrap();
+        assert_eq!(restored.pixels.get_pixel(0, 0).0[3], 0);
+        assert_eq!(restored.pixels.get_pixel(8, 0).0[3], 0);
+        assert_eq!(session.current.selection, selection);
+    }
+
+    #[test]
     fn placing_a_rotated_layer_keeps_the_selection_and_undoes() {
         use crate::preview::Dirty;
         use crate::transform::{Resample, Warp, warp_layer};

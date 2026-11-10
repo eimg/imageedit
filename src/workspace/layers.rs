@@ -247,6 +247,7 @@ impl Workspace {
             tab.notice = None;
             self.opacity_drag = None;
             self.cancel_warp(window, cx);
+            self.cancel_stroke(window, cx);
             self.begin_warp(window, cx);
             cx.notify();
         }

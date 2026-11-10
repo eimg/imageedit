@@ -2,7 +2,17 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P13
+## Latest handoff · P14
+
+P14 adds Pencil, Brush, and Eraser on branch `p14-paint`, which starts from P13.
+
+- Pencil (`N`), Brush (`P`), and Eraser (`Shift+E`) share size, spacing, hardness, and opacity. A stroke stamps along the pointer path at that spacing, so a fast segment and the same path sampled slowly land on the same pixels. The eraser reduces alpha. Shift-click draws from the last committed endpoint on the same layer. Release records one edit, and Escape discards the overlay.
+- The stroke buffer covers only the pixels the dabs touch. Pointer moves do not clone the layer or rebuild preview tiles. The committed edit rebuilds the tiles that overlap that region, and the selection coverage limits the write. On an 8192 canvas the release benchmark spent 86 µs filling that buffer and 195 µs rebuilding the one overlapping tile.
+- Formatting, Clippy and locked tests passed. P13 ended with 97 tests and P14 ends with 103, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P15**, gradient and expanded bucket fill.
+
+## Feature handoff · P13
 
 P13 adds interactive Rotate, Flip, and Perspective on branch `p13-transform`, which starts from the P10–P12 follow-up.
 

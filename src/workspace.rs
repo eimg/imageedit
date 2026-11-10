@@ -6,6 +6,7 @@ mod dialogs;
 mod files;
 mod history;
 mod layers;
+mod paint_ui;
 mod selection;
 mod transform_ui;
 mod view;
@@ -113,6 +114,9 @@ pub struct Workspace {
     warp_applying: bool,
     warp_error: Option<&'static str>,
     warp_resample: crate::transform::Resample,
+    brush: crate::paint::Brush,
+    stroke: Option<paint_ui::StrokeSession>,
+    stroke_anchor: Option<(LayerId, f64, f64)>,
     copy_token: u64,
     paste_token: u64,
     dialog_open: bool,
@@ -203,6 +207,9 @@ impl Workspace {
             warp_applying: false,
             warp_error: None,
             warp_resample: crate::transform::Resample::Bilinear,
+            brush: crate::paint::Brush::default(),
+            stroke: None,
+            stroke_anchor: None,
             copy_token: 0,
             paste_token: 0,
             dialog_open: false,
@@ -286,6 +293,7 @@ impl Workspace {
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
+            self.cancel_stroke(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -315,6 +323,7 @@ impl Workspace {
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
+            self.cancel_stroke(window, cx);
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -367,6 +376,7 @@ impl Workspace {
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
+            self.cancel_stroke(window, cx);
             self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }

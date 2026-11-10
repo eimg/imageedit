@@ -109,6 +109,9 @@ impl Workspace {
         {
             self.end_warp_drag(window, cx);
         }
+        if event.button == MouseButton::Left && self.stroke.is_some() {
+            self.finish_stroke(window, cx);
+        }
     }
 
     pub(super) fn pan_preview(&mut self, delta: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {

@@ -13,12 +13,12 @@ use gpui::{
 
 use crate::commands::{
     AlignLayer, ApplyCrop, ApplyTransform, BackgroundColor, CancelCrop, CancelFreeSelect,
-    CancelMove, CancelTransform, CloseFreeSelect, CloseTab, CropLayerToContent, ExportJpeg,
-    ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection, InvertSelection,
-    LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo,
-    ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection,
-    SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
-    ZoomWindow,
+    CancelMove, CancelStroke, CancelTransform, CloseFreeSelect, CloseTab, CropLayerToContent,
+    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
+    InvertSelection, LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
+    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
+    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn,
+    ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -74,6 +74,9 @@ impl Render for Workspace {
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
                         this.clear_crop();
+                    }
+                    if changed {
+                        this.cancel_stroke(window, cx);
                     }
                     if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
                         this.cancel_warp(window, cx);
@@ -144,6 +147,14 @@ impl Render for Workspace {
                             |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
                         ))
                     })
+                    .when(
+                        matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser),
+                        |root| {
+                            root.key_context("Paint").on_action(cx.listener(
+                                |this, _: &CancelStroke, window, cx| this.cancel_stroke(window, cx),
+                            ))
+                        },
+                    )
                     .when(
                         matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective),
                         |root| {
@@ -515,6 +526,12 @@ impl Workspace {
                                         window,
                                         cx,
                                     );
+                                    this.extend_stroke(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
                                 }
                             }
                         }),
@@ -560,6 +577,24 @@ impl Workspace {
                                 MouseButton::Left,
                                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                     this.begin_warp_drag(event.position, window.scale_factor(), cx);
+                                }),
+                            )
+                        },
+                    )
+                    .when(
+                        matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser)
+                            && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_stroke(
+                                        event.position,
+                                        event.modifiers.shift,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
                                 }),
                             )
                         },
@@ -660,6 +695,7 @@ impl Workspace {
                             show_handles: self.tool == Tool::Select,
                             move_layer: self.move_paint(),
                             warp: self.warp_frame(),
+                            stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
                             polygon: self.free_mode == super::selection::FreeMode::Polygon,
                         },
@@ -1000,6 +1036,36 @@ impl Workspace {
                                     )
                             })
                             .when(
+                                matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser),
+                                |panel| {
+                                    panel
+                                        .child(brush_row(
+                                            "Size",
+                                            self.brush_value(super::paint_ui::BrushField::Size),
+                                            super::paint_ui::BrushField::Size,
+                                            cx,
+                                        ))
+                                        .child(brush_row(
+                                            "Spacing",
+                                            self.brush_value(super::paint_ui::BrushField::Spacing),
+                                            super::paint_ui::BrushField::Spacing,
+                                            cx,
+                                        ))
+                                        .child(brush_row(
+                                            "Hardness",
+                                            self.brush_value(super::paint_ui::BrushField::Hardness),
+                                            super::paint_ui::BrushField::Hardness,
+                                            cx,
+                                        ))
+                                        .child(brush_row(
+                                            "Opacity",
+                                            self.brush_value(super::paint_ui::BrushField::Opacity),
+                                            super::paint_ui::BrushField::Opacity,
+                                            cx,
+                                        ))
+                                },
+                            )
+                            .when(
                                 !matches!(
                                     self.tool,
                                     Tool::Pan
@@ -1008,7 +1074,15 @@ impl Workspace {
                                         | Tool::Crop
                                         | Tool::BucketFill
                                         | Tool::Select
+                                        | Tool::FreeSelect
+                                        | Tool::MagicWand
                                         | Tool::Move
+                                        | Tool::Rotate
+                                        | Tool::Flip
+                                        | Tool::Perspective
+                                        | Tool::Pencil
+                                        | Tool::Brush
+                                        | Tool::Eraser
                                 ),
                                 |panel| {
                                     panel.child(
@@ -1371,6 +1445,7 @@ struct CanvasDecorations {
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
     warp: Option<super::transform_ui::WarpFrame>,
+    stroke: Option<super::paint_ui::StrokePaint>,
     free_path: Vec<Point<f32>>,
     polygon: bool,
 }
@@ -1388,6 +1463,7 @@ fn image_preview(
         show_handles,
         move_layer,
         warp,
+        stroke,
         free_path,
         polygon,
     } = decorations;
@@ -1419,29 +1495,53 @@ fn image_preview(
             if visible.is_empty() {
                 return;
             }
-            if has_transparency || move_layer.is_some() {
+            if has_transparency || move_layer.is_some() || stroke.is_some() {
                 paint_checkerboard(window, image_bounds, visible);
             }
             if let Some(move_layer) = move_layer.clone() {
                 paint_moved_layer(window, &geometry, width, height, &move_layer);
             } else {
-                let pixel_width = image_bounds.size.width / width as f32;
-                let pixel_height = image_bounds.size.height / height as f32;
-                if pixel_width.min(pixel_height) >= px(8.) {
-                    paint_source_pixels(window, &pixels, image_bounds, visible);
-                } else if !paint_tiles(
-                    window,
-                    &geometry,
-                    width,
-                    height,
-                    window.scale_factor(),
-                    visible,
-                    &tile_sets,
-                ) && let Err(error) =
-                    window.paint_image(image_bounds, Corners::default(), image.clone(), 0, false)
-                {
-                    eprintln!("Could not paint image preview: {error}");
-                    return;
+                let hole = stroke
+                    .as_ref()
+                    .and_then(|stroke| stroke_bounds(&geometry, width, height, stroke.rect));
+                let paint_base = |window: &mut Window, area: Bounds<Pixels>| {
+                    let pixel_width = image_bounds.size.width / width as f32;
+                    let pixel_height = image_bounds.size.height / height as f32;
+                    if pixel_width.min(pixel_height) >= px(8.) {
+                        paint_source_pixels(window, &pixels, image_bounds, area);
+                    } else if !paint_tiles(
+                        window,
+                        &geometry,
+                        width,
+                        height,
+                        window.scale_factor(),
+                        area,
+                        &tile_sets,
+                    ) && let Err(error) = window.paint_image(
+                        image_bounds,
+                        Corners::default(),
+                        image.clone(),
+                        0,
+                        false,
+                    ) {
+                        eprintln!("Could not paint image preview: {error}");
+                    }
+                };
+                if let Some(hole) = hole {
+                    for region in outside_rects(visible, hole) {
+                        let region = region.intersect(&visible);
+                        if region.is_empty() {
+                            continue;
+                        }
+                        window.with_content_mask(Some(ContentMask { bounds: region }), |window| {
+                            paint_base(window, region);
+                        });
+                    }
+                    if let Some(stroke) = stroke.clone() {
+                        paint_stroke_patch(window, &geometry, width, height, visible, &stroke);
+                    }
+                } else {
+                    paint_base(window, visible);
                 }
             }
 
@@ -1801,6 +1901,129 @@ fn paint_contours(
     if painted {
         window.request_animation_frame();
     }
+}
+
+fn brush_row(
+    label: &'static str,
+    value: u32,
+    field: super::paint_ui::BrushField,
+    cx: &Context<super::Workspace>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(label)
+        .child(value.to_string())
+        .child(brush_step(label, false, field, cx))
+        .child(brush_step(label, true, field, cx))
+}
+
+fn brush_step(
+    label: &'static str,
+    up: bool,
+    field: super::paint_ui::BrushField,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    let name = if up { "up" } else { "down" };
+    div()
+        .id(gpui::SharedString::from(format!("{label} {name}")))
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(CHROME))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)))
+        .child(if up { "+" } else { "−" })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.nudge_brush(field, if up { 1 } else { -1 }, cx);
+        }))
+}
+
+fn stroke_bounds(
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    rect: preview::PixelRect,
+) -> Option<Bounds<Pixels>> {
+    if width == 0 || height == 0 || rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let start = geometry.project(point(
+        rect.x as f32 / width as f32,
+        rect.y as f32 / height as f32,
+    ));
+    let end = geometry.project(point(
+        (rect.x + i64::from(rect.width)) as f32 / width as f32,
+        (rect.y + i64::from(rect.height)) as f32 / height as f32,
+    ));
+    Some(Bounds::from_corners(start, end))
+}
+
+fn outside_rects(bounds: Bounds<Pixels>, hole: Bounds<Pixels>) -> [Bounds<Pixels>; 4] {
+    let span = |start: Pixels, end: Pixels| (end - start).max(px(0.));
+    [
+        Bounds::new(
+            point(bounds.left(), bounds.top()),
+            size(bounds.size.width, span(bounds.top(), hole.top())),
+        ),
+        Bounds::new(
+            point(bounds.left(), hole.bottom()),
+            size(bounds.size.width, span(hole.bottom(), bounds.bottom())),
+        ),
+        Bounds::new(
+            point(bounds.left(), hole.top()),
+            size(
+                span(bounds.left(), hole.left()),
+                span(hole.top(), hole.bottom()),
+            ),
+        ),
+        Bounds::new(
+            point(hole.right(), hole.top()),
+            size(
+                span(hole.right(), bounds.right()),
+                span(hole.top(), hole.bottom()),
+            ),
+        ),
+    ]
+}
+
+fn paint_stroke_patch(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    stroke: &super::paint_ui::StrokePaint,
+) {
+    let Some(hole) = stroke_bounds(geometry, width, height, stroke.rect) else {
+        return;
+    };
+    let mask = hole.intersect(&visible);
+    if mask.is_empty() {
+        return;
+    }
+    window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+        if let Some(below) = &stroke.below
+            && let Err(error) =
+                window.paint_image(geometry.bounds, Corners::default(), below.clone(), 0, false)
+        {
+            eprintln!("Could not paint layers below the stroke: {error}");
+        }
+        if let Err(error) =
+            window.paint_image(hole, Corners::default(), stroke.patch.clone(), 0, false)
+        {
+            eprintln!("Could not paint the stroke: {error}");
+        }
+        if let Some(above) = &stroke.above
+            && let Err(error) =
+                window.paint_image(geometry.bounds, Corners::default(), above.clone(), 0, false)
+        {
+            eprintln!("Could not paint layers above the stroke: {error}");
+        }
+    });
 }
 
 fn paint_moved_layer(

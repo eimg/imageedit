@@ -87,6 +87,11 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   or drag the perspective corners. Return applies the preview and Escape
   cancels it. The selection stays in place. A flat, crossed, or oversized
   shape is refused.
+  **Pencil** (`N`), **Brush** (`P`), and **Eraser** (`Shift+E`) draw on the
+  active layer. Size, spacing, hardness, and opacity are in the tool options.
+  Release commits the whole stroke and Escape discards it. Shift-click draws a
+  straight line from the last stroke on that layer. The eraser lowers alpha,
+  and a selection limits where the stroke lands.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened
@@ -125,6 +130,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
 | Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
+| Pencil / Brush / Eraser | N / P / Shift+E |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |

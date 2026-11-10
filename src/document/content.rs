@@ -543,6 +543,24 @@ impl DocumentContent {
         ))
     }
 
+    pub fn apply_stroke(&mut self, id: LayerId, stroke: &crate::paint::Stroke) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let Some((pixels, bounds)) = crate::paint::apply_stroke(&self.layers[index].pixels, stroke)
+        else {
+            return Dirty::None;
+        };
+        let offset = self.layers[index].offset;
+        self.layers[index].pixels = Arc::new(pixels);
+        Dirty::Region(PixelRect::new(
+            i64::from(offset.0) + i64::from(bounds.0),
+            i64::from(offset.1) + i64::from(bounds.1),
+            bounds.2,
+            bounds.3,
+        ))
+    }
+
     // Sets covered pixels to transparent. Pixels that are already clear do not count as a change.
     pub fn clear(&mut self, id: LayerId, selection: &Selection) -> Option<PixelRect> {
         let canvas = (self.width, self.height);

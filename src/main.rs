@@ -9,6 +9,7 @@ mod geometry;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
+mod paint;
 mod preview;
 mod project;
 mod selection;

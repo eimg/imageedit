@@ -20,7 +20,9 @@ Shrink edit the mask. Move repositions the active layer, and the Layer menu can 
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
-commit on Apply, leaving the selection in canvas coordinates. The Image menu
+commit on Apply, leaving the selection in canvas coordinates. Pencil, Brush, and
+Eraser paint the active layer inside the selection; a stroke commits when the
+pointer is released. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
@@ -45,6 +47,9 @@ document is a single plain layer.
   stays disabled until there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
+- `src/paint.rs` stamps pencil, brush, and eraser dabs into a dirty-region
+  buffer. Spacing decides where the stamps fall, and the canvas keeps the
+  existing tiles until the stroke is released.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
