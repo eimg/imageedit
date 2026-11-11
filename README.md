@@ -175,9 +175,12 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   transparent or filled with the foreground or background color. Merge Down
   stays disabled when either layer is hidden.
 
-The toolbox can be resized by dragging its right edge. Each tool shows its full
-name with the shortcut, trimming the name when the sidebar is narrow, and a
-tooltip on hover. Menus keep the full names used below.
+The toolbox can be resized by dragging its right edge or folded to an icon rail
+with the header toggle. An expanded tool shows its full name with the shortcut,
+trimming the name when the sidebar is narrow, and a tooltip on hover. Folded
+tools keep the icon and tooltip. The foreground and background swatches stack
+vertically in the folded rail, with the swap control between them. Menus keep
+the full names used below.
 
 | Action | macOS shortcut |
 | --- | --- |

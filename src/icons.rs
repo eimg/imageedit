@@ -78,6 +78,12 @@ impl AssetSource for Icons {
             "close" => r#"<path d="m6 6 12 12M18 6 6 18"/>"#,
             "layers" => r#"<path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/>"#,
             "swap" => r#"<path d="M3 8h18m-4-4 4 4-4 4m4 4H3m4-4-4 4 4 4"/>"#,
+            "sidebar-close" => {
+                r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m7-4-3-4 3-4"/>"#
+            }
+            "sidebar-open" => {
+                r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m4-4 3-4-3-4"/>"#
+            }
             "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
             "info" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>"#,
             "loading" => r#"<path d="M12 3a9 9 0 1 1-9 9"/>"#,

@@ -3,9 +3,9 @@
 ImageEdit is a Rust and GPUI desktop image editor. Build for macOS first and
 keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
 app menu. Windows uses File → Exit. The product
-takes cues from GIMP, with native menus, a docked and resizable toolbox, a
-Layers panel, and a tabbed canvas. File commands belong in the menu. The
-workspace favors canvas space and has no top toolbar.
+takes cues from GIMP, with native menus, a docked, resizable, and foldable
+toolbox, a Layers panel, and a tabbed canvas. File commands belong in the menu.
+The workspace favors canvas space and has no top toolbar.
 
 For planned work, start with [FEEDBACK.md](FEEDBACK.md) and take the first open
 item only. Leave the rest for another agent. The implementation plan and the
@@ -79,10 +79,11 @@ document is a single plain layer without paths or editable text.
   launch arguments and macOS file URLs to the workspace.
 - `src/commands.rs` defines actions, shortcuts, native menus, and toolbox
   metadata. Toolbox buttons show the full label, trim it when the sidebar is
-  narrow, and add the shortcut and a tooltip; menus keep the full label. Pencil
-  and Brush have no key. Hold Space to pan without leaving
-  the current tool. Reuse those actions for UI entry points. A `Planned` menu action
-  stays disabled until there is a real handler.
+  narrow, and add the shortcut and a tooltip; menus keep the full label. Folded
+  buttons keep the icon and tooltip but drop the label. Pencil and Brush have
+  no key. Hold Space to pan without leaving the current tool. Reuse those
+  actions for UI entry points. A `Planned` menu action stays disabled until
+  there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
 - `src/paint.rs` spaces pencil, brush, and eraser dabs along the pointer path
@@ -159,8 +160,9 @@ Mask transforms avoid per-pixel coordinate lists; morphology uses running sums.
   handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels. `src/workspace/view.rs` lays out the shell, including the resizable
-  toolbox and its full-label buttons, and paints the canvas using the same
-  geometry. `src/workspace/tooltip.rs` renders shared hover tooltips.
+  and foldable toolbox and its full-label or icon-only buttons, and paints the
+  canvas using the same geometry. `src/workspace/tooltip.rs` renders shared
+  hover tooltips.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including

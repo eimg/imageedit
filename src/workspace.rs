@@ -171,6 +171,7 @@ pub struct Workspace {
     jpeg_quality: u8,
     opacity_drag: Option<(LayerId, u8)>,
     toolbox_width: f32,
+    toolbox_folded: bool,
     toolbox_drag: Option<(f32, f32)>,
 }
 
@@ -320,6 +321,7 @@ impl Workspace {
             jpeg_quality: DEFAULT_JPEG_QUALITY,
             opacity_drag: None,
             toolbox_width: view::TOOLBOX_DEFAULT_WIDTH,
+            toolbox_folded: false,
             toolbox_drag: None,
         }
     }

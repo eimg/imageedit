@@ -49,6 +49,8 @@ const HEADER_HEIGHT: f32 = 36.;
 pub(super) const TOOLBOX_DEFAULT_WIDTH: f32 = 220.;
 const TOOLBOX_MIN_WIDTH: f32 = 140.;
 const TOOLBOX_MAX_WIDTH: f32 = 400.;
+const TOOLBOX_FOLDED_WIDTH: f32 = 56.;
+const TOOLBOX_FOLDED_PADDING: f32 = 8.;
 const TOOLBOX_PADDING: f32 = 12.;
 const TOOLBOX_GAP: f32 = 4.;
 const TOOLBOX_SCROLLBAR_ALLOWANCE: f32 = 12.;
@@ -348,6 +350,12 @@ impl Render for Workspace {
 
 impl Workspace {
     fn toolbox(&self, cx: &Context<Self>) -> Div {
+        let folded = self.toolbox_folded;
+        let width = if folded {
+            TOOLBOX_FOLDED_WIDTH
+        } else {
+            self.toolbox_width
+        };
         let available =
             (self.toolbox_width - TOOLBOX_PADDING * 2. - TOOLBOX_SCROLLBAR_ALLOWANCE).max(0.);
         let columns = (((available + TOOLBOX_GAP) / (TOOLBOX_MIN_BUTTON_WIDTH + TOOLBOX_GAP))
@@ -355,43 +363,115 @@ impl Workspace {
             .clamp(1, TOOLBOX_MAX_COLUMNS);
         let button_width =
             ((available - TOOLBOX_GAP * (columns - 1) as f32) / columns as f32).max(0.);
+        let folded_button =
+            (TOOLBOX_FOLDED_WIDTH - TOOLBOX_FOLDED_PADDING * 2. - TOOLBOX_GAP).max(28.);
+        let scroll = if folded {
+            div()
+                .id("toolbox-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .py_2()
+                .px(px(TOOLBOX_FOLDED_PADDING))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .children(TOOL_GROUPS.iter().map(|(_, tools)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .pb_2()
+                        .children(
+                            tools
+                                .iter()
+                                .copied()
+                                .map(|tool| self.tool_button(tool, folded_button, true)),
+                        )
+                }))
+        } else {
+            div()
+                .id("toolbox-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_3()
+                .children(TOOL_GROUPS.iter().map(|(label, tools)| {
+                    div().pb_2().child(section_label(label).pb_1()).child(
+                        div().flex().flex_wrap().gap_1().w_full().children(
+                            tools
+                                .iter()
+                                .copied()
+                                .map(|tool| self.tool_button(tool, button_width, false)),
+                        ),
+                    )
+                }))
+        };
         div()
             .flex_shrink_0()
             .flex()
             .child(
                 div()
                     .id("toolbox")
-                    .w(px(self.toolbox_width))
+                    .w(px(width))
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
                     .border_r_1()
                     .border_color(rgb(BORDER))
-                    .child(panel_header("Toolbox"))
-                    .child(self.color_box())
-                    .child(
-                        div()
-                            .id("toolbox-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .p_3()
-                            .children(TOOL_GROUPS.iter().map(|(label, tools)| {
-                                div().pb_2().child(section_label(label).pb_1()).child(
-                                    div().flex().flex_wrap().gap_1().w_full().children(
-                                        tools
-                                            .iter()
-                                            .copied()
-                                            .map(|tool| self.tool_button(tool, button_width)),
-                                    ),
-                                )
-                            })),
-                    ),
+                    .child(self.toolbox_header(cx))
+                    .child(self.color_box(folded))
+                    .child(scroll),
             )
-            .child(self.toolbox_resize_handle(cx))
+            .when(!folded, |row| row.child(self.toolbox_resize_handle(cx)))
     }
 
-    fn tool_button(&self, tool: Tool, width: f32) -> impl IntoElement {
+    fn toolbox_header(&self, cx: &Context<Self>) -> Div {
+        let folded = self.toolbox_folded;
+        let toggle = div()
+            .id("fold-toolbox")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .size(px(24.))
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(rgb(MUTED))
+            .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+            .tooltip(tooltip(if folded {
+                "Expand toolbox"
+            } else {
+                "Collapse toolbox"
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toolbox_folded = !this.toolbox_folded;
+                this.toolbox_drag = None;
+                cx.notify();
+            }))
+            .child(icon(
+                if folded {
+                    "sidebar-open"
+                } else {
+                    "sidebar-close"
+                },
+                14.,
+            ));
+        if folded {
+            workspace_header().justify_center().child(toggle)
+        } else {
+            workspace_header()
+                .justify_between()
+                .px_4()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Toolbox")
+                .child(toggle)
+        }
+    }
+
+    fn tool_button(&self, tool: Tool, width: f32, folded: bool) -> impl IntoElement {
         let info = tool.info();
         let shortcut = tool.shortcut_label();
         let tooltip = match shortcut {
@@ -401,7 +481,7 @@ impl Workspace {
         div()
             .id(info.icon)
             .w(px(width))
-            .h(px(43.))
+            .h(px(if folded { width } else { 43. }))
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -417,29 +497,32 @@ impl Workspace {
                 |button| button.hover(|button| button.bg(rgb(HOVER))),
             )
             .tooltip(tooltip_with_detail(tooltip, info.description))
-            .child(icon(info.icon, 16.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(3.))
-                    .w_full()
-                    .min_w_0()
-                    .text_size(px(10.))
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(info.label),
-                    )
-                    .when_some(shortcut, |label, shortcut| {
-                        label.child(div().flex_shrink_0().text_color(rgb(MUTED)).child(shortcut))
-                    }),
-            )
+            .child(icon(info.icon, if folded { 18. } else { 16. }))
+            .when(!folded, |button| {
+                button.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(3.))
+                        .w_full()
+                        .min_w_0()
+                        .text_size(px(10.))
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(info.label),
+                        )
+                        .when_some(shortcut, |label, shortcut| {
+                            label
+                                .child(div().flex_shrink_0().text_color(rgb(MUTED)).child(shortcut))
+                        }),
+                )
+            })
             .on_click(move |_, window, cx| window.dispatch_action(Box::new(SelectTool(tool)), cx))
     }
 
@@ -499,21 +582,28 @@ impl Workspace {
         }
     }
 
-    fn color_box(&self) -> Div {
+    fn color_box(&self, folded: bool) -> Div {
         let [foreground, background] = self.colors;
-        let swatch = (self.toolbox_width * 0.18).clamp(26., 40.);
-        let offset = (swatch * 0.5).round();
-        let block = swatch + offset;
-        let flip = (offset - 1.).max(12.);
-        div()
-            .flex_shrink_0()
-            .p_3()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
+        let panel = div().flex_shrink_0().border_b_1().border_color(rgb(BORDER));
+        if folded {
+            let swatch = (TOOLBOX_FOLDED_WIDTH - TOOLBOX_FOLDED_PADDING * 2.).min(36.);
+            let flip = (swatch * 0.5).clamp(14., 18.);
+            panel
+                .p(px(TOOLBOX_FOLDED_PADDING))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(color_square("Foreground", foreground, swatch))
+                .child(swap_button(flip))
+                .child(color_square("Background", background, swatch))
+        } else {
+            let swatch = (self.toolbox_width * 0.18).clamp(26., 40.);
+            let offset = (swatch * 0.5).round();
+            let block = swatch + offset;
+            let flip = (offset - 1.).max(12.);
+            panel.p_3().flex().items_center().justify_center().child(
                 div()
                     .relative()
                     .size(px(block))
@@ -523,25 +613,7 @@ impl Workspace {
                             .right_0()
                             .bottom_0(),
                     )
-                    .child(
-                        div()
-                            .id("swap-colors")
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .size(px(flip))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(MUTED))
-                            .tooltip(tooltip("Swap foreground and background"))
-                            .hover(|button| button.text_color(rgb(ACCENT)))
-                            .cursor_pointer()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(SwapColors), cx);
-                            })
-                            .child(icon("swap", (flip * 0.65).clamp(9., 14.))),
-                    )
+                    .child(swap_button(flip).absolute().right_0().top_0())
                     .child(
                         color_square("Foreground", foreground, swatch)
                             .absolute()
@@ -550,6 +622,7 @@ impl Workspace {
                             .shadow_sm(),
                     ),
             )
+        }
     }
 
     fn tab_strip(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1750,6 +1823,23 @@ fn color_square(label: &'static str, color: u32, size: f32) -> gpui::Stateful<Di
                 window.dispatch_action(Box::new(BackgroundColor), cx);
             }
         })
+}
+
+fn swap_button(size: f32) -> gpui::Stateful<Div> {
+    div()
+        .id("swap-colors")
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(size))
+        .text_color(rgb(MUTED))
+        .tooltip(tooltip("Swap foreground and background"))
+        .hover(|button| button.text_color(rgb(ACCENT)))
+        .cursor_pointer()
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(SwapColors), cx);
+        })
+        .child(icon("swap", (size * 0.65).clamp(9., 14.)))
 }
 
 fn shortcut_hint(shortcut: &'static str) -> Div {

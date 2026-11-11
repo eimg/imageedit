@@ -165,3 +165,19 @@ hover. This supersedes the short toolbox names from item 10.
   labels that trim when narrow, and adds a tooltip with the shortcut and
   description. This restores the full labels that item 10 shortened.
   Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+
+## 13. Foldable toolbox rail
+
+Add a header toggle that folds the toolbox into a narrow icon rail. Folded
+buttons keep their icon and tooltip but drop the text label. In the folded
+rail, stack the foreground and background swatches vertically with the swap
+control between them. Keep the expanded layout and remembered width when the
+toolbox opens again.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. The toolbox folds to a
+  56 px icon rail from the header toggle and restores its previous width when
+  expanded. Folded tools show only the icon and keep the full tooltip. The
+  folded color controls stack foreground above the swap control above
+  background. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.
