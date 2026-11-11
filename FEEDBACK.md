@@ -35,10 +35,10 @@ secondary to Choose Files, and have it open the same dialog.
 ## 2. Circle and oval selection, with a radius
 
 - Status: `done`
-- 2026-11-11: Added Rect/Oval/Circle choices to the Select tool options. Circle
-  has a radius control for click placement, and dragging a circle updates the
-  radius. Ellipse selections keep their shape through handles, moves, resizes,
-  invert/combine, crop, fill/clear, and image transforms. Formatting, Clippy,
+- 2026-11-11: Added Rect/Oval/Circle choices to the Select tool options. Ellipse
+  selections keep their shape through handles, moves, resizes, invert/combine,
+  crop, fill/clear, and image transforms. Item 14 moves the radius control to
+  rectangle corners and removes it from circles and ovals. Formatting, Clippy,
   locked tests, and `./scripts/bundle-macos.sh` passed.
 
 Select (`R`) drags a rectangle only. Add circle and oval selection. Put a
@@ -186,3 +186,18 @@ toolbox opens again.
   folded color controls stack foreground above the swap control above
   background. Formatting, Clippy, locked tests, and
   `./scripts/bundle-macos.sh` passed.
+
+## 14. Selection size fields and rectangle corner radius
+
+Circle and oval selection size comes from the drag, so they do not need a
+radius control. Use the radius control for rectangle corners instead, and have
+it update the current rectangle selection. Add editable Width and Height fields
+to the Select tool options for every selection shape. They show the current
+size while drawing and apply an edit with Return.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. Circle and oval no longer
+  have a radius input. Rectangle mode has a corner radius that updates the
+  current rectangle. Width and Height fields follow the drawn selection and
+  accept typed values, applied with Return. Formatting, Clippy, locked tests,
+  and `./scripts/bundle-macos.sh` passed.

@@ -51,8 +51,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   **Select** (`R`) drags a rectangle, oval, or circle; choose the shape in the
   Select tool options. The outline is a dashed box or ellipse with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
-  deselect. In Circle mode the radius control sizes a circle placed with a
-  click, and dragging a circle updates that radius. The dashes move along the
+  deselect. Rectangle mode has a corner-radius control that rounds the
+  selection. The Width and Height fields show the current size while drawing
+  and accept edits; press Return to apply them. The dashes move along the
   outline. The pointer becomes a resize arrow on a handle and a hand inside the
   box. Select All, Deselect, and Invert are in the Select menu and in the
   Select tool options.

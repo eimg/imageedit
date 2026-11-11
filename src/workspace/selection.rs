@@ -1,4 +1,6 @@
-use gpui::{Action, Context, CursorStyle, Div, Pixels, Point, Window, point, prelude::*};
+use gpui::{
+    Action, Context, CursorStyle, Div, KeyDownEvent, Pixels, Point, Window, point, prelude::*,
+};
 
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
@@ -69,6 +71,8 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
+        self.selection_size_active = None;
+        self.selection_size_replace = false;
         self.clear_selection_gesture();
         let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
@@ -154,8 +158,16 @@ impl Workspace {
                     None
                 } else {
                     let shape = self.selection_shape;
+                    let radius = self.selection_radius;
                     pointer.map(|end| {
-                        drag_selection(shape, start, (end.0 as u32, end.1 as u32), width, height)
+                        drag_selection(
+                            shape,
+                            radius,
+                            start,
+                            (end.0 as u32, end.1 as u32),
+                            width,
+                            height,
+                        )
                     })
                 }
             }
@@ -194,51 +206,23 @@ impl Workspace {
     pub(super) fn finish_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gesture = self.selection_drag.take();
         let preview = self.selection_preview.take();
-        let (width, height) = match self.active_tab() {
-            Some(tab) => tab.document.content.size(),
-            None => return,
-        };
-        let shape_mode = self.selection_shape;
-        if shape_mode == SelectionShape::Circle
-            && let Some(Selection::Ellipse(ellipse)) = &preview
-        {
-            self.selection_radius = (ellipse.rect().width.max(ellipse.rect().height) / 2).max(1);
-        }
         match (gesture, preview) {
-            (
-                Some(SelectionGesture::Create {
-                    op,
-                    anchor: Some(_),
-                    ..
-                }),
-                Some(shape),
-            ) => {
+            (Some(SelectionGesture::Create { op, .. }), Some(shape)) => {
                 self.update_selection(
                     move |current, (width, height)| current.combine(shape, op, width, height),
                     window,
                     cx,
                 );
             }
+            // A click outside a replace selection deselects.
             (
                 Some(SelectionGesture::Create {
-                    op,
-                    anchor: Some(start),
+                    op: SelectionOp::Replace,
                     ..
                 }),
                 None,
             ) => {
-                if shape_mode == SelectionShape::Circle {
-                    let shape = Selection::circle_at(start, self.selection_radius, width, height);
-                    self.update_selection(
-                        move |current, (width, height)| current.combine(shape, op, width, height),
-                        window,
-                        cx,
-                    );
-                } else if op == SelectionOp::Replace {
-                    self.select_none(window, cx);
-                } else {
-                    cx.notify();
-                }
+                self.select_none(window, cx);
             }
             (Some(_), Some(selection)) => self.commit_selection(selection, window, cx),
             (Some(_), None) => cx.notify(),
@@ -691,20 +675,197 @@ impl Workspace {
 
     pub(super) fn set_selection_shape(&mut self, shape: SelectionShape, cx: &mut Context<Self>) {
         self.selection_shape = shape;
+        self.selection_size_active = None;
+        self.selection_size_replace = false;
         cx.notify();
     }
 
-    pub(super) fn nudge_selection_radius(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let max = self
-            .active_document()
-            .map_or(1, |document| {
-                let (width, height) = document.content.size();
-                width.max(height)
-            })
-            .min(i32::MAX as u32)
-            .max(1) as i32;
-        self.selection_radius = (self.selection_radius as i32 + delta).clamp(1, max) as u32;
+    pub(super) fn nudge_selection_radius(
+        &mut self,
+        delta: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let max = self.selection_shape_rect().map_or_else(
+            || {
+                self.active_document().map_or(1, |document| {
+                    let (width, height) = document.content.size();
+                    width.max(height)
+                })
+            },
+            |rect| rect.width.min(rect.height) / 2,
+        );
+        let max = max.min(i32::MAX as u32) as i32;
+        self.selection_radius = (self.selection_radius as i32 + delta).clamp(0, max) as u32;
+        let selection = self
+            .selection_preview
+            .clone()
+            .or_else(|| self.active_tab().map(|tab| tab.selection.clone()));
+        if let Some(rect) = selection.as_ref().and_then(rect_for_radius) {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let (width, height) = tab.document.content.size();
+            let shape = Selection::rounded_rect_rect(rect, self.selection_radius, width, height);
+            self.commit_selection(shape, window, cx);
+        }
         cx.notify();
+    }
+
+    pub(super) fn selection_shape_rect(&self) -> Option<PixelRect> {
+        let selection = self
+            .selection_preview
+            .as_ref()
+            .or_else(|| self.active_tab().map(|tab| &tab.selection))?;
+        match selection {
+            Selection::Rect(rect) => Some(*rect),
+            Selection::Ellipse(ellipse) => Some(ellipse.rect()),
+            Selection::RoundedRect(shape) => Some(shape.rect()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn begin_selection_size_edit(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rect) = self.selection_shape_rect() {
+            self.selection_size_fields = [rect.width.to_string(), rect.height.to_string()];
+        }
+        self.selection_size_active = Some(index);
+        self.selection_size_replace = true;
+        self.selection_size_focus.focus(window);
+        cx.notify();
+    }
+
+    pub(super) fn selection_size_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.selection_size_active else {
+            return;
+        };
+        let key = &event.keystroke;
+        if key.modifiers.secondary()
+            || key.modifiers.alt
+            || key.modifiers.control
+            || key.modifiers.platform
+        {
+            cx.stop_propagation();
+            return;
+        }
+        match key.key.as_str() {
+            "escape" => {
+                self.selection_size_active = None;
+                self.selection_size_replace = false;
+                self.focus.focus(window);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            "enter" | "return" => {
+                self.commit_selection_size(active, window, cx);
+            }
+            "tab" => {
+                self.selection_size_active = Some(1 - active);
+                self.selection_size_replace = true;
+                self.selection_size_focus.focus(window);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if self.selection_size_replace {
+                    self.selection_size_fields[active].clear();
+                    self.selection_size_replace = false;
+                } else {
+                    self.selection_size_fields[active].pop();
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+            _ => {
+                if let Some(text) = key.key_char.as_deref()
+                    && text.len() == 1
+                    && text.as_bytes()[0].is_ascii_digit()
+                {
+                    if self.selection_size_replace {
+                        self.selection_size_fields[active].clear();
+                        self.selection_size_replace = false;
+                    }
+                    if self.selection_size_fields[active].len() < 5 {
+                        self.selection_size_fields[active].push_str(text);
+                    }
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    fn commit_selection_size(
+        &mut self,
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rect) = self.selection_shape_rect() else {
+            self.selection_size_active = None;
+            self.selection_size_replace = false;
+            self.focus.focus(window);
+            cx.notify();
+            return;
+        };
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let (canvas_width, canvas_height) = tab.document.content.size();
+        let parse = |text: &str, fallback: u32| {
+            text.parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        };
+        let mut width = parse(&self.selection_size_fields[0], rect.width);
+        let mut height = parse(&self.selection_size_fields[1], rect.height);
+        if self.selection_shape == SelectionShape::Circle {
+            let side = if active == 0 { width } else { height };
+            width = side;
+            height = side;
+        }
+        let rect = PixelRect::new(rect.x, rect.y, width, height);
+        let radius = self
+            .selection_preview
+            .as_ref()
+            .or_else(|| self.active_tab().map(|tab| &tab.selection))
+            .and_then(|selection| match selection {
+                Selection::RoundedRect(shape) => Some(shape.radius()),
+                _ => None,
+            })
+            .unwrap_or(self.selection_radius);
+        let selection = match self.selection_shape {
+            SelectionShape::Rectangle => {
+                Selection::rounded_rect_rect(rect, radius, canvas_width, canvas_height)
+            }
+            SelectionShape::Ellipse | SelectionShape::Circle => {
+                Selection::ellipse_rect(rect, canvas_width, canvas_height)
+            }
+        };
+        self.selection_size_active = None;
+        self.selection_size_replace = false;
+        self.focus.focus(window);
+        self.commit_selection(selection, window, cx);
+        cx.notify();
+    }
+}
+
+fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
+    match selection {
+        Selection::Rect(rect) => Some(*rect),
+        Selection::RoundedRect(shape) => Some(shape.rect()),
+        _ => None,
     }
 }
 
@@ -719,13 +880,15 @@ pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
 
 fn drag_selection(
     shape: SelectionShape,
+    radius: u32,
     start: (u32, u32),
     end: (u32, u32),
     width: u32,
     height: u32,
 ) -> Selection {
     match shape {
-        SelectionShape::Rectangle => Selection::rectangle(start, end, width, height),
+        SelectionShape::Rectangle if radius == 0 => Selection::rectangle(start, end, width, height),
+        SelectionShape::Rectangle => Selection::rounded_rect(start, end, radius, width, height),
         SelectionShape::Ellipse => Selection::ellipse(start, end, width, height),
         SelectionShape::Circle => Selection::circle(start, end, width, height),
     }
@@ -743,6 +906,9 @@ pub(super) fn adjustable_rect(selection: Selection) -> Option<PixelRect> {
         }
         Selection::Ellipse(ellipse) if ellipse.rect().width > 0 && ellipse.rect().height > 0 => {
             Some(ellipse.rect())
+        }
+        Selection::RoundedRect(shape) if shape.rect().width > 0 && shape.rect().height > 0 => {
+            Some(shape.rect())
         }
         _ => None,
     }
@@ -764,6 +930,9 @@ fn placed_selection(previous: Selection, rect: PixelRect, width: u32, height: u3
             }
         }
         Selection::Ellipse(_) => Selection::ellipse_rect(rect, width, height),
+        Selection::RoundedRect(shape) => {
+            Selection::rounded_rect_rect(rect, shape.radius(), width, height)
+        }
         _ => {
             if covers {
                 Selection::Full
@@ -1014,15 +1183,19 @@ mod tests {
         let start = (1, 2);
         let end = (5, 3);
         assert_eq!(
-            drag_selection(SelectionShape::Rectangle, start, end, 10, 10),
+            drag_selection(SelectionShape::Rectangle, 0, start, end, 10, 10),
             Selection::rectangle(start, end, 10, 10)
         );
         assert_eq!(
-            drag_selection(SelectionShape::Ellipse, start, end, 10, 10),
+            drag_selection(SelectionShape::Rectangle, 2, start, end, 10, 10),
+            Selection::rounded_rect(start, end, 2, 10, 10)
+        );
+        assert_eq!(
+            drag_selection(SelectionShape::Ellipse, 0, start, end, 10, 10),
             Selection::ellipse(start, end, 10, 10)
         );
         assert_eq!(
-            drag_selection(SelectionShape::Circle, start, end, 10, 10),
+            drag_selection(SelectionShape::Circle, 0, start, end, 10, 10),
             Selection::circle(start, end, 10, 10)
         );
     }

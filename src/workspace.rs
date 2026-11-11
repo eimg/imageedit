@@ -110,6 +110,10 @@ pub struct Workspace {
     selection_preview: Option<Selection>,
     selection_shape: SelectionShape,
     selection_radius: u32,
+    selection_size_fields: [String; 2],
+    selection_size_active: Option<usize>,
+    selection_size_replace: bool,
+    selection_size_focus: FocusHandle,
     tolerance: u8,
     free_points: Vec<Point<f32>>,
     free_op: crate::selection::SelectionOp,
@@ -195,6 +199,8 @@ impl Workspace {
                 workspace.crop_drag = None;
                 workspace.selection_drag = None;
                 workspace.selection_preview = None;
+                workspace.selection_size_active = None;
+                workspace.selection_size_replace = false;
                 workspace.opacity_drag = None;
                 workspace.toolbox_drag = None;
                 if workspace.tool == Tool::FreeSelect {
@@ -215,6 +221,7 @@ impl Workspace {
         .detach();
         let focus = cx.focus_handle();
         focus.focus(window);
+        let selection_size_focus = cx.focus_handle();
         let (loader, mut requests) = mpsc::unbounded::<PathBuf>();
         let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |workspace, cx| {
@@ -258,7 +265,11 @@ impl Workspace {
             selection_drag: None,
             selection_preview: None,
             selection_shape: SelectionShape::Rectangle,
-            selection_radius: 64,
+            selection_radius: 0,
+            selection_size_fields: [String::new(), String::new()],
+            selection_size_active: None,
+            selection_size_replace: false,
+            selection_size_focus,
             tolerance: 0,
             free_points: Vec::new(),
             free_op: crate::selection::SelectionOp::Replace,

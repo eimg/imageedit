@@ -142,6 +142,12 @@ impl Workspace {
                             content.size().0,
                             content.size().1,
                         ),
+                        Selection::RoundedRect(shape) => Selection::rounded_rect_rect(
+                            transform::scale_rect(shape.rect(), old, content.size()),
+                            shape.radius(),
+                            content.size().0,
+                            content.size().1,
+                        ),
                         other => other,
                     };
                     Dirty::Canvas
@@ -217,6 +223,14 @@ fn map_image_selection(
     }
     if let Selection::Ellipse(ellipse) = &selection {
         return Selection::ellipse_rect(map_image_rect(ellipse.rect(), old, action), new.0, new.1);
+    }
+    if let Selection::RoundedRect(shape) = &selection {
+        return Selection::rounded_rect_rect(
+            map_image_rect(shape.rect(), old, action),
+            shape.radius(),
+            new.0,
+            new.1,
+        );
     }
     let (Selection::Rect(rect) | Selection::Inverse(rect)) = selection else {
         return selection;

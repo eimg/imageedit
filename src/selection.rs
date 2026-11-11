@@ -19,10 +19,27 @@ pub enum Selection {
     Rect(PixelRect),
     // An axis-aligned ellipse inscribed in this rectangle.
     Ellipse(EllipseSelection),
+    // A rectangle with rounded corners, inscribed in this rectangle.
+    RoundedRect(RoundedRectSelection),
     // The canvas except this rectangle.
     Inverse(PixelRect),
     Mask(Mask),
 }
+
+#[derive(Clone, Debug)]
+pub struct RoundedRectSelection {
+    rect: PixelRect,
+    radius: u32,
+    outline: Arc<OnceLock<Vec<MaskEdge>>>,
+}
+
+impl PartialEq for RoundedRectSelection {
+    fn eq(&self, other: &Self) -> bool {
+        self.rect == other.rect && self.radius == other.radius
+    }
+}
+
+impl Eq for RoundedRectSelection {}
 
 #[derive(Clone, Debug)]
 pub struct EllipseSelection {
@@ -168,34 +185,160 @@ impl EllipseSelection {
     }
 
     fn outline(&self) -> Vec<MaskEdge> {
+        shape_outline(self.rect, |y| self.row_span(y), |x| self.column_span(x))
+    }
+}
+
+impl RoundedRectSelection {
+    pub fn rect(&self) -> PixelRect {
+        self.rect
+    }
+
+    pub fn radius(&self) -> u32 {
+        self.clamped_radius()
+    }
+
+    fn clamped_radius(&self) -> u32 {
+        self.radius.min(self.rect.width.min(self.rect.height) / 2)
+    }
+
+    fn contains(&self, x: i64, y: i64) -> bool {
         let rect = self.rect;
-        let mut edges = Vec::new();
         if rect.width == 0 || rect.height == 0 {
-            return edges;
+            return false;
         }
-        for y in rect.y..rect.bottom() {
-            let Some(current) = self.row_span(y) else {
-                continue;
-            };
-            for (start, end) in span_difference(current, self.row_span(y - 1)) {
-                edges.push((start as i32, y as i32, end as i32, y as i32));
-            }
-            for (start, end) in span_difference(current, self.row_span(y + 1)) {
-                edges.push((end as i32, (y + 1) as i32, start as i32, (y + 1) as i32));
-            }
+        let px = x as f64 + 0.5;
+        let py = y as f64 + 0.5;
+        let left = rect.x as f64;
+        let top = rect.y as f64;
+        let right = rect.right() as f64;
+        let bottom = rect.bottom() as f64;
+        if px < left || px >= right || py < top || py >= bottom {
+            return false;
         }
-        for x in rect.x..rect.right() {
-            let Some(current) = self.column_span(x) else {
-                continue;
-            };
-            for (start, end) in span_difference(current, self.column_span(x - 1)) {
-                edges.push((x as i32, end as i32, x as i32, start as i32));
-            }
-            for (start, end) in span_difference(current, self.column_span(x + 1)) {
-                edges.push(((x + 1) as i32, start as i32, (x + 1) as i32, end as i32));
-            }
+        let radius = f64::from(self.clamped_radius());
+        if radius <= 0.0 {
+            return true;
         }
-        edges
+        let cx = px.clamp(left + radius, right - radius);
+        let cy = py.clamp(top + radius, bottom - radius);
+        let dx = px - cx;
+        let dy = py - cy;
+        dx * dx + dy * dy <= radius * radius + 1e-9
+    }
+
+    fn row_span(&self, y: i64) -> Option<(i64, i64)> {
+        let rect = self.rect;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        let py = y as f64 + 0.5;
+        let top = rect.y as f64;
+        let bottom = rect.bottom() as f64;
+        if py < top || py >= bottom {
+            return None;
+        }
+        let radius = f64::from(self.clamped_radius());
+        let (left, right) = if radius <= 0.0 {
+            (rect.x as f64, rect.right() as f64)
+        } else if py < top + radius {
+            let half = (radius * radius - (top + radius - py).powi(2))
+                .max(0.0)
+                .sqrt();
+            (
+                rect.x as f64 + radius - half,
+                rect.right() as f64 - radius + half,
+            )
+        } else if py >= bottom - radius {
+            let half = (radius * radius - (py - (bottom - radius)).powi(2))
+                .max(0.0)
+                .sqrt();
+            (
+                rect.x as f64 + radius - half,
+                rect.right() as f64 - radius + half,
+            )
+        } else {
+            (rect.x as f64, rect.right() as f64)
+        };
+        let mut start = (left - 0.5).ceil() as i64;
+        let mut end = (right - 0.5).floor() as i64 + 1;
+        start = start.max(rect.x);
+        end = end.min(rect.right());
+        while start < end && !self.contains(start, y) {
+            start += 1;
+        }
+        while start < end && !self.contains(end - 1, y) {
+            end -= 1;
+        }
+        if start >= end {
+            return None;
+        }
+        while start > rect.x && self.contains(start - 1, y) {
+            start -= 1;
+        }
+        while end < rect.right() && self.contains(end, y) {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn column_span(&self, x: i64) -> Option<(i64, i64)> {
+        let rect = self.rect;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        let px = x as f64 + 0.5;
+        let left = rect.x as f64;
+        let right = rect.right() as f64;
+        if px < left || px >= right {
+            return None;
+        }
+        let radius = f64::from(self.clamped_radius());
+        let (top, bottom) = if radius <= 0.0 {
+            (rect.y as f64, rect.bottom() as f64)
+        } else if px < left + radius {
+            let half = (radius * radius - (left + radius - px).powi(2))
+                .max(0.0)
+                .sqrt();
+            (
+                rect.y as f64 + radius - half,
+                rect.bottom() as f64 - radius + half,
+            )
+        } else if px >= right - radius {
+            let half = (radius * radius - (px - (right - radius)).powi(2))
+                .max(0.0)
+                .sqrt();
+            (
+                rect.y as f64 + radius - half,
+                rect.bottom() as f64 - radius + half,
+            )
+        } else {
+            (rect.y as f64, rect.bottom() as f64)
+        };
+        let mut start = (top - 0.5).ceil() as i64;
+        let mut end = (bottom - 0.5).floor() as i64 + 1;
+        start = start.max(rect.y);
+        end = end.min(rect.bottom());
+        while start < end && !self.contains(x, start) {
+            start += 1;
+        }
+        while start < end && !self.contains(x, end - 1) {
+            end -= 1;
+        }
+        if start >= end {
+            return None;
+        }
+        while start > rect.y && self.contains(x, start - 1) {
+            start -= 1;
+        }
+        while end < rect.bottom() && self.contains(x, end) {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn outline(&self) -> Vec<MaskEdge> {
+        shape_outline(self.rect, |y| self.row_span(y), |x| self.column_span(x))
     }
 }
 
@@ -212,16 +355,14 @@ impl Selection {
         Self::ellipse_rect(square_drag_rect(start, end), width, height)
     }
 
-    pub fn circle_at(center: (u32, u32), radius: u32, width: u32, height: u32) -> Self {
-        let radius = radius.max(1);
-        let side = radius.saturating_mul(2);
-        let rect = PixelRect::new(
-            i64::from(center.0) - i64::from(radius),
-            i64::from(center.1) - i64::from(radius),
-            side,
-            side,
-        );
-        Self::ellipse_rect(rect, width, height)
+    pub fn rounded_rect(
+        start: (u32, u32),
+        end: (u32, u32),
+        radius: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self::rounded_rect_rect(drag_rect(start, end), radius, width, height)
     }
 
     pub fn ellipse_rect(rect: PixelRect, width: u32, height: u32) -> Self {
@@ -230,6 +371,21 @@ impl Selection {
         };
         Self::Ellipse(EllipseSelection {
             rect,
+            outline: Arc::default(),
+        })
+    }
+
+    pub fn rounded_rect_rect(rect: PixelRect, radius: u32, width: u32, height: u32) -> Self {
+        let Some(rect) = clip(rect, width, height) else {
+            return Self::Empty;
+        };
+        let radius = radius.min(rect.width.min(rect.height) / 2);
+        if radius == 0 {
+            return Self::from_rect(rect, width, height);
+        }
+        Self::RoundedRect(RoundedRectSelection {
+            rect,
+            radius,
             outline: Arc::default(),
         })
     }
@@ -252,6 +408,13 @@ impl Selection {
                 width,
                 height,
             ),
+            Self::RoundedRect(shape) => raster_combine(
+                Self::Full,
+                Self::RoundedRect(shape),
+                SelectionOp::Subtract,
+                width,
+                height,
+            ),
             Self::Inverse(hole) => Self::from_rect(hole, width, height),
             Self::Mask(mask) => {
                 if mask.is_solid() {
@@ -270,6 +433,7 @@ impl Selection {
             Self::Full => inside,
             Self::Rect(rect) => inside && contains(*rect, x, y),
             Self::Ellipse(ellipse) => inside && ellipse.contains(x, y),
+            Self::RoundedRect(shape) => inside && shape.contains(x, y),
             Self::Inverse(hole) => inside && !contains(*hole, x, y),
             Self::Mask(mask) => inside && mask.coverage(x as i32, y as i32) > 0,
         }
@@ -299,6 +463,9 @@ impl Selection {
             Self::Full => Self::Full,
             Self::Rect(_) => Self::from_rect(rect, width, height),
             Self::Ellipse(_) => Self::ellipse_rect(rect, width, height),
+            Self::RoundedRect(shape) => {
+                Self::rounded_rect_rect(rect, shape.radius(), width, height)
+            }
             Self::Inverse(_) => match clip(rect, width, height) {
                 Some(hole) if covers_canvas(hole, width, height) => Self::Empty,
                 Some(hole) => Self::Inverse(hole),
@@ -318,6 +485,12 @@ impl Selection {
             Self::Ellipse(ellipse) => {
                 Self::ellipse_rect(translate(ellipse.rect, -origin_x, -origin_y), width, height)
             }
+            Self::RoundedRect(shape) => Self::rounded_rect_rect(
+                translate(shape.rect, -origin_x, -origin_y),
+                shape.radius(),
+                width,
+                height,
+            ),
             Self::Inverse(hole) => {
                 let hole = translate(hole, -origin_x, -origin_y);
                 match clip(hole, width, height) {
@@ -340,6 +513,9 @@ impl Selection {
             Self::Ellipse(ellipse) => {
                 Self::ellipse_rect(translate(ellipse.rect, dx, dy), new.0, new.1)
             }
+            Self::RoundedRect(shape) => {
+                Self::rounded_rect_rect(translate(shape.rect, dx, dy), shape.radius(), new.0, new.1)
+            }
             Self::Inverse(hole) => translated_canvas().combine(
                 Self::from_rect(translate(hole, dx, dy), new.0, new.1),
                 SelectionOp::Subtract,
@@ -356,7 +532,7 @@ impl Selection {
             Self::Unrestricted | Self::Empty => Vec::new(),
             Self::Full => vec![PixelRect::new(0, 0, width, height)],
             Self::Rect(rect) => vec![*rect],
-            Self::Ellipse(_) => Vec::new(),
+            Self::Ellipse(_) | Self::RoundedRect(_) => Vec::new(),
             Self::Inverse(hole) => vec![PixelRect::new(0, 0, width, height), *hole],
             Self::Mask(_) => Vec::new(),
         }
@@ -380,6 +556,7 @@ impl Selection {
         match self {
             Self::Mask(mask) => mask.outline.get_or_init(|| mask.outline()),
             Self::Ellipse(ellipse) => ellipse.outline.get_or_init(|| ellipse.outline()),
+            Self::RoundedRect(shape) => shape.outline.get_or_init(|| shape.outline()),
             _ => &[],
         }
     }
@@ -388,7 +565,9 @@ impl Selection {
     // its outline, so a hole is a second loop and spacing continues around each corner.
     pub fn stroke_polylines(&self, width: u32, height: u32) -> Vec<Vec<(f64, f64)>> {
         match self {
-            Self::Mask(_) | Self::Ellipse(_) => chain_edges(self.outline_edges()),
+            Self::Mask(_) | Self::Ellipse(_) | Self::RoundedRect(_) => {
+                chain_edges(self.outline_edges())
+            }
             Self::Inverse(hole)
                 if hole.x <= 0
                     || hole.y <= 0
@@ -419,6 +598,7 @@ impl Selection {
             Self::Full => Some(PixelRect::new(0, 0, width, height)),
             Self::Rect(rect) => clip(*rect, width, height),
             Self::Ellipse(ellipse) => clip(ellipse.rect, width, height),
+            Self::RoundedRect(shape) => clip(shape.rect, width, height),
             Self::Inverse(hole) => inverse_bounds(*hole, width, height),
             Self::Mask(mask) => clip(mask.bounds(), width, height),
         }
@@ -857,6 +1037,40 @@ fn span_difference(current: (i64, i64), other: Option<(i64, i64)>) -> Vec<(i64, 
     }
     parts.retain(|(start, end)| start < end);
     parts
+}
+
+fn shape_outline(
+    rect: PixelRect,
+    row_span: impl Fn(i64) -> Option<(i64, i64)>,
+    column_span: impl Fn(i64) -> Option<(i64, i64)>,
+) -> Vec<MaskEdge> {
+    let mut edges = Vec::new();
+    if rect.width == 0 || rect.height == 0 {
+        return edges;
+    }
+    for y in rect.y..rect.bottom() {
+        let Some(current) = row_span(y) else {
+            continue;
+        };
+        for (start, end) in span_difference(current, row_span(y - 1)) {
+            edges.push((start as i32, y as i32, end as i32, y as i32));
+        }
+        for (start, end) in span_difference(current, row_span(y + 1)) {
+            edges.push((end as i32, (y + 1) as i32, start as i32, (y + 1) as i32));
+        }
+    }
+    for x in rect.x..rect.right() {
+        let Some(current) = column_span(x) else {
+            continue;
+        };
+        for (start, end) in span_difference(current, column_span(x - 1)) {
+            edges.push((x as i32, end as i32, x as i32, start as i32));
+        }
+        for (start, end) in span_difference(current, column_span(x + 1)) {
+            edges.push(((x + 1) as i32, start as i32, (x + 1) as i32, end as i32));
+        }
+    }
+    edges
 }
 
 fn contains(rect: PixelRect, x: i64, y: i64) -> bool {
@@ -1429,6 +1643,33 @@ mod tests {
         assert_eq!(
             Selection::circle((1, 2), (5, 3), 10, 10),
             Selection::ellipse_rect(PixelRect::new(1, 2, 5, 5), 10, 10)
+        );
+    }
+
+    #[test]
+    fn rounded_rect_follows_its_corner_radius() {
+        let rect = PixelRect::new(1, 1, 6, 6);
+        assert_eq!(
+            Selection::rounded_rect_rect(rect, 0, 20, 20),
+            Selection::Rect(rect)
+        );
+        let rounded = Selection::rounded_rect_rect(rect, 2, 20, 20);
+        assert!(rounded.covers(1, 3, 20, 20));
+        assert!(!rounded.covers(1, 1, 20, 20));
+        assert!(rounded.covers(3, 3, 20, 20));
+        assert_eq!(rounded.crop_bounds(20, 20), Some(rect));
+    }
+
+    #[test]
+    fn rounded_rect_keeps_its_radius_when_moved() {
+        let shape = Selection::rounded_rect_rect(PixelRect::new(1, 1, 6, 6), 2, 10, 10);
+        assert_eq!(
+            shape.clone().moved_box(PixelRect::new(2, 2, 6, 6), 10, 10),
+            Selection::rounded_rect_rect(PixelRect::new(2, 2, 6, 6), 2, 10, 10)
+        );
+        assert_eq!(
+            shape.rebase(1, 1, 9, 9),
+            Selection::rounded_rect_rect(PixelRect::new(0, 0, 6, 6), 2, 9, 9)
         );
     }
 

@@ -626,6 +626,57 @@ impl Workspace {
         }
     }
 
+    fn selection_size_fields(&self, cx: &Context<Self>) -> Div {
+        let Some(rect) = self.selection_shape_rect() else {
+            return div();
+        };
+        let active = self.selection_size_active;
+        let field = |index: usize, label: &'static str, text: String| {
+            div()
+                .id(("selection-size", index))
+                .h(px(26.))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .rounded_md()
+                .bg(rgb(CANVAS))
+                .border_1()
+                .border_color(rgb(if active == Some(index) {
+                    ACCENT
+                } else {
+                    BORDER
+                }))
+                .cursor(CursorStyle::IBeam)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.begin_selection_size_edit(index, window, cx);
+                }))
+                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
+                .child(text)
+        };
+        let width = if active == Some(0) {
+            self.selection_size_fields[0].clone()
+        } else {
+            rect.width.to_string()
+        };
+        let height = if active == Some(1) {
+            self.selection_size_fields[1].clone()
+        } else {
+            rect.height.to_string()
+        };
+        div()
+            .track_focus(&self.selection_size_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                this.selection_size_key(event, window, cx);
+            }))
+            .flex()
+            .gap_2()
+            .child(field(0, "W", width))
+            .child(field(1, "H", height))
+    }
+
     fn tab_strip(&self, cx: &Context<Self>) -> impl IntoElement {
         workspace_header()
             .id("tabs")
@@ -1206,12 +1257,13 @@ impl Workspace {
                                             cx,
                                         ),
                                     ]))
-                                    .when(shape == SelectionShape::Circle, |panel| {
+                                    .when(shape == SelectionShape::Rectangle, |panel| {
                                         panel.child(selection_radius_row(
                                             self.selection_radius,
                                             cx,
                                         ))
                                     })
+                                    .child(self.selection_size_fields(cx))
                             })
                             .when(
                                 matches!(
@@ -1667,6 +1719,10 @@ impl Workspace {
                         }
                         crate::selection::Selection::Ellipse(ellipse) => {
                             let rect = ellipse.rect();
+                            format!("  ·  Selection {} × {}", rect.width, rect.height)
+                        }
+                        crate::selection::Selection::RoundedRect(shape) => {
+                            let rect = shape.rect();
                             format!("  ·  Selection {} × {}", rect.width, rect.height)
                         }
                         crate::selection::Selection::Inverse(_) => {
@@ -2439,15 +2495,13 @@ fn selection_radius_row(value: u32, cx: &Context<super::Workspace>) -> Div {
         .items_center()
         .gap_2()
         .child("Radius")
-        .child(
-            form_button("−", false)
-                .on_click(cx.listener(|this, _, _, cx| this.nudge_selection_radius(-1, cx))),
-        )
+        .child(form_button("−", false).on_click(
+            cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
+        ))
         .child(value.to_string())
-        .child(
-            form_button("+", false)
-                .on_click(cx.listener(|this, _, _, cx| this.nudge_selection_radius(1, cx))),
-        )
+        .child(form_button("+", false).on_click(
+            cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
+        ))
 }
 
 fn selection_button(
