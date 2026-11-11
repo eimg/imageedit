@@ -14,6 +14,7 @@ mod path_ui;
 mod selection;
 mod stroke_ui;
 mod text_ui;
+mod tooltip;
 mod transform_ui;
 mod view;
 
@@ -102,12 +103,12 @@ pub struct Workspace {
     viewport: Rc<Cell<Bounds<Pixels>>>,
     canvas_cursor: Rc<CanvasCursor>,
     pan_drag: Option<(gpui::MouseButton, Point<Pixels>)>,
+    space_pan: bool,
     crop_drag: Option<CropDrag>,
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
     tolerance: u8,
-    free_mode: selection::FreeMode,
     free_points: Vec<Point<f32>>,
     free_op: crate::selection::SelectionOp,
     move_drag: Option<layers::MoveDrag>,
@@ -169,6 +170,8 @@ pub struct Workspace {
     history_clock: u64,
     jpeg_quality: u8,
     opacity_drag: Option<(LayerId, u8)>,
+    toolbox_width: f32,
+    toolbox_drag: Option<(f32, f32)>,
 }
 
 impl Workspace {
@@ -185,11 +188,13 @@ impl Workspace {
             if !window.is_window_active() {
                 workspace.canvas_cursor.leave();
                 workspace.pan_drag = None;
+                workspace.space_pan = false;
                 workspace.crop_drag = None;
                 workspace.selection_drag = None;
                 workspace.selection_preview = None;
                 workspace.opacity_drag = None;
-                if workspace.free_mode == selection::FreeMode::Freehand {
+                workspace.toolbox_drag = None;
+                if workspace.tool == Tool::FreeSelect {
                     workspace.free_points.clear();
                 }
                 workspace.cancel_path_gesture(cx);
@@ -244,12 +249,12 @@ impl Workspace {
             viewport: Rc::default(),
             canvas_cursor: Rc::default(),
             pan_drag: None,
+            space_pan: false,
             crop_drag: None,
             crop: None,
             selection_drag: None,
             selection_preview: None,
             tolerance: 0,
-            free_mode: selection::FreeMode::Freehand,
             free_points: Vec::new(),
             free_op: crate::selection::SelectionOp::Replace,
             move_drag: None,
@@ -314,6 +319,8 @@ impl Workspace {
             history_clock: 0,
             jpeg_quality: DEFAULT_JPEG_QUALITY,
             opacity_drag: None,
+            toolbox_width: view::TOOLBOX_DEFAULT_WIDTH,
+            toolbox_drag: None,
         }
     }
 

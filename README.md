@@ -23,7 +23,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 ## Editing and saving
 
 - **File → New Image** accepts pixel dimensions and creates a transparent
-  canvas or fills it with the background swatch.
+  canvas or fills it with the background swatch. The empty workspace offers
+  the same action as a quiet button under Choose Files.
 - **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
   also drop files onto the canvas or use Finder’s **Open With** menu.
   Reopening the same file focuses its existing tab.
@@ -44,18 +45,18 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   order, name, position, visibility, opacity, and lossless pixels with
   transparency. PNG and lossless WebP preserve transparency. JPEG saves
   against white. The working pixel format is 8-bit RGBA.
-- Drag a rectangle with **Crop** and press Return to apply it or Escape to
-  cancel. **Bucket Fill** uses the foreground color on connected pixels within
-  the shared tolerance. **Color Picker** samples the image at full resolution.
+- Drag a rectangle with **Crop** (`C`) and press Return to apply it or Escape to
+  cancel. **Bucket Fill** (`B`) uses the foreground color on connected pixels within
+  the shared tolerance. **Color Picker** (`K`) samples the image at full resolution.
   **Select** (`R`) drags a rectangle. The outline is a dashed box with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
   deselect. The dashes move along the outline. The pointer becomes a resize
   arrow on a handle and a hand inside the box. Select All, Deselect, and Invert
   are in the Select menu and in the Select tool options.
-  **Free Select** (`F`) has two modes. In Freehand, drag and release to close
-  the outline. In Polygon, click to place vertices, then click the start marker
-  or press Return to close it. Escape cancels either draft. **Magic Wand**
-  (`U`) selects a connected region. Its tolerance is shared with Bucket Fill:
+  **Free Select** (`F`) drags a freehand outline and closes it on release.
+  **Polygon Select** (`L`) clicks vertices, then closes by clicking the start
+  marker or pressing Return. Escape cancels either draft. **Magic Wand**
+  (`W`) selects a connected region. Its tolerance is shared with Bucket Fill:
   zero matches every channel exactly, and a higher value allows that much
   difference in the most changed channel. Hold Shift to add, Control to
   subtract, or both to intersect. **Select → Feather**, **Grow**, and
@@ -89,7 +90,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   or drag the perspective corners. Return applies the preview and Escape
   cancels it. Click the canvas to start another transform. The selection stays
   in place. Perspective requires a convex shape within the layer size limit.
-  **Pencil** (`N`), **Brush** (`P`), and **Eraser** (`Shift+E`) draw on the
+  **Pencil**, **Brush**, and **Eraser** (`E`) draw on the
   active layer. Pencil starts at one pixel and uses a hard edge. Brush and
   Eraser also offer a hardness control. Release commits the whole stroke and
   Escape discards it. Shift-click extends from the last committed stroke in
@@ -99,7 +100,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   radial, and it fades from the foreground color to the background or to
   transparent. Return applies the preview and Escape cancels it. A click with
   no drag fills with the foreground color.
-  **Path** (`B`) clicks anchors onto the canvas and drags to pull cubic
+  **Path** (`P`) clicks anchors onto the canvas and drags to pull cubic
   handles. Click the first anchor, or press Return, to close a path. Escape
   cancels the drag and Backspace removes the selected anchor. **Select → Path
   to Selection** fills every closed path. Overlapping contours use nonzero
@@ -157,7 +158,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   white background.
 - Use the Zoom tool, View menu, or status bar to zoom. Control-scroll zooms
   around the pointer. Scroll or use a middle-button drag to pan a zoomed
-  image. Pan is also available from the toolbox for left-button dragging.
+  image. Hold Space and drag to pan without leaving the current tool, or use
+  the Pan tool for left-button dragging. Space still types while editing text.
   Fitting or zooming out uses a reduced preview; zooming in shows source
   pixels. The cursor shows the selected tool beside the canvas crosshair.
 - **Edit → Undo** and **Redo** step through crops, fills, selections, and layer changes in
@@ -165,12 +167,17 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   Selection changes preserve the document’s saved state.
   Each tab keeps up to 100 steps, and the oldest steps are dropped first when
   history uses too much memory.
-- The **Layers** panel lists layers top to bottom with thumbnails. Click a
-  layer to select it, double-click to rename it, or use the eye button to hide
+- The **Layers** panel lists layers top to bottom with thumbnails. A
+  transparency checker shows through clear pixels there and on the canvas.
+  Click a layer to select it, double-click to rename it, or use the eye button to hide
   it. Drag a row to reorder. The opacity slider and the Layer menu cover New,
   Duplicate, Rename, Merge Down, Delete, Raise and Lower. New Layer can start
   transparent or filled with the foreground or background color. Merge Down
   stays disabled when either layer is hidden.
+
+The toolbox can be resized by dragging its right edge. Each tool shows its full
+name with the shortcut, trimming the name when the sidebar is narrow, and a
+tooltip on hover. Menus keep the full names used below.
 
 | Action | macOS shortcut |
 | --- | --- |
@@ -181,11 +188,12 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Undo / Redo | ⌘Z / ⌘⇧Z |
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
-| Crop / Bucket Fill / Color Picker | Shift+C / Shift+B / O |
-| Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
+| Crop / Bucket / Color Picker | C / B / K |
+| Rectangle Select / Free Select / Polygon Select / Magic Wand / Move | R / F / L / W / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
-| Pencil / Brush / Eraser | N / P / Shift+E |
-| Gradient / Path / Stroke / Text | G / B / S / T |
+| Eraser | E |
+| Gradient / Path / Stroke / Text | G / P / S / T |
+| Pan | hold Space |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |

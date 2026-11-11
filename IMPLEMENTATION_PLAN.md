@@ -1,5 +1,7 @@
 # ImageEdit implementation plan
 
+Open product feedback is queued in [FEEDBACK.md](FEEDBACK.md). Work the first open item only.
+
 Baseline assessed at commit `5c4cfcf` on `main`. This document records proposed behavior and historical acceptance criteria. Treat it as planning guidance; prefer correctness and a coherent editing experience when a planned detail no longer fits the app.
 
 ## Latest handoff · Review

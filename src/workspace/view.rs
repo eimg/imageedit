@@ -7,8 +7,9 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, ContentMask, Context, Corners, CursorStyle, Div,
-    ExternalPaths, MouseButton, PathBuilder, Pixels, Point, Transformation, TransformationMatrix,
-    Window, canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba, size, svg,
+    ExternalPaths, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Transformation,
+    TransformationMatrix, Window, canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba,
+    size, svg,
 };
 
 use crate::commands::{
@@ -16,10 +17,10 @@ use crate::commands::{
     CancelFreeSelect, CancelGradient, CancelMove, CancelPath, CancelStroke, CancelTransform,
     CloseFreeSelect, ClosePath, CloseTab, CommitStroke, CropLayerToContent, DeletePathAnchor,
     ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
-    InvertSelection, LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
-    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
-    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn,
-    ZoomOut, ZoomWindow,
+    InvertSelection, LayerToImageSize, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT,
+    OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone,
+    SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo,
+    Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -29,11 +30,14 @@ use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
 use super::dialogs::form_button;
 use super::files::SaveMode;
+use super::tooltip::{tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
 
 pub(super) const CHROME: u32 = 0x20242c;
 pub(super) const PANEL: u32 = 0x191d24;
 pub(super) const CANVAS: u32 = 0x11141a;
+pub(super) const CHECKER_DARK: u32 = 0x8d95a6;
+pub(super) const CHECKER_LIGHT: u32 = 0xd7dbe3;
 pub(super) const BORDER: u32 = 0x303640;
 pub(super) const TEXT: u32 = 0xe9edf4;
 pub(super) const MUTED: u32 = 0xa3adbd;
@@ -42,7 +46,14 @@ pub(super) const HOVER: u32 = 0x2b323d;
 pub(super) const ACCENT: u32 = 0xacc6ff;
 pub(super) const SELECTED: u32 = 0x2c3a54;
 const HEADER_HEIGHT: f32 = 36.;
-const SWATCH_HEIGHT: f32 = 28.;
+pub(super) const TOOLBOX_DEFAULT_WIDTH: f32 = 220.;
+const TOOLBOX_MIN_WIDTH: f32 = 140.;
+const TOOLBOX_MAX_WIDTH: f32 = 400.;
+const TOOLBOX_PADDING: f32 = 12.;
+const TOOLBOX_GAP: f32 = 4.;
+const TOOLBOX_SCROLLBAR_ALLOWANCE: f32 = 12.;
+const TOOLBOX_MIN_BUTTON_WIDTH: f32 = 88.;
+const TOOLBOX_MAX_COLUMNS: usize = 4;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -58,6 +69,12 @@ impl Render for Workspace {
             .text_color(rgb(TEXT))
             .text_size(px(13.))
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                this.begin_space_pan(event, cx);
+            }))
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
+                this.end_space_pan(event, cx);
+            }))
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
@@ -213,8 +230,7 @@ impl Render for Workspace {
                                 this.cancel_free(cx);
                             }))
                             .when(
-                                self.free_mode == super::selection::FreeMode::Polygon
-                                    && self.free_points.len() >= 3,
+                                self.tool == Tool::Polygon && self.free_points.len() >= 3,
                                 |root| {
                                     root.on_action(cx.listener(
                                         |this, _: &CloseFreeSelect, window, cx| {
@@ -306,7 +322,7 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(self.toolbox())
+                    .child(self.toolbox(cx))
                     .child(
                         div()
                             .flex()
@@ -331,40 +347,60 @@ impl Render for Workspace {
 }
 
 impl Workspace {
-    fn toolbox(&self) -> Div {
+    fn toolbox(&self, cx: &Context<Self>) -> Div {
+        let available =
+            (self.toolbox_width - TOOLBOX_PADDING * 2. - TOOLBOX_SCROLLBAR_ALLOWANCE).max(0.);
+        let columns = (((available + TOOLBOX_GAP) / (TOOLBOX_MIN_BUTTON_WIDTH + TOOLBOX_GAP))
+            .floor() as usize)
+            .clamp(1, TOOLBOX_MAX_COLUMNS);
+        let button_width =
+            ((available - TOOLBOX_GAP * (columns - 1) as f32) / columns as f32).max(0.);
         div()
-            .w(px(220.))
             .flex_shrink_0()
             .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .child(panel_header("Toolbox"))
             .child(
                 div()
-                    .id("toolbox-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_3()
-                    .children(TOOL_GROUPS.iter().map(|(label, tools)| {
-                        div().pb_2().child(section_label(label).pb_1()).child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .children(tools.iter().copied().map(|tool| self.tool_button(tool))),
-                        )
-                    })),
+                    .id("toolbox")
+                    .w(px(self.toolbox_width))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .child(panel_header("Toolbox"))
+                    .child(self.color_box())
+                    .child(
+                        div()
+                            .id("toolbox-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .children(TOOL_GROUPS.iter().map(|(label, tools)| {
+                                div().pb_2().child(section_label(label).pb_1()).child(
+                                    div().flex().flex_wrap().gap_1().w_full().children(
+                                        tools
+                                            .iter()
+                                            .copied()
+                                            .map(|tool| self.tool_button(tool, button_width)),
+                                    ),
+                                )
+                            })),
+                    ),
             )
-            .child(self.color_box())
+            .child(self.toolbox_resize_handle(cx))
     }
 
-    fn tool_button(&self, tool: Tool) -> impl IntoElement {
+    fn tool_button(&self, tool: Tool, width: f32) -> impl IntoElement {
         let info = tool.info();
+        let shortcut = tool.shortcut_label();
+        let tooltip = match shortcut {
+            Some(shortcut) => format!("{} ({shortcut})", info.label),
+            None => info.label.to_owned(),
+        };
         div()
             .id(info.icon)
-            .w(px(62.))
+            .w(px(width))
             .h(px(43.))
             .flex_shrink_0()
             .flex()
@@ -380,46 +416,138 @@ impl Workspace {
                 |button| button.bg(rgb(SELECTED)).text_color(rgb(ACCENT)),
                 |button| button.hover(|button| button.bg(rgb(HOVER))),
             )
-            .child(icon(info.icon, 17.))
+            .tooltip(tooltip_with_detail(tooltip, info.description))
+            .child(icon(info.icon, 16.))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .w_full()
+                    .min_w_0()
                     .text_size(px(10.))
                     .whitespace_nowrap()
-                    .child(info.label),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(info.label),
+                    )
+                    .when_some(shortcut, |label, shortcut| {
+                        label.child(div().flex_shrink_0().text_color(rgb(MUTED)).child(shortcut))
+                    }),
             )
             .on_click(move |_, window, cx| window.dispatch_action(Box::new(SelectTool(tool)), cx))
     }
 
+    fn toolbox_resize_handle(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
+        let dragging = self.toolbox_drag.is_some();
+        div()
+            .id("toolbox-resize")
+            .w(px(6.))
+            .h_full()
+            .flex_shrink_0()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .when_else(
+                dragging,
+                |handle| handle.bg(rgb(ACCENT)),
+                |handle| handle.hover(|handle| handle.bg(rgb(HOVER))),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_toolbox_resize(event, cx);
+                }),
+            )
+            .on_drag((), |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+            .on_drag_move::<()>(cx.listener(|this, event: &gpui::DragMoveEvent<()>, _, cx| {
+                this.drag_toolbox(event.event.position, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.end_toolbox_resize(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.end_toolbox_resize(cx)),
+            )
+    }
+
+    fn begin_toolbox_resize(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.toolbox_drag = Some((f32::from(event.position.x), self.toolbox_width));
+        cx.notify();
+    }
+
+    fn drag_toolbox(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((start_x, start_width)) = self.toolbox_drag else {
+            return;
+        };
+        let width = (start_width + f32::from(position.x) - start_x)
+            .clamp(TOOLBOX_MIN_WIDTH, TOOLBOX_MAX_WIDTH);
+        if (width - self.toolbox_width).abs() > 0.5 {
+            self.toolbox_width = width;
+            cx.notify();
+        }
+    }
+
+    fn end_toolbox_resize(&mut self, cx: &mut Context<Self>) {
+        if self.toolbox_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn color_box(&self) -> Div {
         let [foreground, background] = self.colors;
+        let swatch = (self.toolbox_width * 0.18).clamp(26., 40.);
+        let offset = (swatch * 0.5).round();
+        let block = swatch + offset;
+        let flip = (offset - 1.).max(12.);
         div()
             .flex_shrink_0()
             .p_3()
-            .border_t_1()
+            .border_b_1()
             .border_color(rgb(BORDER))
+            .flex()
+            .items_center()
+            .justify_center()
             .child(
                 div()
-                    .flex()
-                    .gap_2()
+                    .relative()
+                    .size(px(block))
                     .child(
-                        color_swatch("Foreground", foreground).on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ForegroundColor), cx);
-                        }),
+                        color_square("Background", background, swatch)
+                            .absolute()
+                            .right_0()
+                            .bottom_0(),
                     )
                     .child(
-                        icon_button("swap")
+                        div()
                             .id("swap-colors")
-                            .h(px(SWATCH_HEIGHT))
-                            .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .size(px(flip))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(MUTED))
+                            .tooltip(tooltip("Swap foreground and background"))
+                            .hover(|button| button.text_color(rgb(ACCENT)))
                             .cursor_pointer()
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(SwapColors), cx);
-                            }),
+                            })
+                            .child(icon("swap", (flip * 0.65).clamp(9., 14.))),
                     )
                     .child(
-                        color_swatch("Background", background).on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(BackgroundColor), cx);
-                        }),
+                        color_square("Foreground", foreground, swatch)
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .shadow_sm(),
                     ),
             )
     }
@@ -508,7 +636,8 @@ impl Workspace {
         if !show_tool_cursor || self.active.is_none() {
             self.canvas_cursor.leave();
         }
-        let show_tool_cursor = show_tool_cursor && self.pan_drag.is_none() && !cx.has_active_drag();
+        let show_tool_cursor =
+            show_tool_cursor && self.pan_drag.is_none() && !self.space_pan && !cx.has_active_drag();
         if !show_tool_cursor {
             self.canvas_cursor.show_native(true);
         }
@@ -721,20 +850,23 @@ impl Workspace {
                                 }),
                             )
                     })
-                    .when(self.tool == Tool::FreeSelect && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_free(
-                                    event.position,
-                                    &event.modifiers,
-                                    window.scale_factor(),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        )
-                    })
+                    .when(
+                        matches!(self.tool, Tool::FreeSelect | Tool::Polygon) && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_free(
+                                        event.position,
+                                        &event.modifiers,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
+                        },
+                    )
                     .when(self.tool == Tool::MagicWand && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
@@ -791,6 +923,21 @@ impl Workspace {
                     .when(self.pan_drag.is_some(), |area| {
                         area.cursor(CursorStyle::ClosedHand)
                     })
+                    .when(self.space_pan && self.pan_drag.is_none(), |area| {
+                        area.cursor(CursorStyle::OpenHand)
+                    })
+                    .when(self.space_pan, |area| {
+                        area.capture_any_mouse_down(cx.listener(
+                            |this, event: &gpui::MouseDownEvent, _, cx| {
+                                if event.button != MouseButton::Left {
+                                    return;
+                                }
+                                this.pan_drag = Some((event.button, event.position));
+                                cx.stop_propagation();
+                                cx.notify();
+                            },
+                        ))
+                    })
                     .child(image_preview(
                         tab,
                         self.viewport.clone(),
@@ -808,7 +955,7 @@ impl Workspace {
                             gradient: self.gradient_frame(),
                             stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
-                            polygon: self.free_mode == super::selection::FreeMode::Polygon,
+                            polygon: self.tool == Tool::Polygon,
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
@@ -872,18 +1019,41 @@ impl Workspace {
                                 .child("Drop an ImageEdit project, PNG, JPEG, or WebP here."),
                         )
                         .child(
-                            button("folder", "Choose Files…")
-                                .id("empty-open")
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_2()
                                 .mt_1()
-                                .px_4()
-                                .h(px(36.))
-                                .bg(rgb(ACCENT))
-                                .text_color(rgb(CANVAS))
-                                .hover(|button| button.bg(rgb(0xc5d7ff)))
-                                .cursor_pointer()
-                                .on_click(open_image),
-                        )
-                        .child(div().text_xs().text_color(rgb(MUTED)).child(OPEN_HINT)),
+                                .child(
+                                    button("folder", "Choose Files…")
+                                        .id("empty-open")
+                                        .px_4()
+                                        .h(px(36.))
+                                        .bg(rgb(ACCENT))
+                                        .text_color(rgb(CANVAS))
+                                        .hover(|button| button.bg(rgb(0xc5d7ff)))
+                                        .cursor_pointer()
+                                        .on_click(open_image)
+                                        .child(shortcut_hint(OPEN_HINT).opacity(0.65)),
+                                )
+                                .child(
+                                    div()
+                                        .id("empty-new")
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .h(px(30.))
+                                        .px_3()
+                                        .rounded_md()
+                                        .text_color(rgb(MUTED))
+                                        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                        .cursor_pointer()
+                                        .on_click(new_image)
+                                        .child("New Image")
+                                        .child(shortcut_hint(NEW_HINT).text_color(rgb(DISABLED))),
+                                ),
+                        ),
                 ),
             })
             .when(self.pending > 0, |area| {
@@ -922,7 +1092,16 @@ impl Workspace {
                                     .gap_2()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(icon(tool.icon, 16.))
-                                    .child(tool.label),
+                                    .child(tool.label)
+                                    .when_some(self.tool.shortcut_label(), |row, shortcut| {
+                                        row.child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(gpui::FontWeight::NORMAL)
+                                                .text_color(rgb(MUTED))
+                                                .child(shortcut),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -933,33 +1112,16 @@ impl Workspace {
                             .when(
                                 matches!(
                                     self.tool,
-                                    Tool::Select | Tool::FreeSelect | Tool::MagicWand
+                                    Tool::Select
+                                        | Tool::FreeSelect
+                                        | Tool::Polygon
+                                        | Tool::MagicWand
                                 ),
                                 |panel| {
                                     let enabled = self.selection_command_enabled(
                                         super::selection::SelectionCommand::None,
                                     );
-                                    panel.child(selection_actions(enabled)).when(
-                                        self.tool == Tool::FreeSelect,
-                                        |panel| {
-                                            panel.child(div().flex().gap_2().children([
-                                                free_mode_button(
-                                                    "Freehand",
-                                                    self.free_mode
-                                                        == super::selection::FreeMode::Freehand,
-                                                    super::selection::FreeMode::Freehand,
-                                                    cx,
-                                                ),
-                                                free_mode_button(
-                                                    "Polygon",
-                                                    self.free_mode
-                                                        == super::selection::FreeMode::Polygon,
-                                                    super::selection::FreeMode::Polygon,
-                                                    cx,
-                                                ),
-                                            ]))
-                                        },
-                                    )
+                                    panel.child(selection_actions(enabled))
                                 },
                             )
                             .when(
@@ -1339,6 +1501,7 @@ impl Workspace {
                                         | Tool::BucketFill
                                         | Tool::Select
                                         | Tool::FreeSelect
+                                        | Tool::Polygon
                                         | Tool::MagicWand
                                         | Tool::Move
                                         | Tool::Rotate
@@ -1546,6 +1709,10 @@ fn open_image(_: &gpui::ClickEvent, window: &mut Window, cx: &mut App) {
     window.dispatch_action(Box::new(OpenImage), cx);
 }
 
+fn new_image(_: &gpui::ClickEvent, window: &mut Window, cx: &mut App) {
+    window.dispatch_action(Box::new(NewImage), cx);
+}
+
 fn zoom_button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<Div> {
     div()
         .id(id)
@@ -1560,30 +1727,33 @@ fn zoom_button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::
         .child(label.into())
 }
 
-fn color_swatch(label: &'static str, color: u32) -> gpui::Stateful<Div> {
+fn color_square(label: &'static str, color: u32, size: f32) -> gpui::Stateful<Div> {
+    let foreground = label == "Foreground";
     div()
         .id(label)
+        .size(px(size))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(color))
         .cursor_pointer()
-        .hover(|swatch| swatch.text_color(rgb(ACCENT)))
-        .flex()
-        .flex_1()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .h(px(SWATCH_HEIGHT))
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(color)),
-        )
-        .child(div().text_size(px(11.)).child(label))
-        .child(
-            div()
-                .text_size(px(10.))
-                .text_color(rgb(MUTED))
-                .child(format!("#{color:06X}")),
-        )
+        .hover(|swatch| swatch.border_color(rgb(ACCENT)))
+        .tooltip(tooltip(if foreground {
+            "Foreground color"
+        } else {
+            "Background color"
+        }))
+        .on_click(move |_, window, cx| {
+            if foreground {
+                window.dispatch_action(Box::new(ForegroundColor), cx);
+            } else {
+                window.dispatch_action(Box::new(BackgroundColor), cx);
+            }
+        })
+}
+
+fn shortcut_hint(shortcut: &'static str) -> Div {
+    div().text_size(px(12.)).child(shortcut)
 }
 
 fn button(symbol: &'static str, label: &'static str) -> Div {
@@ -1964,7 +2134,7 @@ fn paint_source_pixels(
 
 fn paint_checkerboard(window: &mut Window, image: Bounds<Pixels>, visible: Bounds<Pixels>) {
     const TILE: f32 = 12.;
-    window.paint_quad(fill(visible, rgb(0x343944)));
+    window.paint_quad(fill(visible, rgb(CHECKER_DARK)));
     let tile_index = |offset: Pixels| (f32::from(offset) / TILE).floor() as i32;
     let left = tile_index(visible.left() - image.left());
     let top = tile_index(visible.top() - image.top());
@@ -1979,7 +2149,7 @@ fn paint_checkerboard(window: &mut Window, image: Bounds<Pixels>, visible: Bound
                 )
                 .intersect(&visible);
                 if !tile.is_empty() {
-                    window.paint_quad(fill(tile, rgb(0x474d5a)));
+                    window.paint_quad(fill(tile, rgb(CHECKER_LIGHT)));
                 }
             }
         }
@@ -1996,21 +2166,6 @@ fn selection_actions(enabled: bool) -> Div {
         .child(selection_button("Invert", enabled, |window, cx| {
             window.dispatch_action(Box::new(InvertSelection), cx);
         }))
-}
-
-fn free_mode_button(
-    label: &'static str,
-    selected: bool,
-    mode: super::selection::FreeMode,
-    cx: &Context<super::Workspace>,
-) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
-        if this.free_mode != mode {
-            this.free_points.clear();
-            this.free_mode = mode;
-            cx.notify();
-        }
-    }))
 }
 
 fn stroke_source_button(
@@ -2491,17 +2646,9 @@ fn paint_warp_frame(
             }
         }
         let scale = window.scale_factor();
-        let snap = |value: f32| (value * scale).round() / scale;
         for grip in frame.grips.iter().take(frame.grip_count) {
             let center = project(*grip);
-            let origin = point(
-                px(snap(f32::from(center.x) - 3.5)),
-                px(snap(f32::from(center.y) - 3.5)),
-            );
-            window.paint_quad(fill(
-                Bounds::new(origin, size(px(7.), px(7.))),
-                rgb(0xffffff),
-            ));
+            paint_contrast_square(window, f32::from(center.x), f32::from(center.y), 7., scale);
         }
     });
 }
@@ -2527,7 +2674,6 @@ fn paint_handles(
     let mid_x = (left + right) / 2.;
     let mid_y = (top + bottom) / 2.;
     let scale = window.scale_factor();
-    let snap = |value: f32| (value * scale).round() / scale;
     let handle = 5.;
     for (x, y) in [
         (left, top),
@@ -2539,23 +2685,22 @@ fn paint_handles(
         (mid_x, bottom),
         (right, bottom),
     ] {
-        let origin_x = snap(x - handle / 2.);
-        let origin_y = snap(y - handle / 2.);
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(origin_x), px(origin_y)),
-                size(px(handle), px(handle)),
-            ),
-            rgb(0x12151c),
-        ));
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(origin_x + 1.), px(origin_y + 1.)),
-                size(px(handle - 2.), px(handle - 2.)),
-            ),
-            rgb(0xffffff),
-        ));
+        paint_contrast_square(window, x, y, handle, scale);
     }
+}
+
+fn paint_contrast_square(window: &mut Window, x: f32, y: f32, edge: f32, scale: f32) {
+    let snap = |value: f32| (value * scale).round() / scale;
+    let origin = point(px(snap(x - edge / 2.)), px(snap(y - edge / 2.)));
+    window.paint_quad(fill(
+        Bounds::new(origin, size(px(edge), px(edge))),
+        rgb(0x12151c),
+    ));
+    let inset = (edge - 2.).max(1.);
+    window.paint_quad(fill(
+        Bounds::new(origin + point(px(1.), px(1.)), size(px(inset), px(inset))),
+        rgb(0xffffff),
+    ));
 }
 
 fn paint_marching_rect(

@@ -110,6 +110,7 @@ pub enum Tool {
     Perspective,
     Select,
     FreeSelect,
+    Polygon,
     MagicWand,
     Pencil,
     Brush,
@@ -135,7 +136,11 @@ impl Tool {
                 "move",
                 "Drag to reposition the active layer. Escape cancels.",
             ),
-            Self::Pan => ("Pan", "hand", "Drag the canvas to navigate a zoomed image."),
+            Self::Pan => (
+                "Pan",
+                "hand",
+                "Hold Space and drag, or choose this tool and drag, to move the canvas.",
+            ),
             Self::Zoom => (
                 "Zoom",
                 "zoom",
@@ -174,7 +179,12 @@ impl Tool {
             Self::FreeSelect => (
                 "Free Select",
                 "lasso",
-                "Draw a freehand outline or click a polygon. Escape cancels.",
+                "Drag a freehand outline. Release closes it, and Escape cancels.",
+            ),
+            Self::Polygon => (
+                "Polygon Select",
+                "polygon",
+                "Click vertices. Click the start or press Return to close. Escape cancels.",
             ),
             Self::MagicWand => (
                 "Magic Wand",
@@ -229,27 +239,53 @@ impl Tool {
         }
     }
 
-    /// Toolbox shortcut. Pan is chosen from the View menu and has no key.
+    /// Compact shortcut drawn beside the tool label. Pan shows the hold key.
+    pub fn shortcut_label(self) -> Option<&'static str> {
+        if self == Self::Pan {
+            return Some("␣");
+        }
+        Some(match self.shortcut()? {
+            "m" => "M",
+            "c" => "C",
+            "z" => "Z",
+            "k" => "K",
+            "shift-r" => "⇧R",
+            "shift-f" => "⇧F",
+            "shift-p" => "⇧P",
+            "r" => "R",
+            "f" => "F",
+            "l" => "L",
+            "w" => "W",
+            "e" => "E",
+            "b" => "B",
+            "g" => "G",
+            "t" => "T",
+            "p" => "P",
+            "s" => "S",
+            _ => return None,
+        })
+    }
+
+    /// Toolbox shortcut. Pan is hold-Space. Pencil and Brush stay in the toolbox.
     pub fn shortcut(self) -> Option<&'static str> {
         Some(match self {
             Self::Move => "m",
-            Self::Pan => return None,
+            Self::Pan | Self::Pencil | Self::Brush => return None,
             Self::Zoom => "z",
-            Self::Eyedropper => "o",
-            Self::Crop => "shift-c",
+            Self::Eyedropper => "k",
+            Self::Crop => "c",
             Self::Rotate => "shift-r",
             Self::Flip => "shift-f",
             Self::Perspective => "shift-p",
             Self::Select => "r",
             Self::FreeSelect => "f",
-            Self::MagicWand => "u",
-            Self::Pencil => "n",
-            Self::Brush => "p",
-            Self::Eraser => "shift-e",
-            Self::BucketFill => "shift-b",
+            Self::Polygon => "l",
+            Self::MagicWand => "w",
+            Self::Eraser => "e",
+            Self::BucketFill => "b",
             Self::Gradient => "g",
             Self::Text => "t",
-            Self::Path => "b",
+            Self::Path => "p",
             Self::Stroke => "s",
         })
     }
@@ -262,7 +298,12 @@ const TRANSFORM_TOOLS: &[Tool] = &[
     Tool::Flip,
     Tool::Perspective,
 ];
-const SELECTION_TOOLS: &[Tool] = &[Tool::Select, Tool::FreeSelect, Tool::MagicWand];
+const SELECTION_TOOLS: &[Tool] = &[
+    Tool::Select,
+    Tool::FreeSelect,
+    Tool::Polygon,
+    Tool::MagicWand,
+];
 const PAINT_TOOLS: &[Tool] = &[Tool::Pencil, Tool::Brush, Tool::Eraser];
 const FILL_TOOLS: &[Tool] = &[Tool::BucketFill, Tool::Gradient];
 const DRAW_TOOLS: &[Tool] = &[Tool::Text, Tool::Path, Tool::Stroke];
@@ -320,6 +361,12 @@ pub const OPEN_HINT: &str = if cfg!(target_os = "macos") {
     "⌘O"
 } else {
     "Ctrl+O"
+};
+
+pub const NEW_HINT: &str = if cfg!(target_os = "macos") {
+    "⌘N"
+} else {
+    "Ctrl+N"
 };
 
 pub fn register(cx: &mut App) {
@@ -393,26 +440,25 @@ pub fn register(cx: &mut App) {
     bind_tool_shortcuts(cx);
     // A NoAction here is higher than the global tool letters, so key_down can type them.
     cx.bind_keys([
-        KeyBinding::new("n", NoAction, Some("Text")),
-        KeyBinding::new("p", NoAction, Some("Text")),
+        KeyBinding::new("m", NoAction, Some("Text")),
+        KeyBinding::new("c", NoAction, Some("Text")),
         KeyBinding::new("r", NoAction, Some("Text")),
         KeyBinding::new("f", NoAction, Some("Text")),
-        KeyBinding::new("u", NoAction, Some("Text")),
-        KeyBinding::new("m", NoAction, Some("Text")),
-        KeyBinding::new("o", NoAction, Some("Text")),
-        KeyBinding::new("z", NoAction, Some("Text")),
-        KeyBinding::new("x", NoAction, Some("Text")),
-        KeyBinding::new("d", NoAction, Some("Text")),
-        KeyBinding::new("t", NoAction, Some("Text")),
-        KeyBinding::new("s", NoAction, Some("Text")),
+        KeyBinding::new("l", NoAction, Some("Text")),
+        KeyBinding::new("w", NoAction, Some("Text")),
+        KeyBinding::new("e", NoAction, Some("Text")),
         KeyBinding::new("b", NoAction, Some("Text")),
         KeyBinding::new("g", NoAction, Some("Text")),
-        KeyBinding::new("shift-e", NoAction, Some("Text")),
+        KeyBinding::new("t", NoAction, Some("Text")),
+        KeyBinding::new("p", NoAction, Some("Text")),
+        KeyBinding::new("s", NoAction, Some("Text")),
+        KeyBinding::new("z", NoAction, Some("Text")),
+        KeyBinding::new("k", NoAction, Some("Text")),
+        KeyBinding::new("x", NoAction, Some("Text")),
+        KeyBinding::new("d", NoAction, Some("Text")),
         KeyBinding::new("shift-r", NoAction, Some("Text")),
         KeyBinding::new("shift-f", NoAction, Some("Text")),
         KeyBinding::new("shift-p", NoAction, Some("Text")),
-        KeyBinding::new("shift-c", NoAction, Some("Text")),
-        KeyBinding::new("shift-b", NoAction, Some("Text")),
         KeyBinding::new("1", NoAction, Some("Text")),
         KeyBinding::new("+", NoAction, Some("Text")),
         KeyBinding::new("-", NoAction, Some("Text")),
@@ -702,6 +748,7 @@ mod tests {
             Tool::Perspective,
             Tool::Select,
             Tool::FreeSelect,
+            Tool::Polygon,
             Tool::MagicWand,
             Tool::Pencil,
             Tool::Brush,
@@ -720,28 +767,53 @@ mod tests {
                 .count();
             assert_eq!(groups, 1, "{tool:?}");
             match tool {
-                Tool::Pan => assert_eq!(tool.shortcut(), None),
+                Tool::Pan => {
+                    assert_eq!(tool.shortcut(), None);
+                    assert_eq!(tool.shortcut_label(), Some("␣"));
+                }
+                Tool::Pencil | Tool::Brush => {
+                    assert_eq!(tool.shortcut(), None);
+                    assert_eq!(tool.shortcut_label(), None);
+                }
                 Tool::Move => assert_eq!(tool.shortcut(), Some("m")),
                 Tool::Zoom => assert_eq!(tool.shortcut(), Some("z")),
-                Tool::Eyedropper => assert_eq!(tool.shortcut(), Some("o")),
-                Tool::Crop => assert_eq!(tool.shortcut(), Some("shift-c")),
+                Tool::Eyedropper => assert_eq!(tool.shortcut(), Some("k")),
+                Tool::Crop => assert_eq!(tool.shortcut(), Some("c")),
                 Tool::Rotate => assert_eq!(tool.shortcut(), Some("shift-r")),
                 Tool::Flip => assert_eq!(tool.shortcut(), Some("shift-f")),
                 Tool::Perspective => assert_eq!(tool.shortcut(), Some("shift-p")),
                 Tool::Select => assert_eq!(tool.shortcut(), Some("r")),
                 Tool::FreeSelect => assert_eq!(tool.shortcut(), Some("f")),
-                Tool::MagicWand => assert_eq!(tool.shortcut(), Some("u")),
-                Tool::Pencil => assert_eq!(tool.shortcut(), Some("n")),
-                Tool::Brush => assert_eq!(tool.shortcut(), Some("p")),
-                Tool::Eraser => assert_eq!(tool.shortcut(), Some("shift-e")),
-                Tool::BucketFill => assert_eq!(tool.shortcut(), Some("shift-b")),
+                Tool::Polygon => assert_eq!(tool.shortcut(), Some("l")),
+                Tool::MagicWand => assert_eq!(tool.shortcut(), Some("w")),
+                Tool::Eraser => assert_eq!(tool.shortcut(), Some("e")),
+                Tool::BucketFill => assert_eq!(tool.shortcut(), Some("b")),
                 Tool::Gradient => assert_eq!(tool.shortcut(), Some("g")),
                 Tool::Text => assert_eq!(tool.shortcut(), Some("t")),
-                Tool::Path => assert_eq!(tool.shortcut(), Some("b")),
+                Tool::Path => assert_eq!(tool.shortcut(), Some("p")),
                 Tool::Stroke => assert_eq!(tool.shortcut(), Some("s")),
             }
             if let Some(shortcut) = tool.shortcut() {
                 assert!(shortcuts.insert(shortcut), "{shortcut}");
+            }
+            match (tool.shortcut(), tool.shortcut_label()) {
+                (None, None) => assert!(matches!(tool, Tool::Pencil | Tool::Brush)),
+                (None, Some("␣")) => assert_eq!(tool, Tool::Pan),
+                (Some(shortcut), Some(label)) => {
+                    let key = shortcut.rsplit('-').next().unwrap();
+                    assert_eq!(
+                        label
+                            .chars()
+                            .last()
+                            .unwrap()
+                            .to_ascii_lowercase()
+                            .to_string(),
+                        key
+                    );
+                    assert_eq!(label.starts_with('⇧'), shortcut.starts_with("shift-"));
+                    assert!(label.chars().count() <= 2, "{label}");
+                }
+                (shortcut, label) => panic!("{tool:?} shortcut {shortcut:?} label {label:?}"),
             }
         }
         let listed: usize = TOOL_GROUPS.iter().map(|(_, group)| group.len()).sum();
@@ -855,6 +927,7 @@ mod tests {
             "menu:Selection",
             "Select",
             "Free Select",
+            "Polygon Select",
             "Magic Wand",
             "menu:Paint",
             "Pencil",

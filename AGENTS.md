@@ -3,17 +3,20 @@
 ImageEdit is a Rust and GPUI desktop image editor. Build for macOS first and
 keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
 app menu. Windows uses File → Exit. The product
-takes cues from GIMP, with native menus, a fixed toolbox and Layers panel, and a
-tabbed canvas. File commands belong in the menu. The workspace favors canvas
-space and has no top toolbar.
+takes cues from GIMP, with native menus, a docked and resizable toolbox, a
+Layers panel, and a tabbed canvas. File commands belong in the menu. The
+workspace favors canvas space and has no top toolbar.
 
-For planned work, start with [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
-and the latest pass handoff. The plan is guidance, not a requirement to preserve
-choices that hurt the overall editing experience.
+For planned work, start with [FEEDBACK.md](FEEDBACK.md) and take the first open
+item only. Leave the rest for another agent. The implementation plan and the
+latest pass handoff are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The plan is guidance, not a requirement to preserve choices that hurt the
+overall editing experience.
 
 ## Current product scope
 
-ImageEdit supports layered raster editing. Open or create an image, crop it,
+ImageEdit supports layered raster editing. The empty workspace can open a
+file or create an image. Crop that image,
 sample or set swatches, and fill connected regions on the active layer. Rectangle, freehand, polygon, and wand selections limit fill and Clear to
 Transparency, and Crop to Selection uses the selection bounds. Shift adds to
 the selection, Control subtracts, and Shift-Control intersects. The wand and
@@ -22,7 +25,8 @@ Shrink edit the mask. Move repositions the active layer, and the Layer menu can 
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
-commit on Apply, leaving the selection in canvas coordinates. Pencil, Brush, and
+commit on Apply, leaving the selection in canvas coordinates. Perspective
+corner grips keep a dark rim so they stay visible on a white image. Pencil, Brush, and
 Eraser paint the active layer inside the selection; a stroke commits when the
 pointer is released. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
@@ -34,7 +38,7 @@ share a per-channel lookup table, and their histogram skips transparent pixels.
 Blur, Sharpen, and Drop Shadow preview the active layer in a dialog. Blur and
 Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
 beneath the source from its blurred silhouette. A zero radius or amount does
-not create a history entry. Path (`B`) edits cubic anchors in canvas
+not create a history entry. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
 first anchor closes the path. Path to Selection fills every closed path with
 nonzero winding. Image transforms, scale, canvas size, and crop move those
@@ -61,7 +65,8 @@ layer changes, path edits, strokes, text edits, and rasterizing text. Selection 
 back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
-zoomed out. It also supports a grid and center guides. Save and Save As handle
+zoomed out. Transparent pixels show a checker on the canvas and in each layer
+thumbnail. It also supports a grid and center guides. Save and Save As handle
 ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
@@ -73,7 +78,10 @@ document is a single plain layer without paths or editable text.
 - `src/main.rs` starts GPUI, creates or reopens the main window, and routes
   launch arguments and macOS file URLs to the workspace.
 - `src/commands.rs` defines actions, shortcuts, native menus, and toolbox
-  metadata. Reuse those actions for UI entry points. A `Planned` menu action
+  metadata. Toolbox buttons show the full label, trim it when the sidebar is
+  narrow, and add the shortcut and a tooltip; menus keep the full label. Pencil
+  and Brush have no key. Hold Space to pan without leaving
+  the current tool. Reuse those actions for UI entry points. A `Planned` menu action
   stays disabled until there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
@@ -103,7 +111,7 @@ document is a single plain layer without paths or editable text.
 a rectangle, the inverse of a rectangle, or a canvas-bounded coverage mask.
 `src/workspace/selection.rs` drags the rectangle, resizes it from its handles,
 moves it from inside, and clears it on a click outside. Free Select previews
-the freehand path or the polygon's next edge. The Magic Wand shares the
+the freehand path. Polygon Select previews the next edge. The Magic Wand shares the
 bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
 Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
 painted crosshair gives way to a hand or resize cursor. The outline is a
@@ -150,8 +158,9 @@ Mask transforms avoid per-pixel coordinate lists; morphology uses running sums.
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
-  pixels. `src/workspace/view.rs` lays out the shell and paints the canvas
-  using the same geometry.
+  pixels. `src/workspace/view.rs` lays out the shell, including the resizable
+  toolbox and its full-label buttons, and paints the canvas using the same
+  geometry. `src/workspace/tooltip.rs` renders shared hover tooltips.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including

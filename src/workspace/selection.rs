@@ -3,7 +3,7 @@ use gpui::{Action, Context, CursorStyle, Div, Pixels, Point, Window, point, prel
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
 use crate::commands::{
-    ClearToTransparency, CropToSelection, InvertSelection, SelectAll, SelectNone,
+    ClearToTransparency, CropToSelection, InvertSelection, SelectAll, SelectNone, Tool,
 };
 use crate::document::CropRect;
 use crate::preview::{Dirty, PixelRect};
@@ -11,12 +11,6 @@ use crate::selection::{Selection, SelectionOp};
 
 const HANDLE_SLOP: f32 = 6.;
 const POLYGON_CLOSE_SLOP: f32 = 8.;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FreeMode {
-    Freehand,
-    Polygon,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MaskEdit {
@@ -486,12 +480,12 @@ impl Workspace {
             return;
         };
         let point = geometry.fraction(position);
-        match self.free_mode {
-            FreeMode::Freehand => {
+        match self.tool {
+            Tool::FreeSelect => {
                 self.free_points.clear();
                 self.free_op = selection_op(modifiers);
             }
-            FreeMode::Polygon => {
+            Tool::Polygon => {
                 if self.free_points.len() >= 3
                     && near_polygon_start(geometry.project(self.free_points[0]), position)
                 {
@@ -502,6 +496,7 @@ impl Workspace {
                     self.free_op = selection_op(modifiers);
                 }
             }
+            _ => return,
         }
         if self.free_points.last() != Some(&point) {
             self.free_points.push(point);
@@ -515,7 +510,7 @@ impl Workspace {
         scale: f32,
         cx: &mut Context<Self>,
     ) {
-        if self.free_mode != FreeMode::Freehand || self.free_points.is_empty() {
+        if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
         let Some(geometry) = self
@@ -537,7 +532,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.free_mode != FreeMode::Freehand || self.free_points.is_empty() {
+        if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
         self.extend_free(position, window.scale_factor(), cx);

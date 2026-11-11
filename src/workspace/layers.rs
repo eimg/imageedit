@@ -1,15 +1,17 @@
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
-    Action, AnyView, App, BorderStyle, Bounds, ClickEvent, Context, CursorStyle, Div, MouseButton,
+    Action, BorderStyle, Bounds, ClickEvent, Context, CursorStyle, Div, MouseButton,
     MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, RenderImage, SharedString, Stateful,
     Window, canvas, div, img, point, prelude::*, px, quad, rgb, size,
 };
 use image::RgbaImage;
 
 use super::Workspace;
+use super::tooltip::{label_view, tooltip};
 use super::view::{
-    ACCENT, BORDER, CANVAS, CHROME, DISABLED, HOVER, MUTED, SELECTED, TEXT, icon, section_label,
+    ACCENT, BORDER, CANVAS, CHECKER_DARK, CHECKER_LIGHT, CHROME, DISABLED, HOVER, MUTED, SELECTED,
+    TEXT, icon, section_label,
 };
 use crate::commands::{
     AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer, LayerOpacity,
@@ -71,25 +73,19 @@ impl Render for DraggedLayer {
     }
 }
 
-struct Tooltip(SharedString);
-
-impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        label_view(self.0.clone())
-    }
-}
-
-fn label_view(text: SharedString) -> Div {
+fn thumbnail_checker() -> Div {
     div()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(CHROME))
-        .text_color(rgb(TEXT))
-        .text_size(px(12.))
-        .child(text)
+        .absolute()
+        .size_full()
+        .flex()
+        .flex_wrap()
+        .children((0..16).map(|index| {
+            let light = (index % 4 + index / 4) % 2 == 1;
+            div()
+                .w(px(8.5))
+                .h(px(8.5))
+                .bg(rgb(if light { CHECKER_LIGHT } else { CHECKER_DARK }))
+        }))
 }
 
 pub(super) fn opacity_percent(opacity: u8) -> u32 {
@@ -396,12 +392,19 @@ impl Workspace {
                 )
                 .child(
                     div()
+                        .relative()
                         .size(px(34.))
                         .flex_shrink_0()
                         .rounded_sm()
-                        .bg(rgb(CANVAS))
+                        .overflow_hidden()
+                        .child(thumbnail_checker())
                         .when_some(thumbnail, |frame, image| {
-                            frame.child(img(image).size_full().object_fit(ObjectFit::Contain))
+                            frame.child(
+                                img(image)
+                                    .absolute()
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain),
+                            )
                         }),
                 )
                 .child(
@@ -852,10 +855,6 @@ pub(super) fn with_layer_opacity(pixels: &RgbaImage, opacity: u8) -> RgbaImage {
         pixel.0[3] = ((u16::from(pixel.0[3]) * u16::from(opacity) + 127) / 255) as u8;
     }
     image
-}
-
-fn tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| cx.new(|_| Tooltip(text.into())).into()
 }
 
 fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {

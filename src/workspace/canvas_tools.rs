@@ -1,4 +1,7 @@
-use gpui::{Bounds, Context, MouseButton, MouseUpEvent, Pixels, Point, Window, point, px, size};
+use gpui::{
+    Bounds, Context, KeyDownEvent, KeyUpEvent, MouseButton, MouseUpEvent, Pixels, Point, Window,
+    point, px, size,
+};
 
 use super::{CropDrag, Tab, Workspace};
 use crate::commands::Zoom;
@@ -125,6 +128,37 @@ impl Workspace {
         if event.button == MouseButton::Left && self.path_gesture.is_some() {
             self.finish_path(event.position, window.scale_factor(), window, cx);
         }
+    }
+
+    pub(super) fn begin_space_pan(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        if event.is_held
+            || key.key != "space"
+            || key.modifiers.modified()
+            || self.space_pan
+            || self.form.is_some()
+            || self.dialog_open
+            || self.text_draft.is_some()
+            || self.active_tab().is_none()
+        {
+            return;
+        }
+        self.space_pan = true;
+        cx.notify();
+    }
+
+    pub(super) fn end_space_pan(&mut self, event: &KeyUpEvent, cx: &mut Context<Self>) {
+        if event.keystroke.key != "space" || !self.space_pan {
+            return;
+        }
+        self.space_pan = false;
+        if self
+            .pan_drag
+            .is_some_and(|(button, _)| button == MouseButton::Left)
+        {
+            self.pan_drag = None;
+        }
+        cx.notify();
     }
 
     pub(super) fn pan_preview(&mut self, delta: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {
