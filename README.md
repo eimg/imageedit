@@ -60,9 +60,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   dashes move along the outline. The pointer becomes a resize arrow on a handle
   and a hand inside the box. Select All, Deselect, and Invert are in the Select
   menu and in the tool options.
-  **Free Select** (`F`) works two ways: drag for a freehand outline that closes
-  on release, or click to add vertices and close by clicking the start marker
-  or pressing Return. Escape cancels the draft. **Magic Wand**
+  **Free Select** (`F`) works two ways: drag to add a freehand segment, or click
+  to add a vertex. Releasing keeps the draft open as a checkpoint. Click the
+  start marker or press Return to close it, and Escape cancels the draft.
+  **Magic Wand**
   (`W`) selects a connected region. Its tolerance is shared with Bucket Fill:
   zero matches every channel exactly, and a higher value allows that much
   difference in the most changed channel. Hold Shift to add, Control to

@@ -249,3 +249,15 @@ outline. Remove the dedicated Polygon Select tool and its shortcut.
   click as a polygon vertex and a drag as a freehand outline. It removed the
   Polygon Select tool, its `L` shortcut, and its menu and toolbox entries.
   Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+
+## 19. Free Select checkpoints
+
+Releasing a freehand drag should not close the selection. Keep the draft open
+as a checkpoint so the user can add another freehand segment or click more
+vertices. Close only by clicking the start node or pressing Return.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. Releasing a Free Select
+  drag now leaves the draft open. The start node or Return closes it, and Escape
+  cancels it. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.

@@ -121,8 +121,9 @@ or oval, resizes it from its handles, moves it from inside, and clears it on a
 click outside. Oval Select has a Circle option. Rectangle Select has a corner
 radius control with minus and plus buttons, and the Width/Height fields show
 the current size. Inline numeric entry is paused. Free Select drags a freehand
-path or click-adds polygon vertices, and previews the next edge. The Magic Wand
-shares the bucket tolerance.
+segment or click-adds polygon vertices, and previews the next edge. Releasing a
+drag keeps the draft open as a checkpoint, and the start node or Return closes
+it. The Magic Wand shares the bucket tolerance.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control
 subtracts, and Shift-Control intersects. Over the box or ellipse the painted
 crosshair gives way to a hand or resize cursor. The outline is a dashed

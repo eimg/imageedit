@@ -559,16 +559,9 @@ impl Workspace {
             return;
         }
         self.extend_free(position, window.scale_factor(), cx);
-        let dragging = self.free_dragging;
         self.free_drag_origin = None;
         self.free_dragging = false;
-        if dragging {
-            if self.free_points.len() < 3 || self.active_tab().is_none_or(|tab| tab.busy()) {
-                self.cancel_free(cx);
-            } else {
-                self.close_free(window, cx);
-            }
-        }
+        cx.notify();
     }
 
     pub(super) fn close_free(&mut self, window: &mut Window, cx: &mut Context<Self>) {
