@@ -34,7 +34,12 @@ secondary to Choose Files, and have it open the same dialog.
 
 ## 2. Circle and oval selection, with a radius
 
-- Status: `open`
+- Status: `done`
+- 2026-11-11: Added Rect/Oval/Circle choices to the Select tool options. Circle
+  has a radius control for click placement, and dragging a circle updates the
+  radius. Ellipse selections keep their shape through handles, moves, resizes,
+  invert/combine, crop, fill/clear, and image transforms. Formatting, Clippy,
+  locked tests, and `./scripts/bundle-macos.sh` passed.
 
 Select (`R`) drags a rectangle only. Add circle and oval selection. Put a
 radius control in the Select tool options so a circle can be sized there as

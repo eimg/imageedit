@@ -7,7 +7,7 @@ use crate::commands::{
 };
 use crate::document::CropRect;
 use crate::preview::{Dirty, PixelRect};
-use crate::selection::{Selection, SelectionOp};
+use crate::selection::{Selection, SelectionOp, SelectionShape};
 
 const HANDLE_SLOP: f32 = 6.;
 const POLYGON_CLOSE_SLOP: f32 = 8.;
@@ -153,8 +153,9 @@ impl Workspace {
                 if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
                     None
                 } else {
+                    let shape = self.selection_shape;
                     pointer.map(|end| {
-                        Selection::rectangle(start, (end.0 as u32, end.1 as u32), width, height)
+                        drag_selection(shape, start, (end.0 as u32, end.1 as u32), width, height)
                     })
                 }
             }
@@ -193,23 +194,51 @@ impl Workspace {
     pub(super) fn finish_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gesture = self.selection_drag.take();
         let preview = self.selection_preview.take();
+        let (width, height) = match self.active_tab() {
+            Some(tab) => tab.document.content.size(),
+            None => return,
+        };
+        let shape_mode = self.selection_shape;
+        if shape_mode == SelectionShape::Circle
+            && let Some(Selection::Ellipse(ellipse)) = &preview
+        {
+            self.selection_radius = (ellipse.rect().width.max(ellipse.rect().height) / 2).max(1);
+        }
         match (gesture, preview) {
-            (Some(SelectionGesture::Create { op, .. }), Some(shape)) => {
+            (
+                Some(SelectionGesture::Create {
+                    op,
+                    anchor: Some(_),
+                    ..
+                }),
+                Some(shape),
+            ) => {
                 self.update_selection(
                     move |current, (width, height)| current.combine(shape, op, width, height),
                     window,
                     cx,
                 );
             }
-            // A click outside a replace selection deselects.
             (
                 Some(SelectionGesture::Create {
-                    op: SelectionOp::Replace,
+                    op,
+                    anchor: Some(start),
                     ..
                 }),
                 None,
             ) => {
-                self.select_none(window, cx);
+                if shape_mode == SelectionShape::Circle {
+                    let shape = Selection::circle_at(start, self.selection_radius, width, height);
+                    self.update_selection(
+                        move |current, (width, height)| current.combine(shape, op, width, height),
+                        window,
+                        cx,
+                    );
+                } else if op == SelectionOp::Replace {
+                    self.select_none(window, cx);
+                } else {
+                    cx.notify();
+                }
             }
             (Some(_), Some(selection)) => self.commit_selection(selection, window, cx),
             (Some(_), None) => cx.notify(),
@@ -659,6 +688,24 @@ impl Workspace {
             cx,
         );
     }
+
+    pub(super) fn set_selection_shape(&mut self, shape: SelectionShape, cx: &mut Context<Self>) {
+        self.selection_shape = shape;
+        cx.notify();
+    }
+
+    pub(super) fn nudge_selection_radius(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let max = self
+            .active_document()
+            .map_or(1, |document| {
+                let (width, height) = document.content.size();
+                width.max(height)
+            })
+            .min(i32::MAX as u32)
+            .max(1) as i32;
+        self.selection_radius = (self.selection_radius as i32 + delta).clamp(1, max) as u32;
+        cx.notify();
+    }
 }
 
 pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
@@ -667,6 +714,20 @@ pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
         (true, false) => SelectionOp::Add,
         (false, true) => SelectionOp::Subtract,
         (false, false) => SelectionOp::Replace,
+    }
+}
+
+fn drag_selection(
+    shape: SelectionShape,
+    start: (u32, u32),
+    end: (u32, u32),
+    width: u32,
+    height: u32,
+) -> Selection {
+    match shape {
+        SelectionShape::Rectangle => Selection::rectangle(start, end, width, height),
+        SelectionShape::Ellipse => Selection::ellipse(start, end, width, height),
+        SelectionShape::Circle => Selection::circle(start, end, width, height),
     }
 }
 
@@ -679,6 +740,9 @@ pub(super) fn adjustable_rect(selection: Selection) -> Option<PixelRect> {
     match selection {
         Selection::Rect(rect) | Selection::Inverse(rect) if rect.width > 0 && rect.height > 0 => {
             Some(rect)
+        }
+        Selection::Ellipse(ellipse) if ellipse.rect().width > 0 && ellipse.rect().height > 0 => {
+            Some(ellipse.rect())
         }
         _ => None,
     }
@@ -699,6 +763,7 @@ fn placed_selection(previous: Selection, rect: PixelRect, width: u32, height: u3
                 Selection::Inverse(rect)
             }
         }
+        Selection::Ellipse(_) => Selection::ellipse_rect(rect, width, height),
         _ => {
             if covers {
                 Selection::Full
@@ -928,6 +993,37 @@ mod tests {
         assert_eq!(
             placed_selection(Selection::Rect(hole), PixelRect::new(0, 0, 8, 8), 8, 8),
             Selection::Full
+        );
+    }
+
+    #[test]
+    fn ellipse_keeps_its_shape_when_moved_and_resized() {
+        let ellipse = Selection::ellipse_rect(PixelRect::new(1, 1, 4, 4), 10, 10);
+        assert_eq!(
+            adjustable_rect(ellipse.clone()),
+            Some(PixelRect::new(1, 1, 4, 4))
+        );
+        assert_eq!(
+            placed_selection(ellipse, PixelRect::new(2, 2, 4, 4), 10, 10),
+            Selection::ellipse_rect(PixelRect::new(2, 2, 4, 4), 10, 10)
+        );
+    }
+
+    #[test]
+    fn selection_shapes_follow_the_chosen_mode() {
+        let start = (1, 2);
+        let end = (5, 3);
+        assert_eq!(
+            drag_selection(SelectionShape::Rectangle, start, end, 10, 10),
+            Selection::rectangle(start, end, 10, 10)
+        );
+        assert_eq!(
+            drag_selection(SelectionShape::Ellipse, start, end, 10, 10),
+            Selection::ellipse(start, end, 10, 10)
+        );
+        assert_eq!(
+            drag_selection(SelectionShape::Circle, start, end, 10, 10),
+            Selection::circle(start, end, 10, 10)
         );
     }
 

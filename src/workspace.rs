@@ -29,7 +29,7 @@ use crate::document::{
     build_level, file_name,
 };
 use crate::preview::{self, Dirty};
-use crate::selection::Selection;
+use crate::selection::{Selection, SelectionShape};
 
 use self::{
     cursor::CanvasCursor,
@@ -108,6 +108,8 @@ pub struct Workspace {
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
+    selection_shape: SelectionShape,
+    selection_radius: u32,
     tolerance: u8,
     free_points: Vec<Point<f32>>,
     free_op: crate::selection::SelectionOp,
@@ -255,6 +257,8 @@ impl Workspace {
             crop: None,
             selection_drag: None,
             selection_preview: None,
+            selection_shape: SelectionShape::Rectangle,
+            selection_radius: 64,
             tolerance: 0,
             free_points: Vec::new(),
             free_op: crate::selection::SelectionOp::Replace,

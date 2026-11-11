@@ -17,9 +17,12 @@ overall editing experience.
 
 ImageEdit supports layered raster editing. The empty workspace can open a
 file or create an image. Crop that image,
-sample or set swatches, and fill connected regions on the active layer. Rectangle, freehand, polygon, and wand selections limit fill and Clear to
-Transparency, and Crop to Selection uses the selection bounds. Shift adds to
-the selection, Control subtracts, and Shift-Control intersects. The wand and
+sample or set swatches, and fill connected regions on the active layer.
+Rectangle, oval, circle, freehand, polygon, and wand selections limit fill and
+Clear to Transparency, and Crop to Selection uses the selection bounds. The
+Select tool chooses rectangle, oval, or circle; Circle has a radius control
+for a click-placed circle and drags also set the radius. Shift adds to the
+selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and the Layer menu can center it,
 fit it to the canvas, or crop it to its opaque pixels. Image → Crop to Content
@@ -109,15 +112,17 @@ document is a single plain layer without paths or editable text.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
-a rectangle, the inverse of a rectangle, or a canvas-bounded coverage mask.
-`src/workspace/selection.rs` drags the rectangle, resizes it from its handles,
-moves it from inside, and clears it on a click outside. Free Select previews
-the freehand path. Polygon Select previews the next edge. The Magic Wand shares the
-bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
-Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
-painted crosshair gives way to a hand or resize cursor. The outline is a
-dashed contour. Stroke polylines follow that contour, including a hole.
-Mask transforms avoid per-pixel coordinate lists; morphology uses running sums.
+a rectangle, an ellipse, the inverse of a rectangle, or a canvas-bounded
+coverage mask. `src/workspace/selection.rs` drags the rectangle, oval, or
+circle, resizes it from its handles, moves it from inside, and clears it on a
+click outside. A circle shape has a radius control; a click places that circle
+and a drag sets its radius. Free Select previews the freehand path. Polygon
+Select previews the next edge. The Magic Wand shares the bucket tolerance.
+Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control
+subtracts, and Shift-Control intersects. Over the box or ellipse the painted
+crosshair gives way to a hand or resize cursor. The outline is a dashed
+contour. Stroke polylines follow that contour, including a hole. Mask
+transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
   is stored in the version 5 project.

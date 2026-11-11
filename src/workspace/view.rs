@@ -24,6 +24,7 @@ use crate::commands::{
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
+use crate::selection::SelectionShape;
 use crate::transform::{Mirror, Resample};
 
 use super::canvas_tools::PreviewGeometry;
@@ -1182,6 +1183,36 @@ impl Workspace {
                                     .line_height(px(19.))
                                     .child(tool.description),
                             )
+                            .when(self.tool == Tool::Select, |panel| {
+                                let shape = self.selection_shape;
+                                panel
+                                    .child(div().flex().gap_2().children([
+                                        selection_shape_button(
+                                            "Rect",
+                                            shape == SelectionShape::Rectangle,
+                                            SelectionShape::Rectangle,
+                                            cx,
+                                        ),
+                                        selection_shape_button(
+                                            "Oval",
+                                            shape == SelectionShape::Ellipse,
+                                            SelectionShape::Ellipse,
+                                            cx,
+                                        ),
+                                        selection_shape_button(
+                                            "Circle",
+                                            shape == SelectionShape::Circle,
+                                            SelectionShape::Circle,
+                                            cx,
+                                        ),
+                                    ]))
+                                    .when(shape == SelectionShape::Circle, |panel| {
+                                        panel.child(selection_radius_row(
+                                            self.selection_radius,
+                                            cx,
+                                        ))
+                                    })
+                            })
                             .when(
                                 matches!(
                                     self.tool,
@@ -1632,6 +1663,10 @@ impl Workspace {
                         crate::selection::Selection::Empty => "  ·  Empty selection".to_owned(),
                         crate::selection::Selection::Full => "  ·  All pixels".to_owned(),
                         crate::selection::Selection::Rect(rect) => {
+                            format!("  ·  Selection {} × {}", rect.width, rect.height)
+                        }
+                        crate::selection::Selection::Ellipse(ellipse) => {
+                            let rect = ellipse.rect();
                             format!("  ·  Selection {} × {}", rect.width, rect.height)
                         }
                         crate::selection::Selection::Inverse(_) => {
@@ -2385,6 +2420,33 @@ fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
                 this.tolerance = this.tolerance.saturating_add(1);
                 cx.notify();
             })),
+        )
+}
+
+fn selection_shape_button(
+    label: &'static str,
+    selected: bool,
+    shape: SelectionShape,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected)
+        .on_click(cx.listener(move |this, _, _, cx| this.set_selection_shape(shape, cx)))
+}
+
+fn selection_radius_row(value: u32, cx: &Context<super::Workspace>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child("Radius")
+        .child(
+            form_button("−", false)
+                .on_click(cx.listener(|this, _, _, cx| this.nudge_selection_radius(-1, cx))),
+        )
+        .child(value.to_string())
+        .child(
+            form_button("+", false)
+                .on_click(cx.listener(|this, _, _, cx| this.nudge_selection_radius(1, cx))),
         )
 }
 

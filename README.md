@@ -48,11 +48,14 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - Drag a rectangle with **Crop** (`C`) and press Return to apply it or Escape to
   cancel. **Bucket Fill** (`B`) uses the foreground color on connected pixels within
   the shared tolerance. **Color Picker** (`K`) samples the image at full resolution.
-  **Select** (`R`) drags a rectangle. The outline is a dashed box with handles:
+  **Select** (`R`) drags a rectangle, oval, or circle; choose the shape in the
+  Select tool options. The outline is a dashed box or ellipse with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
-  deselect. The dashes move along the outline. The pointer becomes a resize
-  arrow on a handle and a hand inside the box. Select All, Deselect, and Invert
-  are in the Select menu and in the Select tool options.
+  deselect. In Circle mode the radius control sizes a circle placed with a
+  click, and dragging a circle updates that radius. The dashes move along the
+  outline. The pointer becomes a resize arrow on a handle and a hand inside the
+  box. Select All, Deselect, and Invert are in the Select menu and in the
+  Select tool options.
   **Free Select** (`F`) drags a freehand outline and closes it on release.
   **Polygon Select** (`L`) clicks vertices, then closes by clicking the start
   marker or pressing Return. Escape cancels either draft. **Magic Wand**

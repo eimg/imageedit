@@ -10,7 +10,7 @@ use crate::commands::{
     CanvasSize, ImageAdjust, LayerAdjust, ScaleImage, ScaleLayer, SetGrayscale, SetRgb, Tool,
 };
 use crate::document::{self, LayerId};
-use crate::preview::Dirty;
+use crate::preview::{Dirty, PixelRect};
 use crate::selection::Selection;
 use crate::transform::{self, ColorMode, Mirror, Resample, Turn, Warp, WarpError};
 
@@ -137,6 +137,11 @@ impl Workspace {
                             content.size().0,
                             content.size().1,
                         ),
+                        Selection::Ellipse(ellipse) => Selection::ellipse_rect(
+                            transform::scale_rect(ellipse.rect(), old, content.size()),
+                            content.size().0,
+                            content.size().1,
+                        ),
                         other => other,
                     };
                     Dirty::Canvas
@@ -210,17 +215,23 @@ fn map_image_selection(
             }
         };
     }
+    if let Selection::Ellipse(ellipse) = &selection {
+        return Selection::ellipse_rect(map_image_rect(ellipse.rect(), old, action), new.0, new.1);
+    }
     let (Selection::Rect(rect) | Selection::Inverse(rect)) = selection else {
         return selection;
     };
-    let mapped = match action {
+    selection.moved_box(map_image_rect(rect, old, action), new.0, new.1)
+}
+
+fn map_image_rect(rect: PixelRect, old: (u32, u32), action: ImageAdjust) -> PixelRect {
+    match action {
         ImageAdjust::RotateLeft => transform::turn_rect(rect, old, Turn::Left),
         ImageAdjust::RotateRight => transform::turn_rect(rect, old, Turn::Right),
         ImageAdjust::RotateHalf => transform::turn_rect(rect, old, Turn::Half),
         ImageAdjust::FlipHorizontal => transform::mirror_rect(rect, old, Mirror::Horizontal),
         ImageAdjust::FlipVertical => transform::mirror_rect(rect, old, Mirror::Vertical),
-    };
-    selection.moved_box(mapped, new.0, new.1)
+    }
 }
 
 fn image_turn(action: ImageAdjust) -> Turn {
