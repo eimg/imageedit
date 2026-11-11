@@ -2154,4 +2154,68 @@ mod tests {
             [10, 20, 30, 255]
         );
     }
+
+    #[test]
+    fn a_levels_lut_follows_an_offset_mask_and_stays_gray() {
+        use crate::adjustments::{LevelStops, Levels, MapChannel};
+
+        let mut content = DocumentContent::single_layer(
+            "Layer".into(),
+            RgbaImage::from_pixel(3, 1, Rgba([10, 20, 30, 255])),
+        );
+        content.layers[0].offset = (2, 1);
+        content.width = 6;
+        content.height = 3;
+        let id = content.top_layer_id();
+        let selection = Selection::Rect(PixelRect::new(3, 1, 1, 1));
+        let invert = Levels::default().set_stops(
+            MapChannel::Value,
+            LevelStops::IDENTITY
+                .set_output_black(255)
+                .set_output_white(0),
+        );
+        assert!(matches!(
+            content.apply_adjustment(
+                id,
+                crate::adjustments::Adjustment::Levels(Levels::default()),
+                &selection
+            ),
+            Dirty::None
+        ));
+        assert!(matches!(
+            content.apply_adjustment(
+                id,
+                crate::adjustments::Adjustment::Levels(invert),
+                &selection
+            ),
+            Dirty::Region(PixelRect {
+                x: 3,
+                y: 1,
+                width: 1,
+                height: 1
+            })
+        ));
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(1, 0).0,
+            [245, 235, 225, 255]
+        );
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(0, 0).0,
+            [10, 20, 30, 255]
+        );
+        content.mode = crate::transform::ColorMode::Grayscale;
+        content.apply_adjustment(
+            id,
+            crate::adjustments::Adjustment::Levels(invert),
+            &selection,
+        );
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(1, 0).0,
+            [18, 18, 18, 255]
+        );
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(2, 0).0,
+            [10, 20, 30, 255]
+        );
+    }
 }

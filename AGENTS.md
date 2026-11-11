@@ -27,7 +27,9 @@ Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
 dialog and apply inside the selection. The layer's alpha stays in place. Cancel
 leaves the pixels unchanged, and identity settings do not create a history
-entry. The Image menu
+entry. Color Balance, Levels, and Curves use that dialog. Levels and Curves
+share a per-channel lookup table, and their histogram skips transparent pixels.
+The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
@@ -58,9 +60,10 @@ document is a single plain layer.
   preview. Release commits their dirty regions in one undo step.
   `src/workspace/gradient_ui.rs` previews a gradient until Apply.
 - `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
-  lightness, and it desaturates or inverts. `src/workspace/adjust_ui.rs` shows
-  the reduced preview for the latest slider position. Apply writes the active
-  layer in the background.
+  lightness, and it desaturates or inverts. It also balances color and maps
+  levels and curves through a 256-entry lookup table per channel.
+  `src/workspace/adjust_ui.rs` shows the reduced preview for the latest slider
+  position. Apply writes the active layer in the background.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,

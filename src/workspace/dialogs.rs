@@ -2,8 +2,8 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Window, canvas, div, fill, img,
-    point, prelude::*, px, rgb, rgba, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Point, Window,
+    canvas, div, fill, img, point, prelude::*, px, rgb, rgba, size,
 };
 
 use super::Workspace;
@@ -11,7 +11,10 @@ use super::adjust_ui::AdjustKind;
 use super::color::{ColorControl, Hsv, control};
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
-use crate::adjustments::Adjustment;
+use crate::adjustments::{
+    Adjustment, BalanceRange, ColorBalance, Curve, Curves, GAMMA_MAX, GAMMA_MIN, GAMMA_ONE,
+    Histogram, Levels, MapChannel,
+};
 use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
@@ -77,6 +80,12 @@ enum FormKind {
         hue: i16,
         saturation: i16,
         lightness: i16,
+        balance_range: BalanceRange,
+        balance: ColorBalance,
+        map_channel: MapChannel,
+        levels: Levels,
+        curves: Curves,
+        curve_drag: Option<u8>,
     },
 }
 
@@ -463,6 +472,9 @@ impl Workspace {
             },
             AdjustKind::Desaturate => Adjustment::Desaturate,
             AdjustKind::Invert => Adjustment::Invert,
+            AdjustKind::ColorBalance => Adjustment::ColorBalance(ColorBalance::default()),
+            AdjustKind::Levels => Adjustment::Levels(Levels::default()),
+            AdjustKind::Curves => Adjustment::Curves(Curves::default()),
         };
         self.show_form(
             FormKind::Adjustment {
@@ -472,11 +484,20 @@ impl Workspace {
                 hue: 0,
                 saturation: 0,
                 lightness: 0,
+                balance_range: BalanceRange::Midtones,
+                balance: ColorBalance::default(),
+                map_channel: MapChannel::Value,
+                levels: Levels::default(),
+                curves: Curves::default(),
+                curve_drag: None,
             },
             window,
             cx,
         );
         self.set_adjustment(adjustment, window, cx);
+        if matches!(operation, AdjustKind::Levels | AdjustKind::Curves) {
+            self.start_adjustment_histogram(window, cx);
+        }
     }
 
     fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -796,8 +817,33 @@ impl Workspace {
     fn drag_adjust_slider(
         &mut self,
         slider: AdjustSlider,
-        bounds: Bounds<Pixels>,
-        position: Point<Pixels>,
+        range: (i16, i16),
+        at: (Bounds<Pixels>, Point<Pixels>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = slider_amount(at.0, at.1, range.0, range.1);
+        match slider {
+            AdjustSlider::Balance(index) => self.drag_balance_slider(index, value, window, cx),
+            AdjustSlider::InputBlack
+            | AdjustSlider::InputWhite
+            | AdjustSlider::Gamma
+            | AdjustSlider::OutputBlack
+            | AdjustSlider::OutputWhite => self.drag_level_slider(slider, value, window, cx),
+            AdjustSlider::Brightness
+            | AdjustSlider::Contrast
+            | AdjustSlider::Hue
+            | AdjustSlider::Saturation
+            | AdjustSlider::Lightness => {
+                self.drag_simple_slider(slider, value, window, cx);
+            }
+        }
+    }
+
+    fn drag_simple_slider(
+        &mut self,
+        slider: AdjustSlider,
+        value: i16,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -819,14 +865,13 @@ impl Workspace {
         };
         let operation = *operation;
         let mut values = (*brightness, *contrast, *hue, *saturation, *lightness);
-        let (min, max) = slider.range();
-        let value = slider_amount(bounds, position, min, max);
         match slider {
             AdjustSlider::Brightness => values.0 = value,
             AdjustSlider::Contrast => values.1 = value,
             AdjustSlider::Hue => values.2 = value,
             AdjustSlider::Saturation => values.3 = value,
             AdjustSlider::Lightness => values.4 = value,
+            _ => return,
         }
         let adjustment = match operation {
             AdjustKind::BrightnessContrast => Adjustment::BrightnessContrast {
@@ -838,7 +883,7 @@ impl Workspace {
                 saturation: values.3,
                 lightness: values.4,
             },
-            AdjustKind::Desaturate | AdjustKind::Invert => return,
+            _ => return,
         };
         if let Some(Form {
             kind:
@@ -860,10 +905,248 @@ impl Workspace {
             *lightness = values.4;
         }
         self.set_adjustment(adjustment, window, cx);
+        cx.notify();
+    }
+
+    fn drag_balance_slider(
+        &mut self,
+        index: usize,
+        value: i16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    balance_range,
+                    balance,
+                    ..
+                },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let balance = balance.set_shift(*balance_range, index, value);
+        if let Some(Form {
+            kind: FormKind::Adjustment {
+                balance: stored, ..
+            },
+            ..
+        }) = &mut self.form
+        {
+            *stored = balance;
+        }
+        self.set_adjustment(Adjustment::ColorBalance(balance), window, cx);
+        cx.notify();
+    }
+
+    fn drag_level_slider(
+        &mut self,
+        slider: AdjustSlider,
+        value: i16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    map_channel,
+                    levels,
+                    ..
+                },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let channel = *map_channel;
+        let mut stops = levels.stops(channel);
+        match slider {
+            AdjustSlider::InputBlack => stops = stops.set_input_black(value.clamp(0, 255) as u8),
+            AdjustSlider::InputWhite => stops = stops.set_input_white(value.clamp(0, 255) as u8),
+            AdjustSlider::Gamma => {
+                stops = stops.set_gamma(u16::try_from(value).unwrap_or(GAMMA_ONE));
+            }
+            AdjustSlider::OutputBlack => stops = stops.set_output_black(value.clamp(0, 255) as u8),
+            AdjustSlider::OutputWhite => stops = stops.set_output_white(value.clamp(0, 255) as u8),
+            _ => return,
+        }
+        let levels = levels.set_stops(channel, stops);
+        if let Some(Form {
+            kind: FormKind::Adjustment { levels: stored, .. },
+            ..
+        }) = &mut self.form
+        {
+            *stored = levels;
+        }
+        self.set_adjustment(Adjustment::Levels(levels), window, cx);
+        cx.notify();
+    }
+
+    fn set_balance_range(&mut self, range: BalanceRange, cx: &mut Context<Self>) {
+        if let Some(Form {
+            kind: FormKind::Adjustment { balance_range, .. },
+            ..
+        }) = &mut self.form
+        {
+            *balance_range = range;
+        }
+        cx.notify();
+    }
+
+    fn toggle_luminosity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Form {
+            kind: FormKind::Adjustment { balance, .. },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let balance = balance.set_preserve_luminosity(!balance.preserve_luminosity);
+        if let Some(Form {
+            kind: FormKind::Adjustment {
+                balance: stored, ..
+            },
+            ..
+        }) = &mut self.form
+        {
+            *stored = balance;
+        }
+        self.set_adjustment(Adjustment::ColorBalance(balance), window, cx);
+        cx.notify();
+    }
+
+    fn set_map_channel(&mut self, channel: MapChannel, cx: &mut Context<Self>) {
+        if let Some(Form {
+            kind: FormKind::Adjustment { map_channel, .. },
+            ..
+        }) = &mut self.form
+        {
+            *map_channel = channel;
+        }
+        cx.notify();
+    }
+
+    fn edit_curve(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        button: MouseButton,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    map_channel,
+                    curves,
+                    ..
+                },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let channel = *map_channel;
+        let curve = curves.curve(channel);
+        let (x, y) = curve_coords(bounds, position);
+        if let Some(index) = hit_curve_point(bounds, position, curve) {
+            if button == MouseButton::Right {
+                self.store_curve(channel, curve.remove_point(index), None, window, cx);
+            } else {
+                self.store_curve(channel, curve, Some(index as u8), window, cx);
+            }
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
+        let Some(curve) = curve.try_add(x, y) else {
+            return;
+        };
+        let index = curve
+            .points()
+            .iter()
+            .position(|point| point.0 == x)
+            .unwrap_or(0);
+        self.store_curve(channel, curve, Some(index as u8), window, cx);
+    }
+
+    fn drag_curve_point(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    map_channel,
+                    curves,
+                    curve_drag: Some(index),
+                    ..
+                },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let channel = *map_channel;
+        let index = usize::from(*index);
+        let (x, y) = curve_coords(bounds, position);
+        let curve = curves.curve(channel).move_point(index, x, y);
+        self.store_curve(channel, curve, Some(index as u8), window, cx);
+    }
+
+    fn end_curve_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(Form {
+            kind: FormKind::Adjustment { curve_drag, .. },
+            ..
+        }) = &mut self.form
+        {
+            *curve_drag = None;
+        }
+        cx.notify();
+    }
+
+    fn store_curve(
+        &mut self,
+        channel: MapChannel,
+        curve: Curve,
+        drag: Option<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind: FormKind::Adjustment { curves, .. },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let curves = curves.set_curve(channel, curve);
+        if let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    curves: stored,
+                    curve_drag,
+                    ..
+                },
+            ..
+        }) = &mut self.form
+        {
+            *stored = curves;
+            *curve_drag = drag;
+        }
+        self.set_adjustment(Adjustment::Curves(curves), window, cx);
+        cx.notify();
     }
 
     pub(super) fn form_overlay(&self, cx: &Context<Self>) -> Option<Div> {
         let adjustment_preview = self.adjustment_preview.clone();
+        let adjustment_histogram = self.adjustment_histogram;
         let form = self.form.as_ref()?;
         let (title, accept, content) =
             match &form.kind {
@@ -1167,12 +1450,21 @@ impl Workspace {
                     hue,
                     saturation,
                     lightness,
+                    balance_range,
+                    balance,
+                    map_channel,
+                    levels,
+                    curves,
+                    ..
                 } => {
                     let title = match operation {
                         AdjustKind::BrightnessContrast => "Brightness & Contrast",
                         AdjustKind::HueSaturation => "Hue & Saturation",
                         AdjustKind::Desaturate => "Desaturate",
                         AdjustKind::Invert => "Invert",
+                        AdjustKind::ColorBalance => "Color Balance",
+                        AdjustKind::Levels => "Levels",
+                        AdjustKind::Curves => "Curves",
                     };
                     let mut body = div().flex().flex_col().gap_3().child(match adjustment_preview {
                         Some(image) => div()
@@ -1187,6 +1479,7 @@ impl Workspace {
                         AdjustKind::BrightnessContrast => body
                             .child(adjust_slider(
                                 "Brightness",
+                                brightness.to_string(),
                                 *brightness,
                                 -100,
                                 100,
@@ -1195,6 +1488,7 @@ impl Workspace {
                             ))
                             .child(adjust_slider(
                                 "Contrast",
+                                contrast.to_string(),
                                 *contrast,
                                 -100,
                                 100,
@@ -1204,6 +1498,7 @@ impl Workspace {
                         AdjustKind::HueSaturation => body
                             .child(adjust_slider(
                                 "Hue",
+                                hue.to_string(),
                                 *hue,
                                 -180,
                                 180,
@@ -1212,6 +1507,7 @@ impl Workspace {
                             ))
                             .child(adjust_slider(
                                 "Saturation",
+                                saturation.to_string(),
                                 *saturation,
                                 -100,
                                 100,
@@ -1220,6 +1516,7 @@ impl Workspace {
                             ))
                             .child(adjust_slider(
                                 "Lightness",
+                                lightness.to_string(),
                                 *lightness,
                                 -100,
                                 100,
@@ -1231,6 +1528,15 @@ impl Workspace {
                         }
                         AdjustKind::Invert => {
                             body.child("Inverts the active layer's colors and keeps its alpha.")
+                        }
+                        AdjustKind::ColorBalance => {
+                            color_balance_controls(body, *balance, *balance_range, cx)
+                        }
+                        AdjustKind::Levels => {
+                            levels_controls(body, *levels, *map_channel, adjustment_histogram, cx)
+                        }
+                        AdjustKind::Curves => {
+                            curves_controls(body, *curves, *map_channel, adjustment_histogram, cx)
                         }
                     };
                     (title, "Apply", body)
@@ -1439,39 +1745,33 @@ enum AdjustSlider {
     Hue,
     Saturation,
     Lightness,
-}
-
-impl AdjustSlider {
-    fn range(self) -> (i16, i16) {
-        match self {
-            Self::Hue => (-180, 180),
-            Self::Brightness | Self::Contrast | Self::Saturation | Self::Lightness => (-100, 100),
-        }
-    }
+    Balance(usize),
+    InputBlack,
+    InputWhite,
+    Gamma,
+    OutputBlack,
+    OutputWhite,
 }
 
 fn adjust_slider(
     label: &'static str,
+    readout: String,
     value: i16,
     min: i16,
     max: i16,
     slider: AdjustSlider,
     cx: &Context<Workspace>,
 ) -> Div {
-    let fraction = f32::from(value - min) / f32::from(max - min);
+    let fraction = f32::from(value - min) / f32::from(max - min).max(1.);
     let bounds = Rc::new(Cell::new(Bounds::default()));
     let (layout, down, moved) = (bounds.clone(), bounds.clone(), bounds);
+    let (down_slider, move_slider) = (slider, slider);
+    let (down_min, down_max, move_min, move_max) = (min, max, min, max);
     div()
         .flex()
         .flex_col()
         .gap_1()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .child(label)
-                .child(value.to_string()),
-        )
+        .child(div().flex().justify_between().child(label).child(readout))
         .child(
             div()
                 .id(label)
@@ -1481,16 +1781,22 @@ fn adjust_slider(
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        this.drag_adjust_slider(slider, down.get(), event.position, window, cx);
+                        this.drag_adjust_slider(
+                            down_slider,
+                            (down_min, down_max),
+                            (down.get(), event.position),
+                            window,
+                            cx,
+                        );
                     }),
                 )
                 .on_mouse_move(
                     cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
                         if event.dragging() {
                             this.drag_adjust_slider(
-                                slider,
-                                moved.get(),
-                                event.position,
+                                move_slider,
+                                (move_min, move_max),
+                                (moved.get(), event.position),
                                 window,
                                 cx,
                             );
@@ -1525,4 +1831,326 @@ fn slider_amount(bounds: Bounds<Pixels>, position: Point<Pixels>, min: i16, max:
     let t = ((f32::from(position.x) - f32::from(bounds.left())) / width).clamp(0., 1.);
     let value = f32::from(min) + t * f32::from(max - min);
     value.round().clamp(f32::from(min), f32::from(max)) as i16
+}
+
+fn color_balance_controls(
+    body: Div,
+    balance: ColorBalance,
+    range: BalanceRange,
+    cx: &Context<Workspace>,
+) -> Div {
+    let shift = balance.shift(range);
+    body.child(
+        div()
+            .flex()
+            .gap_2()
+            .child(balance_range_button(
+                "Shadows",
+                BalanceRange::Shadows,
+                range,
+                cx,
+            ))
+            .child(balance_range_button(
+                "Midtones",
+                BalanceRange::Midtones,
+                range,
+                cx,
+            ))
+            .child(balance_range_button(
+                "Highlights",
+                BalanceRange::Highlights,
+                range,
+                cx,
+            )),
+    )
+    .child(adjust_slider(
+        "Cyan–Red",
+        shift[0].to_string(),
+        shift[0],
+        -100,
+        100,
+        AdjustSlider::Balance(0),
+        cx,
+    ))
+    .child(adjust_slider(
+        "Magenta–Green",
+        shift[1].to_string(),
+        shift[1],
+        -100,
+        100,
+        AdjustSlider::Balance(1),
+        cx,
+    ))
+    .child(adjust_slider(
+        "Yellow–Blue",
+        shift[2].to_string(),
+        shift[2],
+        -100,
+        100,
+        AdjustSlider::Balance(2),
+        cx,
+    ))
+    .child(
+        form_button("Preserve luminosity", balance.preserve_luminosity)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_luminosity(window, cx))),
+    )
+}
+
+fn balance_range_button(
+    label: &'static str,
+    range: BalanceRange,
+    current: BalanceRange,
+    cx: &Context<Workspace>,
+) -> impl IntoElement {
+    form_button(label, current == range).on_click(cx.listener(move |this, _, _, cx| {
+        this.set_balance_range(range, cx);
+    }))
+}
+
+fn levels_controls(
+    body: Div,
+    levels: Levels,
+    channel: MapChannel,
+    histogram: Option<Histogram>,
+    cx: &Context<Workspace>,
+) -> Div {
+    let stops = levels.stops(channel);
+    let gamma = format!("{:.2}", f32::from(stops.gamma) / f32::from(GAMMA_ONE));
+    body.child(histogram_caption(histogram))
+        .child(channel_row(channel, cx))
+        .child(histogram_plot(histogram, channel))
+        .child(adjust_slider(
+            "Input black",
+            stops.input_black.to_string(),
+            i16::from(stops.input_black),
+            0,
+            i16::from(stops.input_white.saturating_sub(1)),
+            AdjustSlider::InputBlack,
+            cx,
+        ))
+        .child(adjust_slider(
+            "Gamma",
+            gamma,
+            i16::try_from(stops.gamma).unwrap_or(GAMMA_ONE as i16),
+            GAMMA_MIN as i16,
+            GAMMA_MAX as i16,
+            AdjustSlider::Gamma,
+            cx,
+        ))
+        .child(adjust_slider(
+            "Input white",
+            stops.input_white.to_string(),
+            i16::from(stops.input_white),
+            i16::from(stops.input_black.saturating_add(1)),
+            255,
+            AdjustSlider::InputWhite,
+            cx,
+        ))
+        .child(adjust_slider(
+            "Output black",
+            stops.output_black.to_string(),
+            i16::from(stops.output_black),
+            0,
+            255,
+            AdjustSlider::OutputBlack,
+            cx,
+        ))
+        .child(adjust_slider(
+            "Output white",
+            stops.output_white.to_string(),
+            i16::from(stops.output_white),
+            0,
+            255,
+            AdjustSlider::OutputWhite,
+            cx,
+        ))
+}
+
+fn curves_controls(
+    body: Div,
+    curves: Curves,
+    channel: MapChannel,
+    histogram: Option<Histogram>,
+    cx: &Context<Workspace>,
+) -> Div {
+    body.child(histogram_caption(histogram))
+        .child(channel_row(channel, cx))
+        .child(curve_plot(curves.curve(channel), histogram, channel, cx))
+}
+
+fn channel_row(channel: MapChannel, cx: &Context<Workspace>) -> Div {
+    div()
+        .flex()
+        .gap_2()
+        .child(map_channel_button("Value", MapChannel::Value, channel, cx))
+        .child(map_channel_button("Red", MapChannel::Red, channel, cx))
+        .child(map_channel_button("Green", MapChannel::Green, channel, cx))
+        .child(map_channel_button("Blue", MapChannel::Blue, channel, cx))
+}
+
+fn map_channel_button(
+    label: &'static str,
+    channel: MapChannel,
+    current: MapChannel,
+    cx: &Context<Workspace>,
+) -> impl IntoElement {
+    form_button(label, current == channel).on_click(cx.listener(move |this, _, _, cx| {
+        this.set_map_channel(channel, cx);
+    }))
+}
+
+fn histogram_caption(histogram: Option<Histogram>) -> &'static str {
+    match histogram {
+        None => "Histogram…",
+        Some(histogram) if histogram.is_empty() => "No opaque pixels in the selection.",
+        Some(_) => "Histogram",
+    }
+}
+
+fn histogram_plot(histogram: Option<Histogram>, channel: MapChannel) -> Div {
+    let bins = histogram.map(|histogram| histogram.bins(channel));
+    div().h(px(120.)).w_full().rounded_md().child(
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| match &bins {
+                Some(bins) => paint_histogram(bounds, bins, window),
+                None => window.paint_quad(fill(bounds, rgb(CANVAS))),
+            },
+        )
+        .size_full(),
+    )
+}
+
+fn curve_plot(
+    curve: Curve,
+    histogram: Option<Histogram>,
+    channel: MapChannel,
+    cx: &Context<Workspace>,
+) -> impl IntoElement {
+    let bins = histogram.map(|histogram| histogram.bins(channel));
+    let bounds = Rc::new(Cell::new(Bounds::default()));
+    let (layout, down, right, moved) = (bounds.clone(), bounds.clone(), bounds.clone(), bounds);
+    div()
+        .id("curve")
+        .h(px(180.))
+        .w_full()
+        .rounded_md()
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.edit_curve(down.get(), event.position, MouseButton::Left, window, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.edit_curve(right.get(), event.position, MouseButton::Right, window, cx);
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging() {
+                    this.drag_curve_point(moved.get(), event.position, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_curve_drag(cx)),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_curve_drag(cx)),
+        )
+        .child(
+            canvas(
+                move |bounds, _, _| layout.set(bounds),
+                move |bounds, _, window, _| paint_curve(bounds, curve, bins, window),
+            )
+            .size_full(),
+        )
+}
+
+fn paint_histogram(bounds: Bounds<Pixels>, bins: &[u32; 256], window: &mut Window) {
+    window.paint_quad(fill(bounds, rgb(CANVAS)));
+    let max = bins.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return;
+    }
+    let step = f32::from(bounds.size.width) / 256.;
+    let height = f32::from(bounds.size.height);
+    for (index, count) in bins.iter().copied().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let bar = height * (count as f32 / max as f32);
+        let left = f32::from(bounds.left()) + step * index as f32;
+        window.paint_quad(fill(
+            Bounds::from_corners(
+                point(px(left), bounds.bottom() - px(bar)),
+                point(px(left + step.max(1.)), bounds.bottom()),
+            ),
+            rgba(0xacc6ff88),
+        ));
+    }
+}
+
+fn paint_curve(
+    bounds: Bounds<Pixels>,
+    curve: Curve,
+    bins: Option<[u32; 256]>,
+    window: &mut Window,
+) {
+    match &bins {
+        Some(bins) => paint_histogram(bounds, bins, window),
+        None => window.paint_quad(fill(bounds, rgb(CANVAS))),
+    }
+    let mut path = PathBuilder::stroke(px(1.5));
+    let mut started = false;
+    for point in curve.points() {
+        let at = curve_point_px(bounds, *point);
+        if started {
+            path.line_to(at);
+        } else {
+            path.move_to(at);
+            started = true;
+        }
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, rgb(0xffffff));
+    }
+    for point in curve.points() {
+        window.paint_quad(fill(
+            Bounds::centered_at(curve_point_px(bounds, *point), size(px(8.), px(8.))),
+            rgb(ACCENT),
+        ));
+    }
+}
+
+fn curve_point_px(bounds: Bounds<Pixels>, point_xy: (u8, u8)) -> Point<Pixels> {
+    point(
+        bounds.left() + bounds.size.width * (f32::from(point_xy.0) / 255.),
+        bounds.top() + bounds.size.height * (1. - f32::from(point_xy.1) / 255.),
+    )
+}
+
+fn curve_coords(bounds: Bounds<Pixels>, position: Point<Pixels>) -> (u8, u8) {
+    let width = f32::from(bounds.size.width).max(1.);
+    let height = f32::from(bounds.size.height).max(1.);
+    let x = ((f32::from(position.x) - f32::from(bounds.left())) / width).clamp(0., 1.);
+    let y = ((f32::from(position.y) - f32::from(bounds.top())) / height).clamp(0., 1.);
+    (
+        (x * 255.).round().clamp(0., 255.) as u8,
+        ((1. - y) * 255.).round().clamp(0., 255.) as u8,
+    )
+}
+
+fn hit_curve_point(bounds: Bounds<Pixels>, position: Point<Pixels>, curve: Curve) -> Option<usize> {
+    curve.points().iter().position(|point| {
+        let center = curve_point_px(bounds, *point);
+        let dx = f32::from(position.x) - f32::from(center.x);
+        let dy = f32::from(position.y) - f32::from(center.y);
+        dx * dx + dy * dy <= 64.
+    })
 }

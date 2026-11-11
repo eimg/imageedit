@@ -133,6 +133,8 @@ pub struct Workspace {
     adjustment_generation: crate::adjustments::PreviewGeneration,
     adjustment_busy: bool,
     adjustment_dirty: bool,
+    adjustment_histogram: Option<crate::adjustments::Histogram>,
+    histogram_token: u64,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     pencil: crate::paint::Brush,
@@ -246,6 +248,8 @@ impl Workspace {
             adjustment_generation: crate::adjustments::PreviewGeneration::default(),
             adjustment_busy: false,
             adjustment_dirty: false,
+            adjustment_histogram: None,
+            histogram_token: 0,
             stroke: None,
             stroke_commit_preview: None,
             pencil: crate::paint::Brush {

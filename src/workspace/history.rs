@@ -812,4 +812,59 @@ mod tests {
         assert!(!session.history.is_dirty());
         assert_eq!(session.current.selection, selection);
     }
+
+    #[test]
+    fn an_identity_levels_keeps_the_saved_document_and_a_curve_undoes() {
+        use crate::adjustments::{Adjustment, Curve, Curves, Levels, MapChannel};
+        use crate::preview::Dirty;
+
+        let mut session = Session::new(true, 2);
+        let layer = session.current.active_layer;
+        let selection = Selection::Unrestricted;
+        session.edit(
+            |content| {
+                content.apply_adjustment(layer, Adjustment::Levels(Levels::default()), &selection)
+                    != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(!session.history.is_dirty());
+        let curves = Curves::default().set_curve(
+            MapChannel::Value,
+            Curve::identity().move_point(0, 0, 255).move_point(1, 0, 0),
+        );
+        session.edit(
+            |content| {
+                content.apply_adjustment(layer, Adjustment::Curves(curves), &selection)
+                    != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(session.history.is_dirty());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            [255, 255, 255, 0]
+        );
+        assert!(session.undo());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            [0, 0, 0, 0]
+        );
+        assert!(!session.history.is_dirty());
+        assert_eq!(session.current.selection, selection);
+    }
 }

@@ -5,7 +5,9 @@ use image::RgbaImage;
 
 use super::Workspace;
 use crate::adjustments::{self, Adjustment, PREVIEW_EDGE};
-use crate::commands::{BrightnessContrast, Desaturate, HueSaturation, InvertColors};
+use crate::commands::{
+    BrightnessContrast, ColorBalance, Curves, Desaturate, HueSaturation, InvertColors, Levels,
+};
 use crate::document::{self, LayerId};
 use crate::selection::Selection;
 use crate::transform::ColorMode;
@@ -16,6 +18,9 @@ pub(super) enum AdjustKind {
     HueSaturation,
     Desaturate,
     Invert,
+    ColorBalance,
+    Levels,
+    Curves,
 }
 
 pub(super) struct AdjustmentSession {
@@ -41,6 +46,15 @@ impl Workspace {
         }))
         .on_action(cx.listener(|this, _: &InvertColors, window, cx| {
             this.adjustment_form(AdjustKind::Invert, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ColorBalance, window, cx| {
+            this.adjustment_form(AdjustKind::ColorBalance, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &Levels, window, cx| {
+            this.adjustment_form(AdjustKind::Levels, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &Curves, window, cx| {
+            this.adjustment_form(AdjustKind::Curves, window, cx);
         }))
     }
 
@@ -74,6 +88,43 @@ impl Workspace {
         self.adjustment_dirty = true;
         self.pump_adjustment_preview(window, cx);
         true
+    }
+
+    pub(super) fn start_adjustment_histogram(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.histogram_token = self.histogram_token.wrapping_add(1);
+        self.adjustment_histogram = None;
+        let Some(session) = self.adjustment.as_ref() else {
+            return;
+        };
+        let token = self.histogram_token;
+        let source = session.source.clone();
+        let offset = session.offset;
+        let selection = session.selection.clone();
+        let canvas = session.canvas;
+        let job = cx.background_executor().spawn(async move {
+            adjustments::histogram(&source, |x, y| {
+                selection.coverage(
+                    i64::from(offset.0) + i64::from(x),
+                    i64::from(offset.1) + i64::from(y),
+                    canvas.0,
+                    canvas.1,
+                )
+            })
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let histogram = job.await;
+            let _ = workspace.update_in(cx, |workspace, _, cx| {
+                if workspace.histogram_token == token && workspace.adjustment.is_some() {
+                    workspace.adjustment_histogram = Some(histogram);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn set_adjustment(
@@ -115,6 +166,8 @@ impl Workspace {
         self.adjustment = None;
         self.adjustment_dirty = false;
         self.adjustment_generation.request();
+        self.histogram_token = self.histogram_token.wrapping_add(1);
+        self.adjustment_histogram = None;
         if let Some(image) = self.adjustment_preview.take() {
             super::drop_images(std::iter::once(image), window, cx);
         }

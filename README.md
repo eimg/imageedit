@@ -106,6 +106,12 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   Escape cancels it. A selection blends the effect, and the layer's alpha stays
   in place. Leaving the sliders at zero does not change the image. Undo
   restores the previous pixels.
+  **Color Balance** shifts shadows, midtones, or highlights and can preserve
+  luminosity. **Levels** and **Curves** edit the value channel or a single
+  color channel. Levels shows a histogram. Click the curve to add a point, drag
+  a point to move it, and right-click an interior point to remove it. The
+  endpoints stay at 0 and 255. A fully transparent selection shows an empty
+  histogram.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened
@@ -153,9 +159,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Menus and the toolbox still show planned features such as text, color balance,
-levels, curves, and filters. Commands without handlers appear
-disabled. Windows is a future target.
+Menus and the toolbox still show planned features such as text and filters.
+Commands without handlers appear disabled. Windows is a future target.
 
 ## Development
 

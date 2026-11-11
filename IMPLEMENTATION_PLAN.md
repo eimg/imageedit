@@ -2,7 +2,17 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P16
+## Latest handoff · P17
+
+P17 adds Color Balance, Levels, and Curves on branch `p17-color`, which starts from P16.
+
+- Color Balance shifts cyan–red, magenta–green, and yellow–blue in the shadows, midtones, or highlights, and it can preserve luminosity. Levels maps each channel through input, gamma, and output stops and shows that channel's histogram. Curves drags points on the same histogram. Both build one 256-entry lookup table per channel.
+- A transparent image has an empty histogram, and a uniform image occupies one bin. Curve endpoints stay at 0 and 255, and interior points cannot pass their neighbors. Identity settings do not create a history entry. Undo restores the previous pixels. Cancel leaves the pixels and the saved state unchanged.
+- Formatting, Clippy and locked tests passed. P16 ended with 122 tests and P17 ends with 128, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P18**, filters.
+
+## Feature handoff · P16
 
 P16 adds adjustment dialogs on branch `p16-adjust`, which starts from P15.
 
