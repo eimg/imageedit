@@ -626,14 +626,50 @@ impl Workspace {
         }
     }
 
-    fn selection_size_fields(&self, cx: &Context<Self>) -> Div {
+    fn selection_numeric_options(&self, cx: &Context<Self>) -> Div {
+        let mut options = div().flex().flex_col().gap_2();
+        if self.selection_shape == SelectionShape::Rectangle {
+            options = options.child(self.selection_radius_row(cx));
+        }
+        if self.selection_shape_rect().is_some() {
+            options = options.child(self.selection_size_row());
+        }
+        options
+    }
+
+    fn selection_radius_row(&self, cx: &Context<Self>) -> Div {
+        let chip = div()
+            .min_w(px(40.))
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px_2()
+            .rounded_md()
+            .bg(rgb(CANVAS))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .child(self.selection_radius.to_string());
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child("Radius")
+            .child(form_button("−", false).on_click(
+                cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
+            ))
+            .child(chip)
+            .child(form_button("+", false).on_click(
+                cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
+            ))
+    }
+
+    fn selection_size_row(&self) -> Div {
         let Some(rect) = self.selection_shape_rect() else {
             return div();
         };
-        let active = self.selection_size_active;
-        let field = |index: usize, label: &'static str, text: String| {
+        let chip = |label: &'static str, value: u32| {
             div()
-                .id(("selection-size", index))
                 .h(px(26.))
                 .flex_1()
                 .min_w_0()
@@ -644,37 +680,55 @@ impl Workspace {
                 .rounded_md()
                 .bg(rgb(CANVAS))
                 .border_1()
-                .border_color(rgb(if active == Some(index) {
-                    ACCENT
-                } else {
-                    BORDER
-                }))
-                .cursor(CursorStyle::IBeam)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.begin_selection_size_edit(index, window, cx);
-                }))
+                .border_color(rgb(BORDER))
                 .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
-                .child(text)
-        };
-        let width = if active == Some(0) {
-            self.selection_size_fields[0].clone()
-        } else {
-            rect.width.to_string()
-        };
-        let height = if active == Some(1) {
-            self.selection_size_fields[1].clone()
-        } else {
-            rect.height.to_string()
+                .child(value.to_string())
         };
         div()
-            .track_focus(&self.selection_size_focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                this.selection_size_key(event, window, cx);
-            }))
             .flex()
             .gap_2()
-            .child(field(0, "W", width))
-            .child(field(1, "H", height))
+            .child(chip("W", rect.width))
+            .child(chip("H", rect.height))
+    }
+
+    fn crop_fields(&self) -> Div {
+        let Some(crop) = self.crop else {
+            return div();
+        };
+        let chip = |label: &'static str, value: u32| {
+            div()
+                .h(px(26.))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .rounded_md()
+                .bg(rgb(CANVAS))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
+                .child(value.to_string())
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(chip("X", crop.x))
+                    .child(chip("Y", crop.y)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(chip("W", crop.width))
+                    .child(chip("H", crop.height)),
+            )
     }
 
     fn tab_strip(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -926,7 +980,7 @@ impl Workspace {
                         },
                     )
                     .when(self.tool == Tool::Crop && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                        area.cursor(self.crop_cursor(scale)).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.begin_crop(event.position, window.scale_factor(), cx);
@@ -1099,8 +1153,10 @@ impl Workspace {
                     .when(show_tool_cursor, |area| {
                         // The painted cursor hides the system pointer. A selection that can
                         // be moved or resized needs that pointer, so the hand and arrows show.
-                        let native_cursor = self.tool == Tool::Select
-                            && self.selection_cursor(scale) != CursorStyle::Crosshair;
+                        let native_cursor = (self.tool == Tool::Select
+                            && self.selection_cursor(scale) != CursorStyle::Crosshair)
+                            || (self.tool == Tool::Crop
+                                && self.crop_cursor(scale) != CursorStyle::Crosshair);
                         if native_cursor {
                             self.canvas_cursor.show_native(true);
                         }
@@ -1257,13 +1313,7 @@ impl Workspace {
                                             cx,
                                         ),
                                     ]))
-                                    .when(shape == SelectionShape::Rectangle, |panel| {
-                                        panel.child(selection_radius_row(
-                                            self.selection_radius,
-                                            cx,
-                                        ))
-                                    })
-                                    .child(self.selection_size_fields(cx))
+                                    .child(self.selection_numeric_options(cx))
                             })
                             .when(
                                 matches!(
@@ -1383,9 +1433,14 @@ impl Workspace {
                                         )
                                     })
                             })
-                            .when_some(self.crop, |panel, crop| {
+                            .when_some(self.crop, |panel, _| {
                                 panel
-                                    .child(format!("{} × {} px", crop.width, crop.height))
+                                    .child(self.crop_fields())
+                                    .child(
+                                        div()
+                                            .text_color(rgb(MUTED))
+                                            .child("Drag inside to move. Drag a handle to resize."),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -2221,6 +2276,18 @@ fn image_preview(
                     (crop.y + crop.height) as f32 / height as f32,
                 ));
                 paint_crop(window, image_bounds, Bounds::from_corners(start, end));
+                paint_handles(
+                    window,
+                    &geometry,
+                    width,
+                    height,
+                    preview::PixelRect {
+                        x: i64::from(crop.x),
+                        y: i64::from(crop.y),
+                        width: crop.width,
+                        height: crop.height,
+                    },
+                );
             }
         },
     )
@@ -2487,21 +2554,6 @@ fn selection_shape_button(
 ) -> gpui::Stateful<Div> {
     form_button(label, selected)
         .on_click(cx.listener(move |this, _, _, cx| this.set_selection_shape(shape, cx)))
-}
-
-fn selection_radius_row(value: u32, cx: &Context<super::Workspace>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child("Radius")
-        .child(form_button("−", false).on_click(
-            cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
-        ))
-        .child(value.to_string())
-        .child(form_button("+", false).on_click(
-            cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
-        ))
 }
 
 fn selection_button(

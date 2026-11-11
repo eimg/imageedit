@@ -1,9 +1,9 @@
 use gpui::{
-    Bounds, Context, KeyDownEvent, KeyUpEvent, MouseButton, MouseUpEvent, Pixels, Point, Window,
-    point, px, size,
+    Bounds, Context, CursorStyle, KeyDownEvent, KeyUpEvent, MouseButton, MouseUpEvent, Pixels,
+    Point, Window, point, px, size,
 };
 
-use super::{CropDrag, Tab, Workspace};
+use super::{CropDrag, CropEdges, Tab, Workspace};
 use crate::commands::Zoom;
 use crate::document::{CropRect, solid_color};
 use crate::preview::Dirty;
@@ -185,13 +185,50 @@ impl Workspace {
         if self.active_tab().is_none_or(Tab::busy) {
             return;
         }
-        self.clear_crop();
-        self.crop_drag = self
-            .canvas_pixel(position, scale, false)
-            .map(|start| CropDrag {
-                origin: position,
-                start,
-            });
+        let hit = self.crop.and_then(|crop| {
+            self.crop_screen_rect(crop, scale)
+                .map(|(left, top, right, bottom)| {
+                    (
+                        crop,
+                        hit_crop(
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            f32::from(position.x),
+                            f32::from(position.y),
+                            6.,
+                        ),
+                    )
+                })
+        });
+        self.crop_drag = match hit {
+            Some((crop, CropHit::Edge(edges))) => self
+                .unclamped_pointer_pixel(position, scale)
+                .map(|anchor| CropDrag::Resize {
+                    crop,
+                    edges,
+                    anchor,
+                }),
+            Some((crop, CropHit::Inside)) => {
+                self.canvas_pixel(position, scale, true)
+                    .map(|pixel| CropDrag::Move {
+                        crop,
+                        grab: (
+                            i64::from(pixel.0) - i64::from(crop.x),
+                            i64::from(pixel.1) - i64::from(crop.y),
+                        ),
+                    })
+            }
+            Some((_, CropHit::Outside)) | None => {
+                self.clear_crop();
+                self.canvas_pixel(position, scale, false)
+                    .map(|start| CropDrag::Create {
+                        origin: position,
+                        start,
+                    })
+            }
+        };
         cx.notify();
     }
 
@@ -204,15 +241,93 @@ impl Workspace {
         let Some(drag) = self.crop_drag else {
             return;
         };
-        let end = self.canvas_pixel(position, scale, true);
-        let delta = position - drag.origin;
-        let crop = end
-            .filter(|_| f32::from(delta.x).abs().max(f32::from(delta.y).abs()) >= 3.)
-            .map(|end| CropRect::between(drag.start, end));
+        let (canvas_width, canvas_height) = match self.active_tab() {
+            Some(tab) => tab.document.content.size(),
+            None => return,
+        };
+        let crop = match drag {
+            CropDrag::Create { origin, start } => {
+                let delta = position - origin;
+                self.canvas_pixel(position, scale, true)
+                    .filter(|_| f32::from(delta.x).abs().max(f32::from(delta.y).abs()) >= 3.)
+                    .map(|end| CropRect::between(start, end))
+            }
+            CropDrag::Move { crop, grab } => self
+                .canvas_pixel(position, scale, true)
+                .map(|pixel| move_crop(crop, pixel, grab, canvas_width, canvas_height)),
+            CropDrag::Resize {
+                crop,
+                edges,
+                anchor,
+            } => self.unclamped_pointer_pixel(position, scale).map(|pixel| {
+                resize_crop(
+                    crop,
+                    edges,
+                    (pixel.0 - anchor.0, pixel.1 - anchor.1),
+                    canvas_width,
+                    canvas_height,
+                )
+            }),
+        };
         if self.crop != crop {
             self.crop = crop;
             cx.notify();
         }
+    }
+
+    pub(super) fn crop_cursor(&self, scale: f32) -> CursorStyle {
+        if let Some(drag) = self.crop_drag {
+            return match drag {
+                CropDrag::Create { .. } => CursorStyle::Crosshair,
+                CropDrag::Move { .. } => CursorStyle::ClosedHand,
+                CropDrag::Resize { edges, .. } => edges.cursor(),
+            };
+        }
+        let Some(crop) = self.crop else {
+            return CursorStyle::Crosshair;
+        };
+        let Some(position) = self.canvas_cursor.position.get() else {
+            return CursorStyle::Crosshair;
+        };
+        let Some((left, top, right, bottom)) = self.crop_screen_rect(crop, scale) else {
+            return CursorStyle::Crosshair;
+        };
+        match hit_crop(
+            left,
+            top,
+            right,
+            bottom,
+            f32::from(position.x),
+            f32::from(position.y),
+            6.,
+        ) {
+            CropHit::Inside => CursorStyle::OpenHand,
+            CropHit::Edge(edges) => edges.cursor(),
+            CropHit::Outside => CursorStyle::Crosshair,
+        }
+    }
+
+    fn crop_screen_rect(&self, crop: CropRect, scale: f32) -> Option<(f32, f32, f32, f32)> {
+        let tab = self.active_tab()?;
+        let (width, height) = tab.document.content.size();
+        if width == 0 || height == 0 || crop.width == 0 || crop.height == 0 {
+            return None;
+        }
+        let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
+        let start = geometry.project(point(
+            crop.x as f32 / width as f32,
+            crop.y as f32 / height as f32,
+        ));
+        let end = geometry.project(point(
+            (crop.x + crop.width) as f32 / width as f32,
+            (crop.y + crop.height) as f32 / height as f32,
+        ));
+        Some((
+            f32::from(start.x.min(end.x)),
+            f32::from(start.y.min(end.y)),
+            f32::from(start.x.max(end.x)),
+            f32::from(start.y.max(end.y)),
+        ))
     }
 
     pub(super) fn apply_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -342,6 +457,108 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CropHit {
+    Outside,
+    Inside,
+    Edge(CropEdges),
+}
+
+fn hit_crop(left: f32, top: f32, right: f32, bottom: f32, x: f32, y: f32, slop: f32) -> CropHit {
+    if x < left - slop || x > right + slop || y < top - slop || y > bottom + slop {
+        return CropHit::Outside;
+    }
+    let mut near_left = (x - left).abs() <= slop;
+    let mut near_right = (x - right).abs() <= slop;
+    let mut near_top = (y - top).abs() <= slop;
+    let mut near_bottom = (y - bottom).abs() <= slop;
+    if near_left && near_right {
+        near_left = x - left <= right - x;
+        near_right = !near_left;
+    }
+    if near_top && near_bottom {
+        near_top = y - top <= bottom - y;
+        near_bottom = !near_top;
+    }
+    if near_left || near_right || near_top || near_bottom {
+        return CropHit::Edge(CropEdges {
+            left: near_left,
+            right: near_right,
+            top: near_top,
+            bottom: near_bottom,
+        });
+    }
+    CropHit::Inside
+}
+
+impl CropEdges {
+    fn cursor(self) -> CursorStyle {
+        match (self.left || self.right, self.top || self.bottom) {
+            (true, true) if (self.left && self.top) || (self.right && self.bottom) => {
+                CursorStyle::ResizeUpLeftDownRight
+            }
+            (true, true) => CursorStyle::ResizeUpRightDownLeft,
+            (true, false) => CursorStyle::ResizeLeftRight,
+            (false, true) => CursorStyle::ResizeUpDown,
+            (false, false) => CursorStyle::Crosshair,
+        }
+    }
+}
+
+fn move_crop(
+    crop: CropRect,
+    pointer: (u32, u32),
+    grab: (i64, i64),
+    canvas_width: u32,
+    canvas_height: u32,
+) -> CropRect {
+    let max_x = canvas_width.saturating_sub(crop.width) as i64;
+    let max_y = canvas_height.saturating_sub(crop.height) as i64;
+    CropRect {
+        x: (i64::from(pointer.0) - grab.0).clamp(0, max_x) as u32,
+        y: (i64::from(pointer.1) - grab.1).clamp(0, max_y) as u32,
+        width: crop.width,
+        height: crop.height,
+    }
+}
+
+fn resize_crop(
+    crop: CropRect,
+    edges: CropEdges,
+    delta: (i64, i64),
+    canvas_width: u32,
+    canvas_height: u32,
+) -> CropRect {
+    let clamp_x = |value: i64| value.clamp(0, i64::from(canvas_width).saturating_sub(1).max(0));
+    let clamp_y = |value: i64| value.clamp(0, i64::from(canvas_height).saturating_sub(1).max(0));
+    let mut x0 = i64::from(crop.x);
+    let mut y0 = i64::from(crop.y);
+    let mut x1 = i64::from(crop.x + crop.width).saturating_sub(1);
+    let mut y1 = i64::from(crop.y + crop.height).saturating_sub(1);
+    if edges.left {
+        x0 = clamp_x(x0.saturating_add(delta.0));
+    }
+    if edges.right {
+        x1 = clamp_x(x1.saturating_add(delta.0));
+    }
+    if edges.top {
+        y0 = clamp_y(y0.saturating_add(delta.1));
+    }
+    if edges.bottom {
+        y1 = clamp_y(y1.saturating_add(delta.1));
+    }
+    let left = x0.min(x1);
+    let right = x0.max(x1);
+    let top = y0.min(y1);
+    let bottom = y0.max(y1);
+    CropRect {
+        x: left as u32,
+        y: top as u32,
+        width: (right - left + 1) as u32,
+        height: (bottom - top + 1) as u32,
+    }
+}
+
 pub(super) struct PreviewGeometry {
     pub bounds: Bounds<Pixels>,
     pan_limit: Point<Pixels>,
@@ -420,4 +637,106 @@ fn constrain_pan(pan: Point<Pixels>, limit: Point<Pixels>) -> Point<Pixels> {
         pan.x.clamp(-limit.x, limit.x),
         pan.y.clamp(-limit.y, limit.y),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_moves_and_resizes_inside_the_canvas() {
+        let crop = CropRect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+        assert_eq!(
+            move_crop(crop, (15, 25), (2, 3), 100, 100),
+            CropRect {
+                x: 13,
+                y: 22,
+                width: 30,
+                height: 40,
+            }
+        );
+        assert_eq!(
+            move_crop(crop, (200, 200), (0, 0), 100, 100),
+            CropRect {
+                x: 70,
+                y: 60,
+                width: 30,
+                height: 40,
+            }
+        );
+        let right = CropEdges {
+            left: false,
+            right: true,
+            top: false,
+            bottom: false,
+        };
+        assert_eq!(
+            resize_crop(crop, right, (11, 0), 100, 100),
+            CropRect {
+                x: 10,
+                y: 20,
+                width: 41,
+                height: 40,
+            }
+        );
+        let left = CropEdges {
+            left: true,
+            right: false,
+            top: false,
+            bottom: false,
+        };
+        assert_eq!(
+            resize_crop(crop, left, (40, 0), 100, 100),
+            CropRect {
+                x: 39,
+                y: 20,
+                width: 12,
+                height: 40,
+            }
+        );
+    }
+
+    #[test]
+    fn crop_corner_cursors_follow_their_diagonals() {
+        assert_eq!(
+            CropEdges {
+                left: true,
+                right: false,
+                top: true,
+                bottom: false,
+            }
+            .cursor(),
+            CursorStyle::ResizeUpLeftDownRight
+        );
+        assert_eq!(
+            CropEdges {
+                left: false,
+                right: true,
+                top: true,
+                bottom: false,
+            }
+            .cursor(),
+            CursorStyle::ResizeUpRightDownLeft
+        );
+    }
+
+    #[test]
+    fn crop_hit_edges_win_over_the_inside() {
+        assert_eq!(
+            hit_crop(0., 0., 100., 80., 1., 1., 6.),
+            CropHit::Edge(CropEdges {
+                left: true,
+                right: false,
+                top: true,
+                bottom: false,
+            })
+        );
+        assert_eq!(hit_crop(0., 0., 100., 80., 50., 40., 6.), CropHit::Inside);
+        assert_eq!(hit_crop(0., 0., 100., 80., 120., 40., 6.), CropHit::Outside);
+    }
 }

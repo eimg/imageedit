@@ -1,6 +1,4 @@
-use gpui::{
-    Action, Context, CursorStyle, Div, KeyDownEvent, Pixels, Point, Window, point, prelude::*,
-};
+use gpui::{Action, Context, CursorStyle, Div, Pixels, Point, Window, point, prelude::*};
 
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
@@ -71,8 +69,6 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        self.selection_size_active = None;
-        self.selection_size_replace = false;
         self.clear_selection_gesture();
         let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
@@ -675,8 +671,6 @@ impl Workspace {
 
     pub(super) fn set_selection_shape(&mut self, shape: SelectionShape, cx: &mut Context<Self>) {
         self.selection_shape = shape;
-        self.selection_size_active = None;
-        self.selection_size_replace = false;
         cx.notify();
     }
 
@@ -723,141 +717,6 @@ impl Workspace {
             Selection::RoundedRect(shape) => Some(shape.rect()),
             _ => None,
         }
-    }
-
-    pub(super) fn begin_selection_size_edit(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(rect) = self.selection_shape_rect() {
-            self.selection_size_fields = [rect.width.to_string(), rect.height.to_string()];
-        }
-        self.selection_size_active = Some(index);
-        self.selection_size_replace = true;
-        self.selection_size_focus.focus(window);
-        cx.notify();
-    }
-
-    pub(super) fn selection_size_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self.selection_size_active else {
-            return;
-        };
-        let key = &event.keystroke;
-        if key.modifiers.secondary()
-            || key.modifiers.alt
-            || key.modifiers.control
-            || key.modifiers.platform
-        {
-            cx.stop_propagation();
-            return;
-        }
-        match key.key.as_str() {
-            "escape" => {
-                self.selection_size_active = None;
-                self.selection_size_replace = false;
-                self.focus.focus(window);
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "enter" | "return" => {
-                self.commit_selection_size(active, window, cx);
-            }
-            "tab" => {
-                self.selection_size_active = Some(1 - active);
-                self.selection_size_replace = true;
-                self.selection_size_focus.focus(window);
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "backspace" | "delete" => {
-                if self.selection_size_replace {
-                    self.selection_size_fields[active].clear();
-                    self.selection_size_replace = false;
-                } else {
-                    self.selection_size_fields[active].pop();
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            _ => {
-                if let Some(text) = key.key_char.as_deref()
-                    && text.len() == 1
-                    && text.as_bytes()[0].is_ascii_digit()
-                {
-                    if self.selection_size_replace {
-                        self.selection_size_fields[active].clear();
-                        self.selection_size_replace = false;
-                    }
-                    if self.selection_size_fields[active].len() < 5 {
-                        self.selection_size_fields[active].push_str(text);
-                    }
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-        }
-    }
-
-    fn commit_selection_size(
-        &mut self,
-        active: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(rect) = self.selection_shape_rect() else {
-            self.selection_size_active = None;
-            self.selection_size_replace = false;
-            self.focus.focus(window);
-            cx.notify();
-            return;
-        };
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        let (canvas_width, canvas_height) = tab.document.content.size();
-        let parse = |text: &str, fallback: u32| {
-            text.parse::<u32>()
-                .ok()
-                .filter(|value| *value > 0)
-                .unwrap_or(fallback)
-        };
-        let mut width = parse(&self.selection_size_fields[0], rect.width);
-        let mut height = parse(&self.selection_size_fields[1], rect.height);
-        if self.selection_shape == SelectionShape::Circle {
-            let side = if active == 0 { width } else { height };
-            width = side;
-            height = side;
-        }
-        let rect = PixelRect::new(rect.x, rect.y, width, height);
-        let radius = self
-            .selection_preview
-            .as_ref()
-            .or_else(|| self.active_tab().map(|tab| &tab.selection))
-            .and_then(|selection| match selection {
-                Selection::RoundedRect(shape) => Some(shape.radius()),
-                _ => None,
-            })
-            .unwrap_or(self.selection_radius);
-        let selection = match self.selection_shape {
-            SelectionShape::Rectangle => {
-                Selection::rounded_rect_rect(rect, radius, canvas_width, canvas_height)
-            }
-            SelectionShape::Ellipse | SelectionShape::Circle => {
-                Selection::ellipse_rect(rect, canvas_width, canvas_height)
-            }
-        };
-        self.selection_size_active = None;
-        self.selection_size_replace = false;
-        self.focus.focus(window);
-        self.commit_selection(selection, window, cx);
-        cx.notify();
     }
 }
 
@@ -1044,9 +903,9 @@ impl SelectionEdges {
     fn cursor(self) -> CursorStyle {
         match (self.left || self.right, self.top || self.bottom) {
             (true, true) if (self.left && self.top) || (self.right && self.bottom) => {
-                CursorStyle::ResizeUpRightDownLeft
+                CursorStyle::ResizeUpLeftDownRight
             }
-            (true, true) => CursorStyle::ResizeUpLeftDownRight,
+            (true, true) => CursorStyle::ResizeUpRightDownLeft,
             (true, false) => CursorStyle::ResizeLeftRight,
             (false, true) => CursorStyle::ResizeUpDown,
             (false, false) => CursorStyle::Crosshair,
@@ -1078,6 +937,30 @@ mod tests {
             start,
             point(gpui::px(107.), gpui::px(87.))
         ));
+    }
+
+    #[test]
+    fn corner_cursors_follow_their_diagonals() {
+        assert_eq!(
+            SelectionEdges {
+                left: true,
+                right: false,
+                top: true,
+                bottom: false,
+            }
+            .cursor(),
+            CursorStyle::ResizeUpLeftDownRight
+        );
+        assert_eq!(
+            SelectionEdges {
+                left: false,
+                right: true,
+                top: true,
+                bottom: false,
+            }
+            .cursor(),
+            CursorStyle::ResizeUpRightDownLeft
+        );
     }
 
     #[test]

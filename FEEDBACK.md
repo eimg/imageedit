@@ -198,6 +198,31 @@ size while drawing and apply an edit with Return.
 - Status: `done`
 - 2026-11-11: This extra task ran out of queue order. Circle and oval no longer
   have a radius input. Rectangle mode has a corner radius that updates the
-  current rectangle. Width and Height fields follow the drawn selection and
-  accept typed values, applied with Return. Formatting, Clippy, locked tests,
-  and `./scripts/bundle-macos.sh` passed.
+  current rectangle. Width and Height fields follow the drawn selection. Manual
+  entry is temporarily disabled; item 16 restores it. Formatting, Clippy, locked
+  tests, and `./scripts/bundle-macos.sh` passed.
+
+## 15. Editable radius and crop fields
+
+Keep the rectangle corner-radius plus/minus buttons, but make the radius value
+an editable field too. Give the Crop tool the same treatment: editable X, Y,
+Width, and Height fields, plus dragging inside the crop to move it and dragging
+its handles to resize it.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. The rectangle radius keeps
+  its +/- buttons. Crop has a movable crop box, resize handles, and move/resize
+  cursors, and the X/Y/W/H fields show the current crop. Typed entry in these
+  fields was disabled after input bugs; item 16 tracks the proper editor.
+  Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+
+## 16. Inline numeric inputs
+
+Restore typed entry for the rectangle radius, selection Width/Height, and crop
+X/Y/Width/Height. The first attempt was laggy, had no visible caret, and
+backspace/delete cleared the whole value. Build a proper inline editor with a
+caret, normal text selection and deletion, and a single history change per
+committed edit. Keep the existing +/- buttons and read-only value displays until
+the editor is reliable.
+
+- Status: `open`

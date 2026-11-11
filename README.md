@@ -45,18 +45,21 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   order, name, position, visibility, opacity, and lossless pixels with
   transparency. PNG and lossless WebP preserve transparency. JPEG saves
   against white. The working pixel format is 8-bit RGBA.
-- Drag a rectangle with **Crop** (`C`) and press Return to apply it or Escape to
-  cancel. **Bucket Fill** (`B`) uses the foreground color on connected pixels within
-  the shared tolerance. **Color Picker** (`K`) samples the image at full resolution.
+- Drag a rectangle with **Crop** (`C`). Drag inside the box to move it, drag a
+  handle to resize it, and read X, Y, Width, and Height in the Crop options.
+  Manual entry in those fields is temporarily disabled. Press Return to apply
+  the crop or Escape to cancel. **Bucket Fill** (`B`) uses the foreground color
+  on connected pixels within the shared tolerance. **Color Picker** (`K`)
+  samples the image at full resolution.
   **Select** (`R`) drags a rectangle, oval, or circle; choose the shape in the
   Select tool options. The outline is a dashed box or ellipse with handles:
   drag a handle to resize it, drag inside to move it, and click outside it to
-  deselect. Rectangle mode has a corner-radius control that rounds the
-  selection. The Width and Height fields show the current size while drawing
-  and accept edits; press Return to apply them. The dashes move along the
-  outline. The pointer becomes a resize arrow on a handle and a hand inside the
-  box. Select All, Deselect, and Invert are in the Select menu and in the
-  Select tool options.
+  deselect. Rectangle mode has a corner-radius control with minus and plus
+  buttons that rounds the selection. The Width and Height fields show the
+  current size while drawing; manual entry is temporarily disabled. The dashes
+  move along the outline. The pointer becomes a resize arrow on a handle and a
+  hand inside the box. Select All, Deselect, and Invert are in the Select menu
+  and in the Select tool options.
   **Free Select** (`F`) drags a freehand outline and closes it on release.
   **Polygon Select** (`L`) clicks vertices, then closes by clicking the start
   marker or pressing Return. Escape cancels either draft. **Magic Wand**

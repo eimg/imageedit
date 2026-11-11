@@ -16,12 +16,14 @@ overall editing experience.
 ## Current product scope
 
 ImageEdit supports layered raster editing. The empty workspace can open a
-file or create an image. Crop that image,
-sample or set swatches, and fill connected regions on the active layer.
-Rectangle, oval, circle, freehand, polygon, and wand selections limit fill and
-Clear to Transparency, and Crop to Selection uses the selection bounds. The
-Select tool chooses rectangle, oval, or circle. Rectangle mode has a corner
-radius control, and Width/Height fields show the current size and accept edits.
+file or create an image. Crop that image: drag the box, move it from inside,
+resize it from its handles, and read X, Y, Width, and Height in the Crop
+options. Inline numeric entry is temporarily disabled. Sample or set swatches,
+and fill connected regions on the active layer. Rectangle, oval, circle,
+freehand, polygon, and wand selections limit fill and Clear to Transparency, and
+Crop to Selection uses the selection bounds. The Select tool chooses rectangle,
+oval, or circle. Rectangle mode has a corner radius control with minus and plus
+buttons, and Width/Height fields show the current size.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and the Layer menu can center it,
@@ -115,8 +117,9 @@ document is a single plain layer without paths or editable text.
 a rectangle, an ellipse, a rounded rectangle, the inverse of a rectangle, or a
 canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle,
 oval, or circle, resizes it from its handles, moves it from inside, and clears
-it on a click outside. Rectangle mode has a corner radius control, and the
-Width/Height fields show the current size and accept edits. Free Select previews
+it on a click outside. Rectangle mode has a corner radius control with minus
+and plus buttons, and the Width/Height fields show the current size. Inline
+numeric entry is paused. Free Select previews
 the freehand path. Polygon
 Select previews the next edge. The Magic Wand shares the bucket tolerance.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control
@@ -165,7 +168,9 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
-  pixels. `src/workspace/view.rs` lays out the shell, including the resizable
+  pixels, including creating, moving, and resizing the crop box. The Crop tool
+  options show X, Y, Width, and Height values; inline numeric entry is paused.
+  `src/workspace/view.rs` lays out the shell, including the resizable
   and foldable toolbox and its full-label or icon-only buttons, and paints the
   canvas using the same geometry. `src/workspace/tooltip.rs` renders shared
   hover tooltips.
