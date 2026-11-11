@@ -66,12 +66,13 @@ pub struct TileUpdate {
     pub retained: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Dirty {
     None,
     // The document changed, but its pixels did not.
     Unpainted,
     Region(PixelRect),
+    Regions(Vec<PixelRect>),
     Canvas,
 }
 
@@ -151,24 +152,41 @@ impl TileCache {
 
     // Rebuilds tiles whose filter coverage meets `dirty`. Untouched tiles keep their image.
     pub fn rebuild(&mut self, content: &DocumentContent, dirty: PixelRect) -> TileUpdate {
-        if dirty.is_empty() {
-            return TileUpdate {
-                rebuilt: 0,
-                retained: self.stored(),
-            };
+        self.rebuild_regions(content, &[dirty])
+    }
+
+    pub fn rebuild_regions(
+        &mut self,
+        content: &DocumentContent,
+        dirty: &[PixelRect],
+    ) -> TileUpdate {
+        let stride = i64::from(self.tile) * i64::from(self.scale());
+        let apron = self.apron.saturating_mul(self.scale());
+        let mut affected = vec![false; self.tiles.len()];
+        for &dirty in dirty.iter().filter(|rect| !rect.is_empty()) {
+            let rect = clip_to_canvas(dirty.expand(apron), self.canvas_width, self.canvas_height);
+            if rect.is_empty() {
+                continue;
+            }
+            let columns = rect.x / stride..=(rect.right() - 1) / stride;
+            for row in rect.y / stride..=(rect.bottom() - 1) / stride {
+                let first = (row * i64::from(self.cols) + columns.start()) as usize;
+                let last = (row * i64::from(self.cols) + columns.end()) as usize;
+                affected[first..=last].fill(true);
+            }
         }
         let mut rebuilt = 0;
-        for row in 0..self.rows {
-            for column in 0..self.cols {
-                if !self.coverage(column, row).overlaps(dirty) {
-                    continue;
-                }
-                let index = (row * self.cols + column) as usize;
-                let rect = self.coverage(column, row);
-                let image = content.composite_rect(rect.x, rect.y, rect.width, rect.height);
-                self.tiles[index] = Some(Arc::new(box_downsample(&image, self.shift)));
-                rebuilt += 1;
-            }
+        for (index, _) in affected
+            .iter()
+            .enumerate()
+            .filter(|(_, affected)| **affected)
+        {
+            let column = index as u32 % self.cols;
+            let row = index as u32 / self.cols;
+            let rect = self.coverage(column, row);
+            let image = content.composite_rect(rect.x, rect.y, rect.width, rect.height);
+            self.tiles[index] = Some(Arc::new(box_downsample(&image, self.shift)));
+            rebuilt += 1;
         }
         TileUpdate {
             rebuilt,

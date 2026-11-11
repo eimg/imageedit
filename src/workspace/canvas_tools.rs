@@ -107,10 +107,11 @@ impl Workspace {
         if event.button == MouseButton::Left
             && self.warp.as_ref().is_some_and(|session| session.dragging())
         {
-            self.end_warp_drag(window, cx);
+            self.extend_warp_drag(event.position, window.scale_factor(), window, cx);
+            self.end_warp_drag(cx);
         }
         if event.button == MouseButton::Left && self.stroke.is_some() {
-            self.finish_stroke(window, cx);
+            self.finish_stroke(event.position, window, cx);
         }
     }
 

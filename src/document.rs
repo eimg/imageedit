@@ -192,23 +192,25 @@ impl RenderedCanvas {
                 pixels,
             });
         }
-        let Dirty::Region(rect) = dirty else {
-            return None;
+        let regions = match &dirty {
+            Dirty::Region(rect) => std::slice::from_ref(rect),
+            Dirty::Regions(regions) => regions.as_slice(),
+            _ => return None,
         };
         if levels.is_empty() {
             levels.push(filled_cache(content));
         }
         for cache in &mut levels {
-            cache.rebuild(content, rect);
+            cache.rebuild_regions(content, regions);
         }
-        let pixels = patch_pixels(pixels, content, rect);
+        let (pixels, has_transparency) = patch_pixels(pixels, content, regions, has_transparency);
         Some(CanvasPatch {
-            has_transparency: has_transparency || rect_has_transparency(&pixels, rect),
+            has_transparency,
             preview: None,
             levels,
             replace_levels: false,
             tiles_changed: true,
-            thumbnails: thumbnails_touching(content, rect),
+            thumbnails: thumbnails_touching(content, regions),
             pixels,
         })
     }
@@ -379,7 +381,7 @@ fn thumbnails(content: &DocumentContent) -> Vec<(LayerId, Arc<RenderImage>)> {
 
 fn thumbnails_touching(
     content: &DocumentContent,
-    dirty: PixelRect,
+    dirty: &[PixelRect],
 ) -> Vec<(LayerId, Arc<RenderImage>)> {
     content
         .layers()
@@ -391,21 +393,49 @@ fn thumbnails_touching(
                 layer.pixels.width(),
                 layer.pixels.height(),
             );
-            rect.overlaps(dirty)
+            dirty.iter().any(|&dirty| rect.overlaps(dirty))
         })
         .map(|layer| (layer.id, render_thumbnail(&layer.pixels)))
         .collect()
 }
 
-fn patch_pixels(pixels: &RgbaImage, content: &DocumentContent, dirty: PixelRect) -> Arc<RgbaImage> {
-    let clipped = clip_rect(dirty, pixels.width(), pixels.height());
-    let Some(clipped) = clipped else {
-        return Arc::new(pixels.clone());
-    };
-    let region = content.composite_rect(clipped.x, clipped.y, clipped.width, clipped.height);
-    let mut image = pixels.clone();
-    blit(&mut image, &region, clipped.x as u32, clipped.y as u32);
-    Arc::new(image)
+fn patch_pixels(
+    pixels: &Arc<RgbaImage>,
+    content: &DocumentContent,
+    dirty: &[PixelRect],
+    mut has_transparency: bool,
+) -> (Arc<RgbaImage>, bool) {
+    if let Some(layer) = content.full_canvas_layer() {
+        if !has_transparency {
+            has_transparency = dirty.iter().any(|&rect| {
+                clip_rect(rect, pixels.width(), pixels.height()).is_some_and(|rect| {
+                    (rect.y as u32..rect.bottom() as u32).any(|y| {
+                        (rect.x as u32..rect.right() as u32)
+                            .any(|x| layer.pixels.get_pixel(x, y)[3] < 255)
+                    })
+                })
+            });
+        }
+        return (layer.pixels.clone(), has_transparency);
+    }
+    let mut image = None;
+    for rect in dirty
+        .iter()
+        .filter_map(|&rect| clip_rect(rect, pixels.width(), pixels.height()))
+    {
+        let region = content.composite_rect(rect.x, rect.y, rect.width, rect.height);
+        has_transparency |= region.pixels().any(|pixel| pixel[3] < 255);
+        blit(
+            image.get_or_insert_with(|| pixels.as_ref().clone()),
+            &region,
+            rect.x as u32,
+            rect.y as u32,
+        );
+    }
+    (
+        image.map_or_else(|| pixels.clone(), Arc::new),
+        has_transparency,
+    )
 }
 
 fn clip_rect(rect: PixelRect, width: u32, height: u32) -> Option<PixelRect> {
@@ -419,20 +449,6 @@ fn clip_rect(rect: PixelRect, width: u32, height: u32) -> Option<PixelRect> {
         (right - x) as u32,
         (bottom - y) as u32,
     ))
-}
-
-fn rect_has_transparency(pixels: &RgbaImage, rect: PixelRect) -> bool {
-    let Some(rect) = clip_rect(rect, pixels.width(), pixels.height()) else {
-        return false;
-    };
-    for y in rect.y as u32..(rect.y as u32 + rect.height) {
-        for x in rect.x as u32..(rect.x as u32 + rect.width) {
-            if pixels.get_pixel(x, y).0[3] < 255 {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn blit(dest: &mut RgbaImage, src: &RgbaImage, x: u32, y: u32) {

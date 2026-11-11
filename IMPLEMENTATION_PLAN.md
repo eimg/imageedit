@@ -2,7 +2,15 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P14
+## P13–P14 follow-up
+
+Reviewed interactive transforms and painting on top of P14 (`32fb92b`).
+
+- Perspective uses a projective mapping that preserves straight lines. Fractional bounds include the whole quad. Invalid quads show an error and disable Apply before a render starts. Handles retain their grab offset, and the final mouse position is included. Click the canvas to start again after Apply or Cancel. Exact quarter-turns preserve source pixels, and flip and identity previews use the same size cap as other previews.
+- Live strokes store and composite only touched tiles, with a sampling apron and the document's normal layer order. Release includes the final pointer position, keeps the overlay visible until commit, and invalidates disjoint dirty regions together. Shift-click uses a successfully committed endpoint from the current tab and layer. Pencil starts at one pixel and uses a hard edge.
+- Formatting, Clippy, and 110 locked tests passed. Both release benchmarks passed. The short 4K stroke took 492 µs to buffer and 433 µs to composite its live tiles, then rebuilt one committed preview tile in 277 µs. These are CPU timings. The macOS bundle passed strict signature verification. Native drag gestures and perceived latency remain for the interactive pass.
+
+## Feature handoff · P14
 
 P14 adds Pencil, Brush, and Eraser on branch `p14-paint`, which starts from P13.
 

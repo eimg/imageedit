@@ -1,36 +1,32 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use gpui::{Context, Pixels, Point, RenderImage, Window};
 use image::RgbaImage;
 
 use super::Workspace;
-use super::layers::with_layer_opacity;
 use crate::commands::Tool;
 use crate::document::{self, LayerId, solid_color};
-use crate::paint::{Stroke, StrokeKind};
+use crate::paint::{Stroke, StrokeKind, TileKey};
 use crate::preview::PixelRect;
 use crate::selection::Selection;
 
 pub(super) struct StrokeSession {
     layer: LayerId,
     offset: (i32, i32),
-    opacity: u8,
     source: Arc<RgbaImage>,
     selection: Selection,
     canvas: (u32, u32),
     stroke: Stroke,
     last_point: (f64, f64),
-    below: Option<Arc<RenderImage>>,
-    above: Option<Arc<RenderImage>>,
-    patch: Option<Arc<RenderImage>>,
+    patches: BTreeMap<TileKey, StrokePaint>,
 }
 
 #[derive(Clone)]
 pub(super) struct StrokePaint {
-    pub rect: PixelRect,
-    pub patch: Arc<RenderImage>,
-    pub below: Option<Arc<RenderImage>>,
-    pub above: Option<Arc<RenderImage>>,
+    pub content: PixelRect,
+    pub stored: PixelRect,
+    pub pixels: Arc<RgbaImage>,
+    pub image: Arc<RenderImage>,
 }
 
 #[derive(Clone, Copy)]
@@ -43,11 +39,12 @@ pub(super) enum BrushField {
 
 impl Workspace {
     pub(super) fn brush_value(&self, field: BrushField) -> u32 {
+        let brush = self.active_brush();
         match field {
-            BrushField::Size => self.brush.diameter,
-            BrushField::Spacing => u32::from(self.brush.spacing),
-            BrushField::Hardness => u32::from(self.brush.hardness),
-            BrushField::Opacity => u32::from(self.brush.opacity),
+            BrushField::Size => brush.diameter,
+            BrushField::Spacing => u32::from(brush.spacing),
+            BrushField::Hardness => u32::from(brush.hardness),
+            BrushField::Opacity => u32::from(brush.opacity),
         }
     }
 
@@ -59,13 +56,18 @@ impl Workspace {
             BrushField::Hardness | BrushField::Opacity => (0, 100),
         };
         let next = (current + delta).clamp(min, max) as u32;
+        let brush = if self.tool == Tool::Pencil {
+            &mut self.pencil
+        } else {
+            &mut self.brush
+        };
         match field {
-            BrushField::Size => self.brush.diameter = next,
-            BrushField::Spacing => self.brush.spacing = next as u8,
-            BrushField::Hardness => self.brush.hardness = next as u8,
-            BrushField::Opacity => self.brush.opacity = next as u8,
+            BrushField::Size => brush.diameter = next,
+            BrushField::Spacing => brush.spacing = next as u8,
+            BrushField::Hardness => brush.hardness = next as u8,
+            BrushField::Opacity => brush.opacity = next as u8,
         }
-        self.brush = self.brush.clamped();
+        *brush = brush.clamped();
         cx.notify();
     }
 
@@ -83,6 +85,9 @@ impl Workspace {
         let Some(kind) = stroke_kind(self.tool) else {
             return;
         };
+        if self.canvas_pixel(position, scale, false).is_none() {
+            return;
+        }
         let Some(point) = self.canvas_point(position, scale) else {
             return;
         };
@@ -98,7 +103,6 @@ impl Workspace {
         }
         let id = layer.id;
         let offset = layer.offset;
-        let opacity = layer.opacity;
         let source = layer.pixels.clone();
         let canvas = tab.document.content.size();
         let selection = tab.selection.clone();
@@ -107,22 +111,18 @@ impl Workspace {
             .content
             .mode()
             .constrain(solid_color(self.colors[0]));
-        let (below, above) = tab.document.content.composite_around(id);
         let mut session = StrokeSession {
             layer: id,
             offset,
-            opacity,
             source,
             selection,
             canvas,
-            stroke: Stroke::new(kind, color, self.brush),
+            stroke: Stroke::new(kind, color, *self.active_brush()),
             last_point: local_point(point, offset),
-            below: below.as_ref().map(document::preview_render),
-            above: above.as_ref().map(document::preview_render),
-            patch: None,
+            patches: BTreeMap::new(),
         };
         if shift
-            && let Some((anchor_layer, x, y)) = self.stroke_anchor
+            && let Some((anchor_layer, x, y)) = tab.stroke_anchor
             && anchor_layer == id
         {
             session.paint(x, y);
@@ -159,102 +159,182 @@ impl Workspace {
         self.refresh_stroke_patch(window, cx);
     }
 
-    pub(super) fn finish_stroke(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.stroke.take() else {
+    pub(super) fn finish_stroke(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self
+            .active_tab()
+            .filter(|tab| !tab.busy())
+            .map(|tab| tab.id)
+        else {
+            self.cancel_stroke(window, cx);
             return;
         };
-        self.drop_stroke_images(session.below, session.above, session.patch, window, cx);
-        if !session.stroke.changed() || self.active_tab().is_some_and(|tab| tab.busy()) {
+        let point = self.canvas_point(position, window.scale_factor());
+        let Some(session) = self.stroke.as_mut() else {
+            return;
+        };
+        if let Some(point) = point {
+            session.last_point = local_point(point, session.offset);
+            session.paint(session.last_point.0, session.last_point.1);
+        }
+        session.stroke.finish(&session.source, |x, y| {
+            selection_coverage(&session.selection, session.offset, session.canvas, x, y)
+        });
+        if !session.stroke.changed() {
+            self.cancel_stroke(window, cx);
             return;
         }
+        self.refresh_stroke_patch(window, cx);
+        let session = self.stroke.take().unwrap();
         let layer = session.layer;
-        let anchor = session.last_point;
+        let end = session.last_point;
+        let patches = session.patches.into_values().collect();
         let stroke = session.stroke;
-        self.stroke_anchor = Some((layer, anchor.0, anchor.1));
-        self.edit_content(
+        self.start_change(
+            super::Change::Stroke { layer, end },
             move |content, _, _| content.apply_stroke(layer, &stroke),
             window,
             cx,
         );
+        self.stroke_commit_preview = Some((tab_id, patches));
     }
 
     pub(super) fn cancel_stroke(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.stroke.take() else {
-            return;
-        };
-        self.drop_stroke_images(session.below, session.above, session.patch, window, cx);
-        cx.notify();
-    }
-
-    pub(super) fn stroke_paint(&self) -> Option<StrokePaint> {
-        let session = self.stroke.as_ref()?;
-        let patch = session.patch.clone()?;
-        let pixels = session.stroke.pixels()?;
-        let origin = session.stroke.origin();
-        Some(StrokePaint {
-            rect: PixelRect::new(
-                i64::from(session.offset.0) + i64::from(origin.0),
-                i64::from(session.offset.1) + i64::from(origin.1),
-                pixels.width(),
-                pixels.height(),
-            ),
-            patch,
-            below: session.below.clone(),
-            above: session.above.clone(),
-        })
-    }
-
-    fn refresh_stroke_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.stroke.as_mut() else {
-            return;
-        };
-        if !session.stroke.changed() {
+        if let Some(session) = self.stroke.take() {
+            super::drop_images(
+                session.patches.into_values().map(|patch| patch.image),
+                window,
+                cx,
+            );
             cx.notify();
-            return;
         }
-        let Some(pixels) = session.stroke.pixels() else {
-            return;
-        };
-        let shown = with_layer_opacity(pixels, session.opacity);
-        let image = document::preview_render(&shown);
-        if let Some(previous) = session.patch.replace(image) {
-            super::drop_images(std::iter::once(previous), window, cx);
-        }
-        cx.notify();
+        self.clear_stroke_commit_preview(window, cx);
     }
 
-    fn drop_stroke_images(
+    pub(super) fn clear_stroke_commit_preview(
         &mut self,
-        below: Option<Arc<RenderImage>>,
-        above: Option<Arc<RenderImage>>,
-        patch: Option<Arc<RenderImage>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        super::drop_images(below.into_iter().chain(above).chain(patch), window, cx);
+        if let Some((_, patches)) = self.stroke_commit_preview.take() {
+            super::drop_images(patches.into_iter().map(|patch| patch.image), window, cx);
+        }
+    }
+
+    pub(super) fn stroke_paint(&self) -> Vec<StrokePaint> {
+        if let Some(session) = &self.stroke {
+            return session.patches.values().cloned().collect();
+        }
+        self.stroke_commit_preview
+            .as_ref()
+            .map_or_else(Vec::new, |(_, patches)| patches.clone())
+    }
+
+    fn refresh_stroke_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.active else {
+            return;
+        };
+        let content = &self.tabs[index].document.content;
+        let Some(session) = self.stroke.as_mut() else {
+            return;
+        };
+        let changed = session.stroke.take_pending_tiles();
+        if changed.is_empty() {
+            return;
+        }
+        let mut dirty = changed.clone();
+        // Neighboring tiles can sample the changed tile through their one-pixel apron.
+        for (x, y) in changed {
+            for row in y.saturating_sub(1)..=y + 1 {
+                for column in x.saturating_sub(1)..=x + 1 {
+                    if session.patches.contains_key(&(column, row)) {
+                        dirty.insert((column, row));
+                    }
+                }
+            }
+        }
+        let (width, height) = session.canvas;
+        for key in dirty {
+            let Some(rect) = session.stroke.tile_bounds(key) else {
+                continue;
+            };
+            let Some(rect) = clipped_tile(rect, session.offset, (width, height), 0) else {
+                continue;
+            };
+            let stored = clipped_tile(rect, (0, 0), (width, height), 1).unwrap();
+            let pixels =
+                Arc::new(content.composite_stroke_tile(session.layer, &session.stroke, stored));
+            let image = document::preview_render(&pixels);
+            let patch = StrokePaint {
+                content: rect,
+                stored,
+                pixels,
+                image,
+            };
+            if let Some(previous) = session.patches.insert(key, patch) {
+                super::drop_images([previous.image], window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn active_brush(&self) -> &crate::paint::Brush {
+        if self.tool == Tool::Pencil {
+            &self.pencil
+        } else {
+            &self.brush
+        }
     }
 }
 
 impl StrokeSession {
     fn paint(&mut self, x: f64, y: f64) {
-        let selection = self.selection.clone();
-        let offset = self.offset;
-        let canvas = self.canvas;
-        let source = self.source.clone();
-        self.stroke.sample(x, y, &source, |px, py| {
-            selection.coverage(
-                i64::from(offset.0) + i64::from(px),
-                i64::from(offset.1) + i64::from(py),
-                canvas.0,
-                canvas.1,
-            )
+        self.stroke.sample(x, y, &self.source, |px, py| {
+            selection_coverage(&self.selection, self.offset, self.canvas, px, py)
         });
     }
 }
 
+fn selection_coverage(
+    selection: &Selection,
+    offset: (i32, i32),
+    canvas: (u32, u32),
+    x: i32,
+    y: i32,
+) -> u8 {
+    let x = i64::from(offset.0) + i64::from(x);
+    let y = i64::from(offset.1) + i64::from(y);
+    if (0..i64::from(canvas.0)).contains(&x) && (0..i64::from(canvas.1)).contains(&y) {
+        selection.coverage(x, y, canvas.0, canvas.1)
+    } else {
+        0
+    }
+}
+
+fn clipped_tile(
+    rect: PixelRect,
+    offset: (i32, i32),
+    canvas: (u32, u32),
+    apron: i64,
+) -> Option<PixelRect> {
+    let dx = i64::from(offset.0);
+    let dy = i64::from(offset.1);
+    let left = (rect.x + dx - apron).max(0);
+    let top = (rect.y + dy - apron).max(0);
+    let right = (rect.right() + dx + apron).min(i64::from(canvas.0));
+    let bottom = (rect.bottom() + dy + apron).min(i64::from(canvas.1));
+    (left < right && top < bottom)
+        .then(|| PixelRect::new(left, top, (right - left) as u32, (bottom - top) as u32))
+}
+
 fn stroke_kind(tool: Tool) -> Option<StrokeKind> {
     match tool {
-        Tool::Pencil | Tool::Brush => Some(StrokeKind::Paint),
+        Tool::Pencil => Some(StrokeKind::Pencil),
+        Tool::Brush => Some(StrokeKind::Paint),
         Tool::Eraser => Some(StrokeKind::Erase),
         _ => None,
     }

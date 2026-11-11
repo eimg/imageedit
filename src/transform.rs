@@ -254,6 +254,7 @@ pub enum Warp {
 pub enum WarpError {
     Singular,
     Crossing,
+    Concave,
     TooLarge,
 }
 
@@ -262,6 +263,7 @@ impl WarpError {
         match self {
             Self::Singular => "That shape is too flat to transform.",
             Self::Crossing => "The corners cross. Move them so the edges do not intersect.",
+            Self::Concave => "Keep all four corners on the outside of the shape.",
             Self::TooLarge => "The transformed layer is too large.",
         }
     }
@@ -300,6 +302,13 @@ pub fn warp_bounds(
             if !degrees.is_finite() {
                 return Err(WarpError::Singular);
             }
+            if let Some(turn) = exact_turn(degrees) {
+                let turned = turned_size(size.0, size.1, turn);
+                return Ok(PlacedBox {
+                    offset: centered_offset(offset, size, turned),
+                    size: turned,
+                });
+            }
             rotate_corners(layer_corners(offset, size), degrees)
         }
         Warp::Flip(_) => layer_corners(offset, size),
@@ -324,41 +333,45 @@ pub fn warp_layer(
         offset: placed_offset,
         size: bounds,
     } = warp_bounds(offset, size, warp)?;
-    if matches!(warp, Warp::Flip(_)) {
-        let mirror = match warp {
-            Warp::Flip(mirror) => mirror,
-            _ => Mirror::Horizontal,
+    if max_edge.is_none_or(|edge| size.0.max(size.1) <= edge) {
+        let exact = match warp {
+            Warp::Flip(mirror) => Some(mirror_pixels(pixels, mirror)),
+            warp if identity_warp(offset, size, warp) => Some(pixels.clone()),
+            Warp::Rotate(degrees) => exact_turn(degrees).map(|turn| turn_pixels(pixels, turn)),
+            _ => None,
         };
-        return Ok(Placed {
-            pixels: mirror_pixels(pixels, mirror),
-            offset,
-            bounds: size,
-        });
-    }
-    if identity_warp(offset, size, warp) {
-        return Ok(Placed {
-            pixels: pixels.clone(),
-            offset,
-            bounds: size,
-        });
+        if let Some(pixels) = exact {
+            return Ok(Placed {
+                pixels,
+                offset: placed_offset,
+                bounds,
+            });
+        }
     }
     let grid = output_grid(bounds, max_edge);
     let mut image = RgbaImage::new(grid.0, grid.1);
     let source = layer_corners(offset, size);
     let dest = match warp {
-        Warp::Rotate(degrees) => rotate_corners(source, degrees),
+        Warp::Rotate(degrees) => placed_rotation_outline(offset, size, degrees),
         Warp::Perspective(corners) => corners,
         Warp::Flip(_) => source,
     };
+    let mapping = QuadMapping::new(dest).ok_or(WarpError::Singular)?;
     for y in 0..grid.1 {
         for x in 0..grid.0 {
             let canvas_x = f64::from(placed_offset.0)
                 + (f64::from(x) + 0.5) * f64::from(bounds.0) / f64::from(grid.0);
             let canvas_y = f64::from(placed_offset.1)
                 + (f64::from(y) + 0.5) * f64::from(bounds.1) / f64::from(grid.1);
-            let Some((u, v)) = unmap_quad(dest, (canvas_x, canvas_y)) else {
+            let Some((mut u, mut v)) = mapping.unmap((canvas_x, canvas_y)) else {
                 continue;
             };
+            if let Warp::Flip(mirror) = warp {
+                match mirror {
+                    Mirror::Horizontal => u = 1.0 - u,
+                    Mirror::Vertical => v = 1.0 - v,
+                }
+            }
             let sample_x = u * f64::from(size.0) - 0.5;
             let sample_y = v * f64::from(size.1) - 0.5;
             image.put_pixel(x, y, sample_pixel(pixels, sample_x, sample_y, resample));
@@ -371,20 +384,62 @@ pub fn warp_layer(
     })
 }
 
-pub fn map_quad(corners: [(f64, f64); 4], u: f64, v: f64) -> (f64, f64) {
-    let (top_x, top_y) = lerp(corners[0], corners[1], u);
-    let (bottom_x, bottom_y) = lerp(corners[3], corners[2], u);
-    lerp((top_x, top_y), (bottom_x, bottom_y), v)
+// Homography from the unit square to the destination quad. Using coordinates
+// relative to its first corner keeps the solve stable at large layer offsets.
+struct QuadMapping {
+    origin: (f64, f64),
+    u: (f64, f64),
+    v: (f64, f64),
+    perspective: (f64, f64),
 }
 
-pub fn unmap_quad(corners: [(f64, f64); 4], point: (f64, f64)) -> Option<(f64, f64)> {
-    let (u, v) = invert_bilinear(corners, point)?;
-    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
-        return None;
+impl QuadMapping {
+    fn new(corners: [(f64, f64); 4]) -> Option<Self> {
+        let [origin, p1, p2, p3] = corners;
+        let subtract = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0, a.1 - b.1);
+        let a = subtract(p1, p2);
+        let b = subtract(p3, p2);
+        let p1 = subtract(p1, origin);
+        let p2 = subtract(p2, origin);
+        let p3 = subtract(p3, origin);
+        let delta = (p2.0 - p1.0 - p3.0, p2.1 - p1.1 - p3.1);
+        let det = cross(a, b);
+        if det.abs() < 1e-8 {
+            return None;
+        }
+        let g = cross(delta, b) / det;
+        let h = cross(a, delta) / det;
+        Some(Self {
+            origin,
+            u: (p1.0 * (1.0 + g), p1.1 * (1.0 + g)),
+            v: (p3.0 * (1.0 + h), p3.1 * (1.0 + h)),
+            perspective: (g, h),
+        })
     }
-    let mapped = map_quad(corners, u, v);
-    let error = (mapped.0 - point.0).hypot(mapped.1 - point.1);
-    (error < 0.5).then_some((u, v))
+
+    #[cfg(test)]
+    fn map(&self, u: f64, v: f64) -> (f64, f64) {
+        let w = 1.0 + self.perspective.0 * u + self.perspective.1 * v;
+        (
+            self.origin.0 + (self.u.0 * u + self.v.0 * v) / w,
+            self.origin.1 + (self.u.1 * u + self.v.1 * v) / w,
+        )
+    }
+
+    fn unmap(&self, point: (f64, f64)) -> Option<(f64, f64)> {
+        let (x, y) = (point.0 - self.origin.0, point.1 - self.origin.1);
+        let (g, h) = self.perspective;
+        let a = (self.u.0 - x * g, self.u.1 - y * g);
+        let b = (self.v.0 - x * h, self.v.1 - y * h);
+        let det = cross(a, b);
+        if det.abs() < 1e-8 {
+            return None;
+        }
+        let u = cross((x, y), b) / det;
+        let v = cross(a, (x, y)) / det;
+        let inside = -1e-8..=1.0 + 1e-8;
+        (inside.contains(&u) && inside.contains(&v)).then(|| (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
+    }
 }
 
 fn identity_warp(offset: (i32, i32), size: (u32, u32), warp: Warp) -> bool {
@@ -399,6 +454,35 @@ fn identity_warp(offset: (i32, i32), size: (u32, u32), warp: Warp) -> bool {
             .zip(layer_corners(offset, size))
             .all(|(corner, source)| (corner.0 - source.0).hypot(corner.1 - source.1) < 1e-3),
     }
+}
+
+fn exact_turn(degrees: f64) -> Option<Turn> {
+    let degrees = degrees.rem_euclid(360.0);
+    [
+        (90.0, Turn::Right),
+        (180.0, Turn::Half),
+        (270.0, Turn::Left),
+    ]
+    .into_iter()
+    .find_map(|(angle, turn)| ((degrees - angle).abs() < 1e-6).then_some(turn))
+}
+
+pub(crate) fn placed_rotation_outline(
+    offset: (i32, i32),
+    size: (u32, u32),
+    degrees: f64,
+) -> [(f64, f64); 4] {
+    let mut corners = rotate_corners(layer_corners(offset, size), degrees);
+    if exact_turn(degrees).is_some() {
+        let placed = warp_bounds(offset, size, Warp::Rotate(degrees)).unwrap();
+        let left = corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        let top = corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        for (x, y) in &mut corners {
+            *x += f64::from(placed.offset.0) - left;
+            *y += f64::from(placed.offset.1) - top;
+        }
+    }
+    corners
 }
 
 pub(crate) fn rotate_corners(corners: [(f64, f64); 4], degrees: f64) -> [(f64, f64); 4] {
@@ -431,26 +515,28 @@ fn validate_quad(corners: [(f64, f64); 4]) -> Result<(), WarpError> {
             return Err(WarpError::Singular);
         }
     }
-    if quad_area(corners).abs() < 0.5 {
+    if segments_cross(corners[0], corners[1], corners[2], corners[3])
+        || segments_cross(corners[1], corners[2], corners[3], corners[0])
+    {
+        return Err(WarpError::Crossing);
+    }
+    let turns = std::array::from_fn::<_, 4, _>(|i| {
+        orient(corners[i], corners[(i + 1) % 4], corners[(i + 2) % 4])
+    });
+    if turns.iter().any(|turn| turn.abs() < 1e-6) {
         return Err(WarpError::Singular);
     }
-    let crosses = segments_cross(corners[0], corners[1], corners[2], corners[3])
-        || segments_cross(corners[1], corners[2], corners[3], corners[0]);
-    if crosses {
-        Err(WarpError::Crossing)
-    } else {
-        Ok(())
+    if turns.iter().any(|turn| turn.signum() != turns[0].signum()) {
+        return Err(WarpError::Concave);
     }
-}
-
-fn quad_area(corners: [(f64, f64); 4]) -> f64 {
-    let mut sum = 0.0;
-    for index in 0..4 {
-        let current = corners[index];
-        let next = corners[(index + 1) % 4];
-        sum += current.0 * next.1 - next.0 * current.1;
+    let area = (orient(corners[0], corners[1], corners[2])
+        + orient(corners[0], corners[2], corners[3]))
+    .abs()
+        * 0.5;
+    if area < 0.5 {
+        return Err(WarpError::Singular);
     }
-    sum * 0.5
+    Ok(())
 }
 
 fn segments_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
@@ -482,8 +568,8 @@ fn bounds_from_corners(corners: [(f64, f64); 4]) -> Result<PlacedBox, WarpError>
         .fold(f64::NEG_INFINITY, f64::max);
     let x = snap_min(min_x).ok_or(WarpError::TooLarge)?;
     let y = snap_min(min_y).ok_or(WarpError::TooLarge)?;
-    let width = span_u32(max_x - min_x).ok_or(WarpError::TooLarge)?;
-    let height = span_u32(max_y - min_y).ok_or(WarpError::TooLarge)?;
+    let width = span_u32(max_x - f64::from(x)).ok_or(WarpError::TooLarge)?;
+    let height = span_u32(max_y - f64::from(y)).ok_or(WarpError::TooLarge)?;
     if !canvas_allowed(width, height) {
         return Err(WarpError::TooLarge);
     }
@@ -542,72 +628,6 @@ fn output_grid(bounds: (u32, u32), max_edge: Option<u32>) -> (u32, u32) {
         (f64::from(bounds.0) * scale).round().max(1.0) as u32,
         (f64::from(bounds.1) * scale).round().max(1.0) as u32,
     )
-}
-
-fn lerp(start: (f64, f64), end: (f64, f64), t: f64) -> (f64, f64) {
-    (
-        start.0 + (end.0 - start.0) * t,
-        start.1 + (end.1 - start.1) * t,
-    )
-}
-
-fn invert_bilinear(corners: [(f64, f64); 4], point: (f64, f64)) -> Option<(f64, f64)> {
-    let a = corners[0];
-    let b = corners[1];
-    let d = corners[3];
-    let e = (b.0 - a.0, b.1 - a.1);
-    let f = (d.0 - a.0, d.1 - a.1);
-    let g = (
-        a.0 - b.0 + corners[2].0 - d.0,
-        a.1 - b.1 + corners[2].1 - d.1,
-    );
-    let h = (point.0 - a.0, point.1 - a.1);
-    let k2 = cross(g, f);
-    let k1 = cross(e, f) + cross(h, g);
-    let k0 = cross(h, e);
-    let roots = if k2.abs() < 1e-8 {
-        if k1.abs() < 1e-8 {
-            return None;
-        }
-        [-k0 / k1, f64::NAN]
-    } else {
-        let discriminant = k1 * k1 - 4.0 * k2 * k0;
-        if discriminant < 0.0 {
-            return None;
-        }
-        let root = discriminant.sqrt();
-        [(-k1 - root) / (2.0 * k2), (-k1 + root) / (2.0 * k2)]
-    };
-    let mut best: Option<(f64, f64, f64)> = None;
-    for v in roots {
-        if !v.is_finite() {
-            continue;
-        }
-        let v = v.clamp(-0.001, 1.001);
-        let denom_x = e.0 + g.0 * v;
-        let denom_y = e.1 + g.1 * v;
-        let u = if denom_x.abs() >= denom_y.abs() {
-            if denom_x.abs() < 1e-8 {
-                continue;
-            }
-            (h.0 - f.0 * v) / denom_x
-        } else {
-            if denom_y.abs() < 1e-8 {
-                continue;
-            }
-            (h.1 - f.1 * v) / denom_y
-        };
-        if !u.is_finite() {
-            continue;
-        }
-        let u = u.clamp(-0.001, 1.001);
-        let mapped = map_quad(corners, u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-        let error = (mapped.0 - point.0).hypot(mapped.1 - point.1);
-        if best.is_none_or(|(_, _, best_error)| error < best_error) {
-            best = Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0), error));
-        }
-    }
-    best.map(|(u, v, _)| (u, v))
 }
 
 fn cross(left: (f64, f64), right: (f64, f64)) -> f64 {
@@ -872,17 +892,28 @@ mod tests {
     }
 
     #[test]
+    fn a_mixed_parity_quarter_turn_preserves_exact_pixels() {
+        let image = RgbaImage::from_fn(3, 2, |x, y| Rgba([x as u8, y as u8, 0, 255]));
+        let placed =
+            warp_layer(&image, (-1, 2), Warp::Rotate(90.), Resample::Bicubic, None).unwrap();
+        assert_eq!(placed.bounds, (2, 3));
+        assert_eq!(placed.offset, centered_offset((-1, 2), (3, 2), (2, 3)));
+        assert_eq!(placed.pixels, turn_pixels(&image, Turn::Right));
+    }
+
+    #[test]
     fn perspective_maps_corners_and_keeps_a_straight_shift() {
         let corners = [(0.0, 0.0), (4.0, 1.0), (3.0, 4.0), (-1.0, 2.0)];
-        let center = map_quad(corners, 0.5, 0.5);
-        let (u, v) = unmap_quad(corners, center).unwrap();
+        let mapping = QuadMapping::new(corners).unwrap();
+        let center = mapping.map(0.5, 0.5);
+        let (u, v) = mapping.unmap(center).unwrap();
         assert!((u - 0.5).abs() < 1e-6 && (v - 0.5).abs() < 1e-6);
         for (index, (su, sv)) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
             .into_iter()
             .enumerate()
         {
-            let point = map_quad(corners, su, sv);
-            let (got_u, got_v) = unmap_quad(corners, point).unwrap();
+            let point = mapping.map(su, sv);
+            let (got_u, got_v) = mapping.unmap(point).unwrap();
             assert!(
                 (got_u - su).abs() < 1e-6 && (got_v - sv).abs() < 1e-6,
                 "{index}"
@@ -916,6 +947,36 @@ mod tests {
             sample_pixel(&solid, 1.0, 1.0, Resample::Bicubic).0,
             [0, 40, 0, 255]
         );
+    }
+
+    #[test]
+    fn a_projected_trapezoid_preserves_straight_lines_and_fractional_bounds() {
+        let corners = [(1.75, 0.0), (4.75, 0.0), (6.75, 6.0), (-0.25, 6.0)];
+        let mapping = QuadMapping::new(corners).unwrap();
+        // The source diagonal intersects its opposite at the projective center.
+        let center = mapping.map(0.5, 0.5);
+        assert!((center.0 - 3.25).abs() < 1e-9);
+        assert!((center.1 - 1.8).abs() < 1e-9);
+        let diagonal = mapping.map(0.25, 0.25);
+        assert!(orient(corners[0], corners[2], diagonal).abs() < 1e-9);
+        let bounds = warp_bounds((0, 0), (3, 3), Warp::Perspective(corners)).unwrap();
+        assert_eq!(bounds.offset, (-1, 0));
+        assert_eq!(bounds.size, (8, 6));
+        let concave = [(0.0, 0.0), (4.0, 0.0), (1.0, 1.0), (0.0, 4.0)];
+        assert_eq!(
+            warp_bounds((0, 0), (3, 3), Warp::Perspective(concave)),
+            Err(WarpError::Concave)
+        );
+    }
+
+    #[test]
+    fn flip_and_identity_previews_stay_within_the_preview_budget() {
+        let image = RgbaImage::from_pixel(32, 16, Rgba([42, 0, 0, 255]));
+        for warp in [Warp::Rotate(0.), Warp::Flip(Mirror::Horizontal)] {
+            let preview = warp_layer(&image, (0, 0), warp, Resample::Nearest, Some(8)).unwrap();
+            assert_eq!(preview.bounds, (32, 16));
+            assert_eq!(preview.pixels.dimensions(), (8, 4));
+        }
     }
 
     #[test]

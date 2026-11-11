@@ -1,4 +1,11 @@
+use std::collections::{BTreeSet, HashMap};
+
 use image::{Rgba, RgbaImage};
+
+use crate::preview::PixelRect;
+
+pub const STROKE_TILE: u32 = 64;
+pub type TileKey = (u32, u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Brush {
@@ -37,6 +44,7 @@ impl Brush {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrokeKind {
+    Pencil,
     Paint,
     Erase,
 }
@@ -51,6 +59,7 @@ struct Plotter {
     spacing: f64,
     from: Option<PlotPoint>,
     along: f64,
+    last_stamp: Option<PlotPoint>,
 }
 
 impl Plotter {
@@ -59,42 +68,67 @@ impl Plotter {
             spacing: spacing.max(1.0),
             from: None,
             along: 0.0,
+            last_stamp: None,
         }
     }
 
-    fn push(&mut self, point: PlotPoint) -> Vec<PlotPoint> {
-        let Some(from) = self.from else {
-            self.from = Some(point);
-            self.along = 0.0;
+    fn push(&mut self, point: PlotPoint, clip: Option<(f64, f64)>) -> Vec<PlotPoint> {
+        let Some(from) = self.from.replace(point) else {
+            self.last_stamp = Some(point);
             return vec![point];
         };
         let dx = point.x - from.x;
         let dy = point.y - from.y;
         let len = dx.hypot(dy);
-        if len < 1e-6 {
-            self.from = Some(point);
+        if len < 1e-6 || !len.is_finite() {
             return Vec::new();
         }
+
+        let first = self.spacing - self.along;
+        self.along = (self.along + len).rem_euclid(self.spacing);
+        if self.along < 1e-8 || self.spacing - self.along < 1e-8 {
+            self.along = 0.0;
+        }
+
+        let (start, end) = clip.unwrap_or((0.0, 1.0));
+        let skip = ((start * len - first) / self.spacing).ceil().max(0.0);
+        let mut distance = first + skip * self.spacing;
+        let last = end * len + 1e-9;
         let mut stamps = Vec::new();
-        let mut walked = 0.0;
-        let mut since_stamp = self.along;
-        while since_stamp + (len - walked) >= self.spacing - 1e-9 {
-            let step = self.spacing - since_stamp;
-            walked += step;
-            if walked > len + 1e-9 {
-                break;
-            }
-            let t = walked / len;
+        while distance <= last && start <= end {
+            let t = (distance / len).min(1.0);
             stamps.push(PlotPoint {
                 x: from.x + dx * t,
                 y: from.y + dy * t,
             });
-            since_stamp = 0.0;
+            distance += self.spacing;
         }
-        self.along = since_stamp + (len - walked);
-        self.from = Some(point);
+        if let Some(stamp) = stamps.last() {
+            self.last_stamp = Some(*stamp);
+        }
         stamps
     }
+}
+
+fn clip_segment(from: PlotPoint, to: PlotPoint, radius: f64, size: (u32, u32)) -> (f64, f64) {
+    let mut start: f64 = 0.0;
+    let mut end: f64 = 1.0;
+    for (origin, dest, edge) in [(from.x, to.x, size.0), (from.y, to.y, size.1)] {
+        let low = -radius;
+        let high = f64::from(edge) + radius;
+        let delta = dest - origin;
+        if delta.abs() < f64::EPSILON {
+            if !(low..=high).contains(&origin) {
+                return (1.0, 0.0);
+            }
+            continue;
+        }
+        let a = (low - origin) / delta;
+        let b = (high - origin) / delta;
+        start = start.max(a.min(b));
+        end = end.min(a.max(b));
+    }
+    (start, end)
 }
 
 #[cfg(test)]
@@ -104,7 +138,7 @@ fn plot_path(points: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
     for &(x, y) in points {
         stamps.extend(
             plotter
-                .push(PlotPoint { x, y })
+                .push(PlotPoint { x, y }, None)
                 .into_iter()
                 .map(|point| (point.x, point.y)),
         );
@@ -112,18 +146,13 @@ fn plot_path(points: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
     stamps
 }
 
-struct Buffer {
-    origin: (i32, i32),
-    pixels: RgbaImage,
-}
-
 pub struct Stroke {
     kind: StrokeKind,
     color: Rgba<u8>,
     brush: Brush,
     plotter: Plotter,
-    buffer: Option<Buffer>,
-    changed: bool,
+    tiles: HashMap<TileKey, RgbaImage>,
+    pending: BTreeSet<TileKey>,
 }
 
 impl Stroke {
@@ -134,24 +163,32 @@ impl Stroke {
             color,
             plotter: Plotter::new(brush.spacing_px()),
             brush,
-            buffer: None,
-            changed: false,
+            tiles: HashMap::new(),
+            pending: BTreeSet::new(),
         }
     }
 
     pub fn changed(&self) -> bool {
-        self.changed
+        !self.tiles.is_empty()
     }
 
-    pub fn origin(&self) -> (i32, i32) {
-        self.buffer
-            .as_ref()
-            .map(|buffer| buffer.origin)
-            .unwrap_or((0, 0))
+    pub fn take_pending_tiles(&mut self) -> BTreeSet<TileKey> {
+        std::mem::take(&mut self.pending)
     }
 
-    pub fn pixels(&self) -> Option<&RgbaImage> {
-        self.buffer.as_ref().map(|buffer| &buffer.pixels)
+    pub fn tile_bounds(&self, key: TileKey) -> Option<PixelRect> {
+        let pixels = self.tiles.get(&key)?;
+        Some(PixelRect::new(
+            i64::from(key.0 * STROKE_TILE),
+            i64::from(key.1 * STROKE_TILE),
+            pixels.width(),
+            pixels.height(),
+        ))
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<Rgba<u8>> {
+        let tile = self.tiles.get(&(x / STROKE_TILE, y / STROKE_TILE))?;
+        Some(*tile.get_pixel(x % STROKE_TILE, y % STROKE_TILE))
     }
 
     pub fn sample(
@@ -161,172 +198,128 @@ impl Stroke {
         source: &RgbaImage,
         coverage: impl Fn(i32, i32) -> u8,
     ) {
-        for point in self.plotter.push(PlotPoint { x, y }) {
-            self.dab(point.x, point.y, source, &coverage);
+        if !x.is_finite() || !y.is_finite() || self.brush.opacity == 0 {
+            return;
+        }
+        let point = PlotPoint { x, y };
+        let radius = f64::from(self.brush.diameter) / 2.0 + 1.0;
+        let clip = self
+            .plotter
+            .from
+            .map(|from| clip_segment(from, point, radius, source.dimensions()));
+        for point in self.plotter.push(point, clip) {
+            self.dab(point, source, &coverage);
         }
     }
 
-    fn dab(&mut self, x: f64, y: f64, source: &RgbaImage, coverage: &impl Fn(i32, i32) -> u8) {
-        let radius = f64::from(self.brush.diameter) / 2.0;
-        let min_x = (x - radius).floor() as i32;
-        let min_y = (y - radius).floor() as i32;
-        let max_x = (x + radius).ceil() as i32;
-        let max_y = (y + radius).ceil() as i32;
-        self.cover(min_x, min_y, max_x, max_y, source);
-        let kind = self.kind;
-        let color = self.color;
-        let hardness = self.brush.hardness;
-        let opacity = self.brush.opacity;
-        let wrote = {
-            let Some(buffer) = self.buffer.as_mut() else {
+    pub fn finish(&mut self, source: &RgbaImage, coverage: impl Fn(i32, i32) -> u8) {
+        if self.plotter.along > 1e-8
+            && let Some(point) = self.plotter.from
+        {
+            if self.brush.diameter == 1
+                && self.plotter.last_stamp.is_some_and(|last| {
+                    last.x.floor() == point.x.floor() && last.y.floor() == point.y.floor()
+                })
+            {
                 return;
+            }
+            self.dab(point, source, &coverage);
+        }
+    }
+
+    fn dab(&mut self, point: PlotPoint, source: &RgbaImage, coverage: &impl Fn(i32, i32) -> u8) {
+        let (mut x, mut y) = (point.x, point.y);
+        let radius = f64::from(self.brush.diameter) / 2.0;
+        let pencil = self.kind == StrokeKind::Pencil;
+        if pencil || self.brush.diameter == 1 {
+            let snap = |value: f64| {
+                if self.brush.diameter.is_multiple_of(2) {
+                    value.round()
+                } else {
+                    value.floor() + 0.5
+                }
             };
-            let (origin_x, origin_y) = buffer.origin;
-            let mut wrote = false;
-            for py in min_y..max_y {
-                for px in min_x..max_x {
-                    if px < origin_x || py < origin_y {
-                        continue;
+            x = snap(x);
+            y = snap(y);
+        }
+        let hardness = if pencil { 100 } else { self.brush.hardness };
+        let min_x = ((x - radius).floor() as i32).max(0);
+        let min_y = ((y - radius).floor() as i32).max(0);
+        let max_x = ((x + radius).ceil() as i32).min(source.width() as i32);
+        let max_y = ((y + radius).ceil() as i32).min(source.height() as i32);
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let falloff =
+                    dab_falloff(px as f64 + 0.5 - x, py as f64 + 0.5 - y, radius, hardness);
+                if falloff <= 0.0 {
+                    continue;
+                }
+                let amount = falloff * f64::from(self.brush.opacity) / 100.0
+                    * f64::from(coverage(px, py))
+                    / 255.0;
+                if amount <= 0.0 {
+                    continue;
+                }
+                let (px, py) = (px as u32, py as u32);
+                let before = self
+                    .pixel(px, py)
+                    .unwrap_or_else(|| *source.get_pixel(px, py));
+                let after = match self.kind {
+                    StrokeKind::Pencil | StrokeKind::Paint => {
+                        source_over(before, self.color, amount)
                     }
-                    let local_x = (px - origin_x) as u32;
-                    let local_y = (py - origin_y) as u32;
-                    if local_x >= buffer.pixels.width() || local_y >= buffer.pixels.height() {
-                        continue;
-                    }
-                    let falloff =
-                        dab_falloff(px as f64 + 0.5 - x, py as f64 + 0.5 - y, radius, hardness);
-                    if falloff <= 0.0 {
-                        continue;
-                    }
-                    let amount =
-                        falloff * f64::from(opacity) / 100.0 * f64::from(coverage(px, py)) / 255.0;
-                    if amount <= 0.0 {
-                        continue;
-                    }
-                    let before = *buffer.pixels.get_pixel(local_x, local_y);
-                    let after = match kind {
-                        StrokeKind::Paint => source_over(before, color, amount),
-                        StrokeKind::Erase => erase(before, amount),
-                    };
-                    if after != before {
-                        buffer.pixels.put_pixel(local_x, local_y, after);
-                        wrote = true;
-                    }
+                    StrokeKind::Erase => erase(before, amount),
+                };
+                if before != after {
+                    let key = (px / STROKE_TILE, py / STROKE_TILE);
+                    let tile = self.tiles.entry(key).or_insert_with(|| {
+                        let (x, y) = (key.0 * STROKE_TILE, key.1 * STROKE_TILE);
+                        image::imageops::crop_imm(
+                            source,
+                            x,
+                            y,
+                            STROKE_TILE.min(source.width() - x),
+                            STROKE_TILE.min(source.height() - y),
+                        )
+                        .to_image()
+                    });
+                    tile.put_pixel(px % STROKE_TILE, py % STROKE_TILE, after);
+                    self.pending.insert(key);
                 }
             }
-            wrote
-        };
-        self.changed |= wrote;
-    }
-
-    fn cover(&mut self, min_x: i32, min_y: i32, max_x: i32, max_y: i32, source: &RgbaImage) {
-        let limit_x = source.width() as i32;
-        let limit_y = source.height() as i32;
-        let min_x = min_x.clamp(0, limit_x);
-        let min_y = min_y.clamp(0, limit_y);
-        let max_x = max_x.clamp(0, limit_x);
-        let max_y = max_y.clamp(0, limit_y);
-        if min_x >= max_x || min_y >= max_y {
-            return;
         }
-        let Some(buffer) = self.buffer.take() else {
-            self.buffer = Some(Buffer {
-                origin: (min_x, min_y),
-                pixels: copied(source, min_x, min_y, max_x, max_y),
-            });
-            return;
-        };
-        let (origin_x, origin_y) = buffer.origin;
-        let old_right = origin_x + buffer.pixels.width() as i32;
-        let old_bottom = origin_y + buffer.pixels.height() as i32;
-        let next_x = min_x.min(origin_x);
-        let next_y = min_y.min(origin_y);
-        let next_right = max_x.max(old_right);
-        let next_bottom = max_y.max(old_bottom);
-        if next_x == origin_x
-            && next_y == origin_y
-            && next_right == old_right
-            && next_bottom == old_bottom
-        {
-            self.buffer = Some(buffer);
-            return;
-        }
-        let mut next = copied(source, next_x, next_y, next_right, next_bottom);
-        blit_image(
-            &buffer.pixels,
-            &mut next,
-            (origin_x - next_x) as u32,
-            (origin_y - next_y) as u32,
-        );
-        self.buffer = Some(Buffer {
-            origin: (next_x, next_y),
-            pixels: next,
-        });
     }
 }
 
-pub fn apply_stroke(
-    source: &RgbaImage,
-    stroke: &Stroke,
-) -> Option<(RgbaImage, (i32, i32, u32, u32))> {
-    let buffer = stroke.buffer.as_ref().filter(|_| stroke.changed)?;
-    let mut image = source.clone();
-    let (origin_x, origin_y) = buffer.origin;
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-    let mut changed = false;
-    for y in 0..buffer.pixels.height() {
-        for x in 0..buffer.pixels.width() {
-            let px = origin_x + x as i32;
-            let py = origin_y + y as i32;
-            if px < 0 || py < 0 || px >= source.width() as i32 || py >= source.height() as i32 {
-                continue;
+pub fn apply_stroke(source: &RgbaImage, stroke: &Stroke) -> Option<(RgbaImage, Vec<PixelRect>)> {
+    let mut image = None;
+    let mut regions = Vec::new();
+    for (&(column, row), tile) in &stroke.tiles {
+        let (origin_x, origin_y) = (column * STROKE_TILE, row * STROKE_TILE);
+        let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
+        let (mut max_x, mut max_y) = (0, 0);
+        for (x, y, pixel) in tile.enumerate_pixels() {
+            let (x, y) = (origin_x + x, origin_y + y);
+            if source.get_pixel(x, y) != pixel {
+                image
+                    .get_or_insert_with(|| source.clone())
+                    .put_pixel(x, y, *pixel);
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
             }
-            let next = *buffer.pixels.get_pixel(x, y);
-            if next == *image.get_pixel(px as u32, py as u32) {
-                continue;
-            }
-            image.put_pixel(px as u32, py as u32, next);
-            changed = true;
-            min_x = min_x.min(px);
-            min_y = min_y.min(py);
-            max_x = max_x.max(px);
-            max_y = max_y.max(py);
+        }
+        if min_x <= max_x && min_y <= max_y {
+            regions.push(PixelRect::new(
+                i64::from(min_x),
+                i64::from(min_y),
+                max_x - min_x + 1,
+                max_y - min_y + 1,
+            ));
         }
     }
-    changed.then_some((
-        image,
-        (
-            min_x,
-            min_y,
-            (max_x - min_x + 1) as u32,
-            (max_y - min_y + 1) as u32,
-        ),
-    ))
-}
-
-fn copied(source: &RgbaImage, min_x: i32, min_y: i32, max_x: i32, max_y: i32) -> RgbaImage {
-    let mut image = RgbaImage::new((max_x - min_x) as u32, (max_y - min_y) as u32);
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            image.put_pixel(
-                x,
-                y,
-                *source.get_pixel((min_x + x as i32) as u32, (min_y + y as i32) as u32),
-            );
-        }
-    }
-    image
-}
-
-fn blit_image(source: &RgbaImage, dest: &mut RgbaImage, origin_x: u32, origin_y: u32) {
-    for y in 0..source.height() {
-        for x in 0..source.width() {
-            dest.put_pixel(origin_x + x, origin_y + y, *source.get_pixel(x, y));
-        }
-    }
+    Some((image?, regions))
 }
 
 fn dab_falloff(dx: f64, dy: f64, radius: f64, hardness: u8) -> f64 {
@@ -435,13 +428,13 @@ mod tests {
             opacity: 50,
         };
         let once = paint_at(&clear, StrokeKind::Paint, soft, &[(0.5, 0.5)]);
-        let pixel = once.pixels().unwrap().get_pixel(0, 0).0;
+        let pixel = once.pixel(0, 0).unwrap().0;
         assert_eq!(pixel[0], 255);
         assert!((120..=135).contains(&pixel[3]), "{pixel:?}");
         soft.diameter = 3;
         soft.spacing = 1;
         let twice = paint_at(&clear, StrokeKind::Paint, soft, &[(0.5, 0.5), (1.5, 0.5)]);
-        let compounded = twice.pixels().unwrap().get_pixel(0, 0).0[3];
+        let compounded = twice.pixel(0, 0).unwrap().0[3];
         assert!(compounded > pixel[3] && compounded < 255, "{compounded}");
         soft.diameter = 1;
 
@@ -449,8 +442,8 @@ mod tests {
         soft.diameter = 5;
         soft.hardness = 0;
         let feather = paint_at(&clear, StrokeKind::Paint, soft, &[(2.5, 1.5)]);
-        let center = feather.pixels().unwrap().get_pixel(2, 1).0[3];
-        let edge = feather.pixels().unwrap().get_pixel(4, 1).0[3];
+        let center = feather.pixel(2, 1).unwrap().0[3];
+        let edge = feather.pixel(4, 1).unwrap().0[3];
         assert!(center > edge && edge > 0, "{center} {edge}");
 
         let mut opaque = RgbaImage::from_pixel(4, 1, Rgba([0, 0, 40, 200]));
@@ -469,7 +462,7 @@ mod tests {
         assert_eq!(erased.get_pixel(0, 0).0, [0, 0, 0, 0]);
         assert_eq!(erased.get_pixel(1, 0).0, [0, 0, 0, 0]);
         assert_eq!(erased.get_pixel(2, 0).0, [0, 0, 40, 200]);
-        assert_eq!(bounds, (0, 0, 2, 1));
+        assert_eq!(bounds, [PixelRect::new(0, 0, 2, 1)]);
         opaque.put_pixel(0, 0, Rgba([0, 0, 40, 200]));
         let mut half = Stroke::new(
             StrokeKind::Erase,
@@ -499,12 +492,21 @@ mod tests {
         let mut stroke = Stroke::new(StrokeKind::Paint, Rgba([0, 0, 0, 255]), brush);
         stroke.sample(0.5, 10.5, &image, |_, _| 255);
         stroke.sample(50.5, 10.5, &image, |_, _| 255);
-        let pixels = stroke.pixels().unwrap();
-        assert!(pixels.width() < 80, "{}", pixels.width());
-        assert!(pixels.height() < 10, "{}", pixels.height());
-        assert!(pixels.width() as usize * pixels.height() as usize * 4 < image.as_raw().len());
+        assert_eq!(stroke.tiles.len(), 1);
+        assert!(
+            stroke
+                .tiles
+                .values()
+                .map(|tile| tile.as_raw().len())
+                .sum::<usize>()
+                < image.as_raw().len()
+        );
         let (_, bounds) = apply_stroke(&image, &stroke).unwrap();
-        assert!(bounds.2 < 80 && bounds.3 < 10);
+        assert!(
+            bounds
+                .iter()
+                .all(|rect| rect.width < 80 && rect.height < 10)
+        );
     }
 
     #[test]
@@ -526,6 +528,73 @@ mod tests {
             assert_eq!(painted.get_pixel(x, 0).0[3], 255, "{x}");
         }
         assert_eq!(painted.get_pixel(11, 0).0[3], 0);
+    }
+
+    #[test]
+    fn a_long_diagonal_only_stores_touched_tiles() {
+        let image = RgbaImage::new(1024, 1024);
+        let stroke = paint_at(
+            &image,
+            StrokeKind::Pencil,
+            Brush {
+                diameter: 1,
+                ..Brush::default()
+            },
+            &[(0.2, 0.2), (1023.8, 1023.8)],
+        );
+        assert_eq!(stroke.tiles.len(), 16);
+        assert_eq!(stroke.pixel(0, 0).unwrap()[3], 255);
+        assert!(stroke.pixel(512, 0).is_none());
+    }
+
+    #[test]
+    fn a_long_stroke_commit_skips_untouched_preview_tiles() {
+        use crate::{
+            document::DocumentContent,
+            preview::{Dirty, FILTER_APRON, TILE_FINE, TileCache},
+        };
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(1024, 1024));
+        let layer = content.top_layer_id();
+        let stroke = paint_at(
+            &content.layer(layer).unwrap().pixels,
+            StrokeKind::Pencil,
+            Brush {
+                diameter: 1,
+                ..Brush::default()
+            },
+            &[(0.5, 0.5), (1023.5, 1023.5)],
+        );
+        let mut cache = TileCache::new(1024, 1024, TILE_FINE, FILTER_APRON);
+        cache.rebuild(&content, PixelRect::new(0, 0, 1024, 1024));
+        let untouched = cache.tile(3, 0).unwrap().clone();
+        let changed = cache.tile(3, 3).unwrap().clone();
+        let Dirty::Regions(regions) = content.apply_stroke(layer, &stroke) else {
+            panic!("expected separate dirty regions");
+        };
+        assert!(cache.rebuild_regions(&content, &regions).rebuilt < 16);
+        assert!(std::sync::Arc::ptr_eq(
+            &untouched,
+            cache.tile(3, 0).unwrap()
+        ));
+        assert!(!std::sync::Arc::ptr_eq(&changed, cache.tile(3, 3).unwrap()));
+    }
+
+    #[test]
+    fn release_stamps_an_endpoint_between_spaced_dabs() {
+        let image = RgbaImage::new(32, 4);
+        let mut stroke = paint_at(
+            &image,
+            StrokeKind::Paint,
+            Brush {
+                diameter: 4,
+                spacing: 100,
+                ..Brush::default()
+            },
+            &[(1.5, 1.5), (4.5, 1.5)],
+        );
+        assert_eq!(stroke.pixel(4, 1).unwrap()[3], 0);
+        stroke.finish(&image, |_, _| 255);
+        assert_eq!(stroke.pixel(4, 1).unwrap()[3], 255);
     }
 
     #[test]
@@ -571,7 +640,7 @@ mod tests {
             );
             return;
         }
-        let image = RgbaImage::new(8192, 8192);
+        let image = RgbaImage::new(4096, 4096);
         let mut stroke = Stroke::new(
             StrokeKind::Paint,
             Rgba([255, 0, 0, 255]),
@@ -586,24 +655,30 @@ mod tests {
         stroke.sample(100.5, 100.5, &image, |_, _| 255);
         stroke.sample(160.5, 100.5, &image, |_, _| 255);
         let buffered = started.elapsed();
-        let pixels = stroke.pixels().unwrap();
-        assert!(pixels.width() < 128 && pixels.height() < 32);
+        assert!(stroke.tiles.len() <= 2);
         let mut content = DocumentContent::single_layer("Image".into(), image);
         let id = content.top_layer_id();
-        let Dirty::Region(rect) = content.apply_stroke(id, &stroke) else {
-            panic!("stroke did not change a region");
+        let started = Instant::now();
+        for key in stroke.take_pending_tiles() {
+            let rect = stroke.tile_bounds(key).unwrap();
+            std::hint::black_box(content.composite_stroke_tile(id, &stroke, rect));
+        }
+        let composed = started.elapsed();
+        let dirty = match content.apply_stroke(id, &stroke) {
+            Dirty::Region(rect) => vec![rect],
+            Dirty::Regions(rects) => rects,
+            _ => panic!("stroke did not change a region"),
         };
         let started = Instant::now();
-        let rebuilt = TileCache::new(8192, 8192, TILE_FINE, 1)
-            .rebuild(&content, rect)
+        let rebuilt = TileCache::new(4096, 4096, TILE_FINE, 1)
+            .rebuild_regions(&content, &dirty)
             .rebuilt;
         println!(
-            "4K stroke buffer {} µs, dirty tile rebuild {} µs ({} tiles, {}×{})",
+            "4K stroke buffer {} µs, live tile composition {} µs, dirty tile rebuild {} µs ({} tiles)",
             buffered.as_micros(),
+            composed.as_micros(),
             started.elapsed().as_micros(),
             rebuilt,
-            rect.width,
-            rect.height
         );
         assert!(rebuilt <= 4);
     }

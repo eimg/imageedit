@@ -47,9 +47,10 @@ document is a single plain layer.
   stays disabled until there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
-- `src/paint.rs` stamps pencil, brush, and eraser dabs into a dirty-region
-  buffer. Spacing decides where the stamps fall, and the canvas keeps the
-  existing tiles until the stroke is released.
+- `src/paint.rs` spaces pencil, brush, and eraser dabs along the pointer path
+  and stores touched 64 px tiles. `src/workspace/paint_ui.rs` composites the
+  live tiles over the existing preview. Release commits their dirty regions
+  in one undo step.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,

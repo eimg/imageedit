@@ -85,13 +85,14 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   **Rotate** (`Shift+R`), **Flip** (`Shift+F`), and **Perspective** (`Shift+P`)
   preview the active layer. Drag to turn it, choose or drag a flip direction,
   or drag the perspective corners. Return applies the preview and Escape
-  cancels it. The selection stays in place. A flat, crossed, or oversized
-  shape is refused.
+  cancels it. Click the canvas to start another transform. The selection stays
+  in place. Perspective requires a convex shape within the layer size limit.
   **Pencil** (`N`), **Brush** (`P`), and **Eraser** (`Shift+E`) draw on the
-  active layer. Size, spacing, hardness, and opacity are in the tool options.
-  Release commits the whole stroke and Escape discards it. Shift-click draws a
-  straight line from the last stroke on that layer. The eraser lowers alpha,
-  and a selection limits where the stroke lands.
+  active layer. Pencil starts at one pixel and uses a hard edge. Brush and
+  Eraser also offer a hardness control. Release commits the whole stroke and
+  Escape discards it. Shift-click extends from the last committed stroke in
+  the current tab when it was on the same layer. The eraser lowers alpha, and
+  a selection limits where the stroke lands.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened

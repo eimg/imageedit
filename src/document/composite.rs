@@ -17,6 +17,14 @@ pub(super) fn flatten_region<'a>(
     layers: impl IntoIterator<Item = &'a RasterLayer>,
     bounds: PixelBounds,
 ) -> RgbaImage {
+    flatten_with(layers, bounds, |layer, x, y| *layer.pixels.get_pixel(x, y))
+}
+
+pub(super) fn flatten_with<'a>(
+    layers: impl IntoIterator<Item = &'a RasterLayer>,
+    bounds: PixelBounds,
+    sample: impl Fn(&RasterLayer, u32, u32) -> Rgba<u8>,
+) -> RgbaImage {
     let (width, height) = bounds.dimensions();
     let mut canvas = RgbaImage::new(width, height);
     for layer in layers {
@@ -32,7 +40,7 @@ pub(super) fn flatten_region<'a>(
         let (width, height) = clipped.dimensions();
         for y in 0..height {
             for x in 0..width {
-                let source = *layer.pixels.get_pixel(src_x + x, src_y + y);
+                let source = sample(layer, src_x + x, src_y + y);
                 let destination = canvas.get_pixel_mut(dst_x + x, dst_y + y);
                 match layer.blend_mode {
                     BlendMode::Normal => {

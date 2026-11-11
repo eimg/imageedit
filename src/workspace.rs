@@ -35,6 +35,7 @@ const RECENT_COLOR_LIMIT: usize = 12;
 
 struct Tab {
     id: usize,
+    stroke_anchor: Option<(LayerId, f64, f64)>,
     document: Document,
     active_layer: LayerId,
     zoom: Zoom,
@@ -69,6 +70,7 @@ impl Tab {
 #[derive(Clone, Copy)]
 enum Change {
     Edit,
+    Stroke { layer: LayerId, end: (f64, f64) },
     Selection,
     Undo,
     Redo,
@@ -116,7 +118,8 @@ pub struct Workspace {
     warp_resample: crate::transform::Resample,
     brush: crate::paint::Brush,
     stroke: Option<paint_ui::StrokeSession>,
-    stroke_anchor: Option<(LayerId, f64, f64)>,
+    stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
+    pencil: crate::paint::Brush,
     copy_token: u64,
     paste_token: u64,
     dialog_open: bool,
@@ -144,6 +147,10 @@ impl Workspace {
         cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() {
                 workspace.canvas_cursor.leave();
+                if workspace.stroke.is_some() {
+                    workspace.cancel_stroke(window, cx);
+                }
+                workspace.end_warp_drag(cx);
             }
             cx.notify();
         })
@@ -209,7 +216,11 @@ impl Workspace {
             warp_resample: crate::transform::Resample::Bilinear,
             brush: crate::paint::Brush::default(),
             stroke: None,
-            stroke_anchor: None,
+            stroke_commit_preview: None,
+            pencil: crate::paint::Brush {
+                diameter: 1,
+                ..Default::default()
+            },
             copy_token: 0,
             paste_token: 0,
             dialog_open: false,
@@ -257,6 +268,7 @@ impl Workspace {
             cx.add_recent_document(path);
         }
         self.tabs.push(Tab {
+            stroke_anchor: None,
             id: self.next_id,
             active_layer: document.content.preferred_active_layer(),
             document,
@@ -363,7 +375,7 @@ impl Workspace {
         self.active_tab().is_some_and(|tab| {
             !tab.busy()
                 && match change {
-                    Change::Edit | Change::Selection => false,
+                    Change::Edit | Change::Stroke { .. } | Change::Selection => false,
                     Change::Undo => tab.history.undo_target().is_some(),
                     Change::Redo => tab.history.redo_target().is_some(),
                 }
@@ -391,15 +403,18 @@ impl Workspace {
         if self.move_drag.is_some() {
             return;
         }
-        let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
+        let Some(index) = self.active else {
             return;
         };
-        if tab.busy() {
+        if self.tabs[index].busy() {
             return;
         }
+        self.cancel_warp(window, cx);
+        self.cancel_stroke(window, cx);
+        let tab = &mut self.tabs[index];
         self.free_points.clear();
         let target = match change {
-            Change::Edit | Change::Selection => None,
+            Change::Edit | Change::Stroke { .. } | Change::Selection => None,
             Change::Undo => tab.history.undo_target(),
             Change::Redo => tab.history.redo_target(),
         };
@@ -461,6 +476,13 @@ impl Workspace {
             self.move_token = self.move_token.wrapping_add(1);
             self.drop_move_overlay(window, cx);
         }
+        if self
+            .stroke_commit_preview
+            .as_ref()
+            .is_some_and(|(tab, _)| *tab == id)
+        {
+            self.clear_stroke_commit_preview(window, cx);
+        }
         self.history_clock += 1;
         let stamp = self.history_clock;
         let tab = &mut self.tabs[index];
@@ -474,9 +496,9 @@ impl Workspace {
         }
         let current = tab.state();
         let (content, active_layer, selection) = match change {
-            Change::Edit | Change::Selection => {
+            Change::Edit | Change::Stroke { .. } | Change::Selection => {
                 tab.history
-                    .commit(current, stamp, matches!(change, Change::Edit));
+                    .commit(current, stamp, !matches!(change, Change::Selection));
                 (content, edited_layer, edited_selection)
             }
             Change::Undo | Change::Redo => {
@@ -493,6 +515,11 @@ impl Workspace {
                 (state.content, state.active_layer, state.selection)
             }
         };
+        match change {
+            Change::Stroke { layer, end } => tab.stroke_anchor = Some((layer, end.0, end.1)),
+            Change::Selection => {}
+            _ => tab.stroke_anchor = None,
+        }
         tab.selection = selection;
         tab.active_layer = if content.layer(active_layer).is_some() {
             active_layer

@@ -270,7 +270,10 @@ enum WarpDrag {
     Flip {
         origin: Point<Pixels>,
     },
-    Corner(usize),
+    Corner {
+        index: usize,
+        grab: (f64, f64),
+    },
 }
 
 pub(super) struct WarpSession {
@@ -291,12 +294,14 @@ pub(super) struct WarpFrame {
     pub axis: Option<[(f64, f64); 2]>,
     pub grips: [(f64, f64); 4],
     pub grip_count: usize,
+    pub invalid: bool,
 }
 
 pub(super) struct WarpStatus {
     pub summary: String,
     pub error: Option<&'static str>,
     pub horizontal: bool,
+    pub applying: bool,
     pub resample: Resample,
 }
 
@@ -360,8 +365,18 @@ impl Workspace {
         self.drop_warp_overlay(window, cx);
     }
 
+    pub(super) fn can_apply_warp(&self) -> bool {
+        !self.warp_applying
+            && self.warp_error.is_none()
+            && self.active_tab().is_some_and(|tab| !tab.busy())
+            && self
+                .warp
+                .as_ref()
+                .is_some_and(|session| !session.dragging())
+    }
+
     pub(super) fn apply_warp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.warp_applying || self.active_tab().is_none_or(|tab| tab.busy()) {
+        if !self.can_apply_warp() {
             return;
         }
         let Some(session) = self.warp.as_ref() else {
@@ -374,6 +389,7 @@ impl Workspace {
         let resample = self.warp_resample;
         self.warp_dirty = false;
         self.warp_applying = true;
+        cx.notify();
         self.warp_token = self.warp_token.wrapping_add(1);
         let token = self.warp_token;
         let job = cx
@@ -387,7 +403,10 @@ impl Workspace {
                 }
                 workspace.warp_applying = false;
                 match result {
-                    Err(error) => workspace.notice(error.message(), cx),
+                    Err(error) => {
+                        workspace.warp_error = Some(error.message());
+                        cx.notify();
+                    }
                     Ok(placed) => workspace.commit_warp(layer, placed, window, cx),
                 }
             });
@@ -401,6 +420,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.warp_applying {
+            return;
+        }
         let Some(session) = self.warp.as_mut() else {
             return;
         };
@@ -418,7 +440,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.warp_resample == resample {
+        if self.warp_applying || self.warp_resample == resample {
             return;
         }
         self.warp_resample = resample;
@@ -431,8 +453,15 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.warp_applying {
+            return;
+        }
+        if self.warp.is_none() {
+            self.begin_warp(window, cx);
+        }
         let Some(canvas) = self.canvas_point(position, scale) else {
             return;
         };
@@ -446,7 +475,13 @@ impl Workspace {
                 start_angle: pointer_angle(session.center(), canvas),
             }),
             WarpKind::Flip => Some(WarpDrag::Flip { origin: position }),
-            WarpKind::Perspective => grip.map(WarpDrag::Corner),
+            WarpKind::Perspective => grip.map(|index| WarpDrag::Corner {
+                index,
+                grab: (
+                    session.corners[index].0 - canvas.0,
+                    session.corners[index].1 - canvas.1,
+                ),
+            }),
         };
         cx.notify();
     }
@@ -478,7 +513,8 @@ impl Workspace {
                     let degrees = wrap_degrees(
                         start_degrees + pointer_angle(session.center(), canvas) - start_angle,
                     );
-                    changed = (degrees - session.degrees).abs() >= 0.05;
+                    let degrees = (degrees * 10.0).round() / 10.0;
+                    changed = degrees != session.degrees;
                     session.degrees = degrees;
                 }
                 Some(WarpDrag::Flip { origin }) => {
@@ -494,9 +530,10 @@ impl Workspace {
                         session.mirror = mirror;
                     }
                 }
-                Some(WarpDrag::Corner(index)) => {
-                    changed = session.corners[index] != canvas;
-                    session.corners[index] = canvas;
+                Some(WarpDrag::Corner { index, grab }) => {
+                    let corner = (canvas.0 + grab.0, canvas.1 + grab.1);
+                    changed = session.corners[index] != corner;
+                    session.corners[index] = corner;
                 }
                 None => {}
             }
@@ -508,12 +545,11 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn end_warp_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn end_warp_drag(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.warp.as_mut() else {
             return;
         };
         if session.drag.take().is_some() {
-            self.request_warp_preview(window, cx);
             cx.notify();
         }
     }
@@ -525,18 +561,19 @@ impl Workspace {
         let center = session.center();
         Some(match session.kind {
             WarpKind::Rotate => {
-                let outline = transform::rotate_corners(source, session.degrees);
+                let outline =
+                    transform::placed_rotation_outline(session.offset, size, session.degrees);
                 let mid = (
                     (outline[0].0 + outline[1].0) / 2.0,
                     (outline[0].1 + outline[1].1) / 2.0,
                 );
-                let (sin, cos) = session.degrees.to_radians().sin_cos();
-                let grip = (mid.0 + sin * 28.0, mid.1 - cos * 28.0);
+                let grip = mid;
                 WarpFrame {
                     outline,
                     axis: None,
                     grips: [grip, grip, grip, grip],
                     grip_count: 1,
+                    invalid: self.warp_error.is_some(),
                 }
             }
             WarpKind::Flip => {
@@ -549,6 +586,7 @@ impl Workspace {
                     axis: Some(axis),
                     grips: source,
                     grip_count: 4,
+                    invalid: self.warp_error.is_some(),
                 }
             }
             WarpKind::Perspective => WarpFrame {
@@ -556,6 +594,7 @@ impl Workspace {
                 axis: None,
                 grips: session.corners,
                 grip_count: 4,
+                invalid: self.warp_error.is_some(),
             },
         })
     }
@@ -574,6 +613,7 @@ impl Workspace {
             summary,
             error: self.warp_error,
             horizontal: session.mirror == Mirror::Horizontal,
+            applying: self.warp_applying,
             resample: self.warp_resample,
         })
     }
@@ -585,22 +625,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        if !tab
-            .document
-            .content
-            .accepts_replacement(layer, &placed.pixels)
-        {
-            self.notice(WarpError::TooLarge.message(), cx);
-            return;
-        }
-        let unchanged = tab.document.content.layer(layer).is_some_and(|existing| {
-            existing.offset == placed.offset && existing.pixels.as_ref() == &placed.pixels
-        });
-        self.cancel_warp(window, cx);
-        if unchanged {
+        if self.active_tab().is_none_or(|tab| tab.busy()) {
+            self.notice(
+                "Finish the current operation before applying the transform.",
+                cx,
+            );
             return;
         }
         let pixels = placed.pixels;
@@ -613,12 +642,30 @@ impl Workspace {
     }
 
     fn request_warp_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.warp_dirty = true;
+        let Some(session) = self.warp.as_ref() else {
+            return;
+        };
+        let result =
+            transform::warp_bounds(session.offset, session.source.dimensions(), session.spec())
+                .and_then(|bounds| {
+                    self.active_document()
+                        .is_some_and(|doc| {
+                            doc.content.accepts_replacement(session.layer, bounds.size)
+                        })
+                        .then_some(())
+                        .ok_or(WarpError::TooLarge)
+                });
+        self.warp_error = result.err().map(WarpError::message);
+        self.warp_dirty = result.is_ok();
+        if self.warp_error.is_some() {
+            self.warp_token = self.warp_token.wrapping_add(1);
+        }
         self.pump_warp_preview(window, cx);
+        cx.notify();
     }
 
     fn pump_warp_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.warp_busy || self.warp_applying || self.warp.is_none() {
+        if self.warp_busy || self.warp_applying || !self.warp_dirty || self.warp.is_none() {
             return;
         }
         let base = if self.warp_overlay.is_none() {
@@ -671,7 +718,9 @@ impl Workspace {
             let preview = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
                 workspace.warp_busy = false;
-                let current = workspace.warp.is_some() && workspace.warp_token == token;
+                let current = workspace.warp.is_some()
+                    && workspace.warp_token == token
+                    && (!workspace.warp_dirty || workspace.warp_overlay.is_none());
                 if !current {
                     drop_preview(preview, window, cx);
                 } else {

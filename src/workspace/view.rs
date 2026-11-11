@@ -159,9 +159,13 @@ impl Render for Workspace {
                         matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective),
                         |root| {
                             root.key_context("Transform")
-                                .on_action(cx.listener(|this, _: &ApplyTransform, window, cx| {
-                                    this.apply_warp(window, cx)
-                                }))
+                                .when(self.can_apply_warp(), |root| {
+                                    root.on_action(cx.listener(
+                                        |this, _: &ApplyTransform, window, cx| {
+                                            this.apply_warp(window, cx)
+                                        },
+                                    ))
+                                })
                                 .on_action(cx.listener(|this, _: &CancelTransform, window, cx| {
                                     this.cancel_warp(window, cx);
                                     cx.notify();
@@ -576,7 +580,12 @@ impl Workspace {
                             area.cursor(CursorStyle::Crosshair).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.begin_warp_drag(event.position, window.scale_factor(), cx);
+                                    this.begin_warp_drag(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
                                 }),
                             )
                         },
@@ -970,7 +979,11 @@ impl Workspace {
                                 let resample = status.resample;
                                 let show_resample = self.tool != Tool::Flip;
                                 panel
-                                    .child(status.summary)
+                                    .child(if status.applying {
+                                        "Applying…".into()
+                                    } else {
+                                        status.summary
+                                    })
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
                                     })
@@ -1017,14 +1030,23 @@ impl Workspace {
                                             .flex()
                                             .flex_col()
                                             .gap_2()
-                                            .child(form_button("Apply", true).w_full().on_click(
-                                                |_, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(ApplyTransform),
-                                                        cx,
-                                                    )
-                                                },
-                                            ))
+                                            .child(
+                                                form_button("Apply", true)
+                                                    .w_full()
+                                                    .when(self.can_apply_warp(), |button| {
+                                                        button.on_click(|_, window, cx| {
+                                                            window.dispatch_action(
+                                                                Box::new(ApplyTransform),
+                                                                cx,
+                                                            );
+                                                        })
+                                                    })
+                                                    .when(!self.can_apply_warp(), |button| {
+                                                        button
+                                                            .opacity(0.45)
+                                                            .cursor(CursorStyle::Arrow)
+                                                    }),
+                                            )
                                             .child(form_button("Cancel", false).w_full().on_click(
                                                 |_, window, cx| {
                                                     window.dispatch_action(
@@ -1051,12 +1073,16 @@ impl Workspace {
                                             super::paint_ui::BrushField::Spacing,
                                             cx,
                                         ))
-                                        .child(brush_row(
-                                            "Hardness",
-                                            self.brush_value(super::paint_ui::BrushField::Hardness),
-                                            super::paint_ui::BrushField::Hardness,
-                                            cx,
-                                        ))
+                                        .when(self.tool != Tool::Pencil, |panel| {
+                                            panel.child(brush_row(
+                                                "Hardness",
+                                                self.brush_value(
+                                                    super::paint_ui::BrushField::Hardness,
+                                                ),
+                                                super::paint_ui::BrushField::Hardness,
+                                                cx,
+                                            ))
+                                        })
                                         .child(brush_row(
                                             "Opacity",
                                             self.brush_value(super::paint_ui::BrushField::Opacity),
@@ -1445,7 +1471,7 @@ struct CanvasDecorations {
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
     warp: Option<super::transform_ui::WarpFrame>,
-    stroke: Option<super::paint_ui::StrokePaint>,
+    stroke: Vec<super::paint_ui::StrokePaint>,
     free_path: Vec<Point<f32>>,
     polygon: bool,
 }
@@ -1495,53 +1521,39 @@ fn image_preview(
             if visible.is_empty() {
                 return;
             }
-            if has_transparency || move_layer.is_some() || stroke.is_some() {
+            if has_transparency || move_layer.is_some() {
                 paint_checkerboard(window, image_bounds, visible);
             }
             if let Some(move_layer) = move_layer.clone() {
                 paint_moved_layer(window, &geometry, width, height, &move_layer);
             } else {
-                let hole = stroke
-                    .as_ref()
-                    .and_then(|stroke| stroke_bounds(&geometry, width, height, stroke.rect));
-                let paint_base = |window: &mut Window, area: Bounds<Pixels>| {
-                    let pixel_width = image_bounds.size.width / width as f32;
-                    let pixel_height = image_bounds.size.height / height as f32;
-                    if pixel_width.min(pixel_height) >= px(8.) {
-                        paint_source_pixels(window, &pixels, image_bounds, area);
-                    } else if !paint_tiles(
+                let pixel_width = image_bounds.size.width / width as f32;
+                let pixel_height = image_bounds.size.height / height as f32;
+                let show_pixels = pixel_width.min(pixel_height) >= px(8.);
+                if show_pixels {
+                    paint_source_pixels(window, &pixels, image_bounds, visible);
+                } else if !paint_tiles(
+                    window,
+                    &geometry,
+                    width,
+                    height,
+                    window.scale_factor(),
+                    visible,
+                    &tile_sets,
+                ) && let Err(error) =
+                    window.paint_image(image_bounds, Corners::default(), image.clone(), 0, false)
+                {
+                    eprintln!("Could not paint image preview: {error}");
+                }
+                for patch in &stroke {
+                    paint_stroke_patch(
                         window,
                         &geometry,
-                        width,
-                        height,
-                        window.scale_factor(),
-                        area,
-                        &tile_sets,
-                    ) && let Err(error) = window.paint_image(
-                        image_bounds,
-                        Corners::default(),
-                        image.clone(),
-                        0,
-                        false,
-                    ) {
-                        eprintln!("Could not paint image preview: {error}");
-                    }
-                };
-                if let Some(hole) = hole {
-                    for region in outside_rects(visible, hole) {
-                        let region = region.intersect(&visible);
-                        if region.is_empty() {
-                            continue;
-                        }
-                        window.with_content_mask(Some(ContentMask { bounds: region }), |window| {
-                            paint_base(window, region);
-                        });
-                    }
-                    if let Some(stroke) = stroke.clone() {
-                        paint_stroke_patch(window, &geometry, width, height, visible, &stroke);
-                    }
-                } else {
-                    paint_base(window, visible);
+                        (width, height),
+                        visible,
+                        patch,
+                        show_pixels,
+                    );
                 }
             }
 
@@ -1942,86 +1954,39 @@ fn brush_step(
         }))
 }
 
-fn stroke_bounds(
-    geometry: &PreviewGeometry,
-    width: u32,
-    height: u32,
-    rect: preview::PixelRect,
-) -> Option<Bounds<Pixels>> {
-    if width == 0 || height == 0 || rect.width == 0 || rect.height == 0 {
-        return None;
-    }
-    let start = geometry.project(point(
-        rect.x as f32 / width as f32,
-        rect.y as f32 / height as f32,
-    ));
-    let end = geometry.project(point(
-        (rect.x + i64::from(rect.width)) as f32 / width as f32,
-        (rect.y + i64::from(rect.height)) as f32 / height as f32,
-    ));
-    Some(Bounds::from_corners(start, end))
-}
-
-fn outside_rects(bounds: Bounds<Pixels>, hole: Bounds<Pixels>) -> [Bounds<Pixels>; 4] {
-    let span = |start: Pixels, end: Pixels| (end - start).max(px(0.));
-    [
-        Bounds::new(
-            point(bounds.left(), bounds.top()),
-            size(bounds.size.width, span(bounds.top(), hole.top())),
-        ),
-        Bounds::new(
-            point(bounds.left(), hole.bottom()),
-            size(bounds.size.width, span(hole.bottom(), bounds.bottom())),
-        ),
-        Bounds::new(
-            point(bounds.left(), hole.top()),
-            size(
-                span(bounds.left(), hole.left()),
-                span(hole.top(), hole.bottom()),
-            ),
-        ),
-        Bounds::new(
-            point(hole.right(), hole.top()),
-            size(
-                span(hole.right(), bounds.right()),
-                span(hole.top(), hole.bottom()),
-            ),
-        ),
-    ]
-}
-
 fn paint_stroke_patch(
     window: &mut Window,
     geometry: &PreviewGeometry,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
     visible: Bounds<Pixels>,
-    stroke: &super::paint_ui::StrokePaint,
+    patch: &super::paint_ui::StrokePaint,
+    show_pixels: bool,
 ) {
-    let Some(hole) = stroke_bounds(geometry, width, height, stroke.rect) else {
-        return;
+    let project = |rect: preview::PixelRect| {
+        let start = geometry.project(point(
+            rect.x as f32 / width as f32,
+            rect.y as f32 / height as f32,
+        ));
+        let end = geometry.project(point(
+            rect.right() as f32 / width as f32,
+            rect.bottom() as f32 / height as f32,
+        ));
+        Bounds::from_corners(start, end)
     };
-    let mask = hole.intersect(&visible);
+    let mask = project(patch.content).intersect(&visible);
     if mask.is_empty() {
         return;
     }
+    let stored = project(patch.stored);
     window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
-        if let Some(below) = &stroke.below
-            && let Err(error) =
-                window.paint_image(geometry.bounds, Corners::default(), below.clone(), 0, false)
-        {
-            eprintln!("Could not paint layers below the stroke: {error}");
-        }
-        if let Err(error) =
-            window.paint_image(hole, Corners::default(), stroke.patch.clone(), 0, false)
+        // Repaint the background so erased pixels can reveal transparency.
+        paint_checkerboard(window, geometry.bounds, mask);
+        if show_pixels {
+            paint_source_pixels(window, &patch.pixels, stored, mask);
+        } else if let Err(error) =
+            window.paint_image(stored, Corners::default(), patch.image.clone(), 0, false)
         {
             eprintln!("Could not paint the stroke: {error}");
-        }
-        if let Some(above) = &stroke.above
-            && let Err(error) =
-                window.paint_image(geometry.bounds, Corners::default(), above.clone(), 0, false)
-        {
-            eprintln!("Could not paint layers above the stroke: {error}");
         }
     });
 }
@@ -2085,7 +2050,8 @@ fn paint_warp_frame(
     };
     window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
         let outline = frame.outline.map(project);
-        for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
+        let foreground = rgb(if frame.invalid { 0xffb4ab } else { 0xffffff });
+        for (weight, color) in [(3., rgb(0x12151c)), (1., foreground)] {
             let mut path = PathBuilder::stroke(px(weight));
             path.move_to(outline[0]);
             for corner in outline.iter().skip(1) {

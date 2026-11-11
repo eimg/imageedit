@@ -543,22 +543,47 @@ impl DocumentContent {
         ))
     }
 
+    pub fn composite_stroke_tile(
+        &self,
+        id: LayerId,
+        stroke: &crate::paint::Stroke,
+        rect: PixelRect,
+    ) -> RgbaImage {
+        let bounds = PixelBounds {
+            left: rect.x,
+            top: rect.y,
+            right: rect.right(),
+            bottom: rect.bottom(),
+        };
+        composite::flatten_with(&self.layers, bounds, |layer, x, y| {
+            if layer.id == id
+                && let Some(pixel) = stroke.pixel(x, y)
+            {
+                return pixel;
+            }
+            *layer.pixels.get_pixel(x, y)
+        })
+    }
+
     pub fn apply_stroke(&mut self, id: LayerId, stroke: &crate::paint::Stroke) -> Dirty {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
-        let Some((pixels, bounds)) = crate::paint::apply_stroke(&self.layers[index].pixels, stroke)
+        let Some((pixels, mut regions)) =
+            crate::paint::apply_stroke(&self.layers[index].pixels, stroke)
         else {
             return Dirty::None;
         };
         let offset = self.layers[index].offset;
         self.layers[index].pixels = Arc::new(pixels);
-        Dirty::Region(PixelRect::new(
-            i64::from(offset.0) + i64::from(bounds.0),
-            i64::from(offset.1) + i64::from(bounds.1),
-            bounds.2,
-            bounds.3,
-        ))
+        for rect in &mut regions {
+            rect.x += i64::from(offset.0);
+            rect.y += i64::from(offset.1);
+        }
+        match regions.as_slice() {
+            [rect] => Dirty::Region(*rect),
+            _ => Dirty::Regions(regions),
+        }
     }
 
     // Sets covered pixels to transparent. Pixels that are already clear do not count as a change.
@@ -623,11 +648,11 @@ impl DocumentContent {
         region_from_bounds(before.union(after))
     }
 
-    pub fn accepts_replacement(&self, id: LayerId, pixels: &RgbaImage) -> bool {
+    pub fn accepts_replacement(&self, id: LayerId, size: (u32, u32)) -> bool {
         let Some(index) = self.layer_index(id) else {
             return false;
         };
-        let Some(added) = image_bytes(pixels) else {
+        let Some(added) = (u64::from(size.0) * u64::from(size.1)).checked_mul(4) else {
             return false;
         };
         let removed = image_bytes(&self.layers[index].pixels).unwrap_or(0);
@@ -643,7 +668,7 @@ impl DocumentContent {
         if self.layers[index].offset == offset && self.layers[index].pixels.as_ref() == &pixels {
             return Dirty::None;
         }
-        if !self.accepts_replacement(id, &pixels) {
+        if !self.accepts_replacement(id, pixels.dimensions()) {
             return Dirty::None;
         }
         self.layers[index].pixels = Arc::new(pixels);
@@ -1432,6 +1457,45 @@ mod tests {
             bucket_fill(&source, 1, 1, color, 1, |_, _| 255).unwrap();
         assert_eq!((left, top, right, bottom), (0, 0, 2, 2));
         assert!(filled.pixels().all(|pixel| *pixel == color));
+    }
+
+    #[test]
+    fn a_live_eraser_tile_matches_the_committed_layer_stack() {
+        use crate::paint::{Brush, Stroke, StrokeKind};
+
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(12, 12, Rgba([30, 80, 120, 150])),
+        );
+        let active = content
+            .add_layer(LayerId(0), "Paint".into(), Rgba([250, 10, 20, 210]))
+            .unwrap();
+        let top = content
+            .add_layer(active, "Top".into(), Rgba([10, 200, 0, 90]))
+            .unwrap();
+        content.set_offset(active, (-2, 1));
+        content.set_opacity(active, 140);
+        content.set_offset(top, (3, -1));
+        let mut stroke = Stroke::new(
+            StrokeKind::Erase,
+            Rgba([0; 4]),
+            Brush {
+                diameter: 4,
+                ..Brush::default()
+            },
+        );
+        stroke.sample(5.5, 4.5, &content.layer(active).unwrap().pixels, |_, _| 128);
+        let bounds = PixelRect::new(2, 1, 7, 7);
+        let live = content.composite_stroke_tile(active, &stroke, bounds);
+        assert_ne!(
+            live,
+            content.composite_rect(bounds.x, bounds.y, bounds.width, bounds.height)
+        );
+        assert_ne!(content.apply_stroke(active, &stroke), Dirty::None);
+        assert_eq!(
+            live,
+            content.composite_rect(bounds.x, bounds.y, bounds.width, bounds.height)
+        );
     }
 
     #[test]
