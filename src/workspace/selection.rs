@@ -57,6 +57,8 @@ impl Workspace {
         self.selection_drag = None;
         self.selection_preview = None;
         self.free_points.clear();
+        self.free_drag_origin = None;
+        self.free_dragging = false;
     }
 
     pub(super) fn begin_selection(
@@ -150,7 +152,7 @@ impl Workspace {
                 ..
             } => {
                 let delta = position - origin;
-                if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
+                if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 4. {
                     None
                 } else {
                     let shape = if self.tool == Tool::Select {
@@ -494,25 +496,21 @@ impl Workspace {
         let Some(geometry) = PreviewGeometry::for_tab(tab, self.viewport.get(), scale) else {
             return;
         };
-        let point = geometry.fraction(position);
-        match self.tool {
-            Tool::FreeSelect => {
-                self.free_points.clear();
-                self.free_op = selection_op(modifiers);
-            }
-            Tool::Polygon => {
-                if self.free_points.len() >= 3
-                    && near_polygon_start(geometry.project(self.free_points[0]), position)
-                {
-                    self.close_free(window, cx);
-                    return;
-                }
-                if self.free_points.is_empty() {
-                    self.free_op = selection_op(modifiers);
-                }
-            }
-            _ => return,
+        if self.tool != Tool::FreeSelect {
+            return;
         }
+        let point = geometry.fraction(position);
+        if self.free_points.len() >= 3
+            && near_polygon_start(geometry.project(self.free_points[0]), position)
+        {
+            self.close_free(window, cx);
+            return;
+        }
+        if self.free_points.is_empty() {
+            self.free_op = selection_op(modifiers);
+        }
+        self.free_drag_origin = Some(position);
+        self.free_dragging = false;
         if self.free_points.last() != Some(&point) {
             self.free_points.push(point);
             cx.notify();
@@ -528,12 +526,22 @@ impl Workspace {
         if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
+        let Some(origin) = self.free_drag_origin else {
+            return;
+        };
         let Some(geometry) = self
             .active_tab()
             .and_then(|tab| PreviewGeometry::for_tab(tab, self.viewport.get(), scale))
         else {
             return;
         };
+        if !self.free_dragging {
+            let delta = position - origin;
+            if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
+                return;
+            }
+            self.free_dragging = true;
+        }
         let point = geometry.fraction(position);
         if self.free_points.last() != Some(&point) {
             self.free_points.push(point);
@@ -551,10 +559,15 @@ impl Workspace {
             return;
         }
         self.extend_free(position, window.scale_factor(), cx);
-        if self.free_points.len() < 3 || self.active_tab().is_none_or(|tab| tab.busy()) {
-            self.cancel_free(cx);
-        } else {
-            self.close_free(window, cx);
+        let dragging = self.free_dragging;
+        self.free_drag_origin = None;
+        self.free_dragging = false;
+        if dragging {
+            if self.free_points.len() < 3 || self.active_tab().is_none_or(|tab| tab.busy()) {
+                self.cancel_free(cx);
+            } else {
+                self.close_free(window, cx);
+            }
         }
     }
 
@@ -563,6 +576,8 @@ impl Workspace {
             return;
         }
         let points = std::mem::take(&mut self.free_points);
+        self.free_drag_origin = None;
+        self.free_dragging = false;
         let op = self.free_op;
         self.update_selection(
             move |current, (width, height)| {
@@ -592,6 +607,8 @@ impl Workspace {
             return;
         }
         self.free_points.clear();
+        self.free_drag_origin = None;
+        self.free_dragging = false;
         cx.notify();
     }
 

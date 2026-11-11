@@ -238,3 +238,14 @@ keeps the corner radius control.
   Select are separate tools. Oval Select has a Circle toggle. Both keep handles,
   move/resize, selection actions, and read-only Width/Height fields. Formatting,
   Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+
+## 18. Combine free select and polygon select
+
+Make Free Select flexible: click to add a vertex, or drag to draw a freehand
+outline. Remove the dedicated Polygon Select tool and its shortcut.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. Free Select now treats a
+  click as a polygon vertex and a drag as a freehand outline. It removed the
+  Polygon Select tool, its `L` shortcut, and its menu and toolbox entries.
+  Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.

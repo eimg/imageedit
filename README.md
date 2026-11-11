@@ -60,9 +60,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   dashes move along the outline. The pointer becomes a resize arrow on a handle
   and a hand inside the box. Select All, Deselect, and Invert are in the Select
   menu and in the tool options.
-  **Free Select** (`F`) drags a freehand outline and closes it on release.
-  **Polygon Select** (`L`) clicks vertices, then closes by clicking the start
-  marker or pressing Return. Escape cancels either draft. **Magic Wand**
+  **Free Select** (`F`) works two ways: drag for a freehand outline that closes
+  on release, or click to add vertices and close by clicking the start marker
+  or pressing Return. Escape cancels the draft. **Magic Wand**
   (`W`) selects a connected region. Its tolerance is shared with Bucket Fill:
   zero matches every channel exactly, and a higher value allows that much
   difference in the most changed channel. Hold Shift to add, Control to
@@ -199,7 +199,7 @@ the full names used below.
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket / Color Picker | C / B / K |
-| Rectangle Select / Oval Select / Free Select / Polygon Select / Magic Wand / Move | R / O / F / L / W / M |
+| Rectangle Select / Oval Select / Free Select / Magic Wand / Move | R / O / F / W / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Eraser | E |
 | Gradient / Path / Stroke / Text | G / P / S / T |

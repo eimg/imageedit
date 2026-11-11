@@ -231,16 +231,13 @@ impl Render for Workspace {
                             .on_action(cx.listener(|this, _: &CancelFreeSelect, _, cx| {
                                 this.cancel_free(cx);
                             }))
-                            .when(
-                                self.tool == Tool::Polygon && self.free_points.len() >= 3,
-                                |root| {
-                                    root.on_action(cx.listener(
-                                        |this, _: &CloseFreeSelect, window, cx| {
-                                            this.close_free(window, cx);
-                                        },
-                                    ))
-                                },
-                            )
+                            .when(self.free_points.len() >= 3, |root| {
+                                root.on_action(cx.listener(
+                                    |this, _: &CloseFreeSelect, window, cx| {
+                                        this.close_free(window, cx);
+                                    },
+                                ))
+                            })
                     })
                     .when(self.tool == Tool::Stroke, |root| {
                         root.key_context("Stroke").on_action(cx.listener(
@@ -1041,23 +1038,20 @@ impl Workspace {
                                 }),
                             )
                     })
-                    .when(
-                        matches!(self.tool, Tool::FreeSelect | Tool::Polygon) && !tab.busy(),
-                        |area| {
-                            area.cursor(CursorStyle::Crosshair).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.begin_free(
-                                        event.position,
-                                        &event.modifiers,
-                                        window.scale_factor(),
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                            )
-                        },
-                    )
+                    .when(self.tool == Tool::FreeSelect && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_free(
+                                    event.position,
+                                    &event.modifiers,
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                    })
                     .when(self.tool == Tool::MagicWand && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
@@ -1146,7 +1140,7 @@ impl Workspace {
                             gradient: self.gradient_frame(),
                             stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
-                            polygon: self.tool == Tool::Polygon,
+                            polygon: self.tool == Tool::FreeSelect,
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
@@ -1312,7 +1306,6 @@ impl Workspace {
                                     Tool::Select
                                         | Tool::OvalSelect
                                         | Tool::FreeSelect
-                                        | Tool::Polygon
                                         | Tool::MagicWand
                                 ),
                                 |panel| {
@@ -1705,7 +1698,6 @@ impl Workspace {
                                         | Tool::Select
                                         | Tool::OvalSelect
                                         | Tool::FreeSelect
-                                        | Tool::Polygon
                                         | Tool::MagicWand
                                         | Tool::Move
                                         | Tool::Rotate

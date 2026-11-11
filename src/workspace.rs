@@ -132,6 +132,8 @@ pub struct Workspace {
     tolerance: u8,
     free_points: Vec<Point<f32>>,
     free_op: crate::selection::SelectionOp,
+    free_drag_origin: Option<Point<Pixels>>,
+    free_dragging: bool,
     move_drag: Option<layers::MoveDrag>,
     move_overlay: Option<layers::MovePaint>,
     move_settled: Option<(i32, i32)>,
@@ -218,6 +220,8 @@ impl Workspace {
                 workspace.toolbox_drag = None;
                 if workspace.tool == Tool::FreeSelect {
                     workspace.free_points.clear();
+                    workspace.free_drag_origin = None;
+                    workspace.free_dragging = false;
                 }
                 workspace.cancel_path_gesture(cx);
                 if workspace.move_drag.is_some() {
@@ -281,6 +285,8 @@ impl Workspace {
             tolerance: 0,
             free_points: Vec::new(),
             free_op: crate::selection::SelectionOp::Replace,
+            free_drag_origin: None,
+            free_dragging: false,
             move_drag: None,
             move_overlay: None,
             move_settled: None,
