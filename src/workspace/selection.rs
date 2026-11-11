@@ -389,6 +389,10 @@ impl Workspace {
     }
 
     pub(super) fn bind_selection_actions(&self, root: Div, cx: &Context<Self>) -> Div {
+        if self.text_draft.is_some() {
+            return root
+                .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all_text(cx)));
+        }
         let root = self.bind_selection::<SelectAll>(root, SelectionCommand::All, cx);
         let root = self.bind_selection::<SelectNone>(root, SelectionCommand::None, cx);
         let root = self.bind_selection::<InvertSelection>(root, SelectionCommand::Invert, cx);

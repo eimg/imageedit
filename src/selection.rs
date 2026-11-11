@@ -203,6 +203,14 @@ impl Selection {
     pub fn stroke_polylines(&self, width: u32, height: u32) -> Vec<Vec<(f64, f64)>> {
         match self {
             Self::Mask(_) => chain_edges(self.outline_edges()),
+            Self::Inverse(hole)
+                if hole.x <= 0
+                    || hole.y <= 0
+                    || hole.right() >= i64::from(width)
+                    || hole.bottom() >= i64::from(height) =>
+            {
+                inverse_edge_loops(*hole, width, height)
+            }
             _ => self
                 .contours(width, height)
                 .into_iter()
@@ -311,18 +319,40 @@ impl Selection {
         let Self::Mask(mask) = self else {
             return self;
         };
-        let mut points = Vec::new();
-        for y in 0..mask.height {
-            for x in 0..mask.width {
-                let coverage = mask.pixels[(y * mask.width + x) as usize];
-                if coverage == 0 {
-                    continue;
+        let mapped = || {
+            mask.pixels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &coverage)| {
+                    if coverage == 0 {
+                        return None;
+                    }
+                    let (mx, my) = map(
+                        mask.x + (index % mask.width as usize) as i32,
+                        mask.y + (index / mask.width as usize) as i32,
+                    );
+                    (mx >= 0 && my >= 0 && (mx as u32) < width && (my as u32) < height)
+                        .then_some((mx, my, coverage))
+                })
+        };
+        let bounds = mapped().fold(None, |bounds, (x, y, _)| {
+            Some(match bounds {
+                None => (x, y, x, y),
+                Some((left, top, right, bottom)) => {
+                    (x.min(left), y.min(top), x.max(right), y.max(bottom))
                 }
-                let (mx, my) = map(mask.x + x as i32, mask.y + y as i32);
-                points.push((mx, my, coverage));
-            }
+            })
+        });
+        let Some((left, top, right, bottom)) = bounds else {
+            return Self::Empty;
+        };
+        let (buf_w, buf_h) = ((right - left + 1) as u32, (bottom - top + 1) as u32);
+        let mut pixels = vec![0u8; buf_w as usize * buf_h as usize];
+        for (x, y, coverage) in mapped() {
+            let index = (y - top) as usize * buf_w as usize + (x - left) as usize;
+            pixels[index] = pixels[index].max(coverage);
         }
-        selection_from_points(&points, width, height)
+        finish_mask(left, top, buf_w, buf_h, pixels, width, height)
     }
 
     pub fn scale_mask(self, old: (u32, u32), new: (u32, u32)) -> Self {
@@ -425,7 +455,7 @@ impl Mask {
                 selected(canvas_x, canvas_y) && !selected(canvas_x, canvas_y + 1)
             })
             .into_iter()
-            .for_each(|(start, end)| edges.push((start, canvas_y + 1, end, canvas_y + 1)));
+            .for_each(|(start, end)| edges.push((end, canvas_y + 1, start, canvas_y + 1)));
         }
         for x in 0..self.width as i32 {
             let canvas_x = self.x + x;
@@ -434,7 +464,7 @@ impl Mask {
                 selected(canvas_x, canvas_y) && !selected(canvas_x - 1, canvas_y)
             })
             .into_iter()
-            .for_each(|(start, end)| edges.push((canvas_x, start, canvas_x, end)));
+            .for_each(|(start, end)| edges.push((canvas_x, end, canvas_x, start)));
             coalesce(self.y, self.height, |y| {
                 let canvas_y = self.y + y;
                 selected(canvas_x, canvas_y) && !selected(canvas_x + 1, canvas_y)
@@ -465,16 +495,18 @@ fn rect_loop(rect: PixelRect) -> Option<Vec<(f64, f64)>> {
 
 type GridPoint = (i32, i32);
 
+// Every edge keeps selected pixels on its right. Prefer a right turn at a
+// diagonal contact, so touching islands stay separate loops. Seed order is stable
+// because brush spacing makes the starting vertex observable.
 fn chain_edges(edges: &[MaskEdge]) -> Vec<Vec<(f64, f64)>> {
     let mut links: HashMap<GridPoint, Vec<GridPoint>> = HashMap::new();
     for &(x0, y0, x1, y1) in edges {
-        if (x0, y0) == (x1, y1) {
-            continue;
+        if (x0, y0) != (x1, y1) {
+            links.entry((x0, y0)).or_default().push((x1, y1));
         }
-        links.entry((x0, y0)).or_default().push((x1, y1));
-        links.entry((x1, y1)).or_default().push((x0, y0));
     }
-    let seeds: Vec<GridPoint> = links.keys().copied().collect();
+    let mut seeds: Vec<GridPoint> = links.keys().copied().collect();
+    seeds.sort_unstable();
     let mut lines = Vec::new();
     for seed in seeds {
         while let Some(next) = take_link(&mut links, seed, None) {
@@ -500,19 +532,81 @@ fn chain_edges(edges: &[MaskEdge]) -> Vec<Vec<(f64, f64)>> {
 fn take_link(
     links: &mut HashMap<GridPoint, Vec<GridPoint>>,
     from: GridPoint,
-    avoid: Option<GridPoint>,
+    previous: Option<GridPoint>,
 ) -> Option<GridPoint> {
-    let next = {
-        let list = links.get_mut(&from)?;
-        let index = list.iter().position(|next| Some(*next) != avoid)?;
-        list.swap_remove(index)
+    let list = links.get_mut(&from)?;
+    let direction = |from: GridPoint, to: GridPoint| {
+        if to.0 > from.0 {
+            0
+        } else if to.1 > from.1 {
+            1
+        } else if to.0 < from.0 {
+            2
+        } else {
+            3
+        }
     };
-    if let Some(back) = links.get_mut(&next)
-        && let Some(index) = back.iter().position(|end| *end == from)
-    {
-        back.swap_remove(index);
+    let index = list
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, next)| {
+            let turn = previous.map_or(0, |previous| {
+                match (direction(from, **next) + 4 - direction(previous, from)) % 4 {
+                    1 => 0,
+                    0 => 1,
+                    3 => 2,
+                    _ => 3,
+                }
+            });
+            (turn, **next)
+        })?
+        .0;
+    Some(list.swap_remove(index))
+}
+
+// An edge-touching inverse is a notch or disconnected strips, not two
+// overlapping rectangles. A 3×3 partition is enough without a canvas-sized mask.
+fn inverse_edge_loops(hole: PixelRect, width: u32, height: u32) -> Vec<Vec<(f64, f64)>> {
+    let Some(hole) = clip(hole, width, height) else {
+        return rect_loop(PixelRect::new(0, 0, width, height))
+            .into_iter()
+            .collect();
+    };
+    let mut xs = vec![0, hole.x as i32, hole.right() as i32, width as i32];
+    let mut ys = vec![0, hole.y as i32, hole.bottom() as i32, height as i32];
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+    let selected = |x: i32, y: i32| {
+        x >= 0
+            && y >= 0
+            && x < width as i32
+            && y < height as i32
+            && !contains(hole, i64::from(x), i64::from(y))
+    };
+    let mut edges = Vec::new();
+    for x in xs.windows(2) {
+        for y in ys.windows(2) {
+            let (left, right, top, bottom) = (x[0], x[1], y[0], y[1]);
+            if !selected(left, top) {
+                continue;
+            }
+            if !selected(left, top - 1) {
+                edges.push((left, top, right, top));
+            }
+            if !selected(right, top) {
+                edges.push((right, top, right, bottom));
+            }
+            if !selected(left, bottom) {
+                edges.push((right, bottom, left, bottom));
+            }
+            if !selected(left - 1, top) {
+                edges.push((left, bottom, left, top));
+            }
+        }
     }
-    Some(next)
+    chain_edges(&edges)
 }
 
 fn grid_point((x, y): GridPoint) -> (f64, f64) {
@@ -895,13 +989,42 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
             };
         }
     }
-    let sums = integral(&source, buf_w, buf_h);
     let area = u64::from(radius * 2 + 1) * u64::from(radius * 2 + 1);
     let mut output = vec![0u8; source.len()];
-    for row in 0..buf_h as i32 {
-        for column in 0..buf_w as i32 {
-            let sum = window_sum(&sums, buf_w, column, row, pad, buf_w as i32, buf_h as i32);
-            output[(row as u32 * buf_w + column as u32) as usize] = match kind {
+    // Running column sums replace an eight-byte-per-pixel integral image.
+    let columns = buf_w as usize;
+    let rows = buf_h as usize;
+    let pad = radius as usize;
+    let mut vertical = vec![0u64; columns];
+    for row in 0..=pad.min(rows - 1) {
+        for (column, sum) in vertical.iter_mut().enumerate() {
+            *sum += u64::from(source[row * columns + column]);
+        }
+    }
+    for row in 0..rows {
+        if row > 0 {
+            if row + pad < rows {
+                for (column, sum) in vertical.iter_mut().enumerate() {
+                    *sum += u64::from(source[(row + pad) * columns + column]);
+                }
+            }
+            if row > pad {
+                for (column, sum) in vertical.iter_mut().enumerate() {
+                    *sum -= u64::from(source[(row - pad - 1) * columns + column]);
+                }
+            }
+        }
+        let mut sum: u64 = vertical[..=pad.min(columns - 1)].iter().sum();
+        for column in 0..columns {
+            if column > 0 {
+                if column + pad < columns {
+                    sum += vertical[column + pad];
+                }
+                if column > pad {
+                    sum -= vertical[column - pad - 1];
+                }
+            }
+            output[row * columns + column] = match kind {
                 Reshape::Grow => u8::from(sum > 0) * 255,
                 Reshape::Shrink => u8::from(sum == area) * 255,
                 Reshape::Feather => ((sum + area / 2) / area).min(255) as u8,
@@ -909,68 +1032,6 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
         }
     }
     finish_mask(left, top, buf_w, buf_h, output, width, height)
-}
-
-fn integral(grid: &[u8], width: u32, height: u32) -> Vec<u64> {
-    let width = width as usize;
-    let stride = width + 1;
-    let mut sums = vec![0u64; stride * (height as usize + 1)];
-    for y in 0..height as usize {
-        for x in 0..width {
-            let value = u64::from(grid[y * width + x]);
-            sums[(y + 1) * stride + x + 1] =
-                value + sums[y * stride + x + 1] + sums[(y + 1) * stride + x]
-                    - sums[y * stride + x];
-        }
-    }
-    sums
-}
-
-fn window_sum(
-    sums: &[u64],
-    width: u32,
-    x: i32,
-    y: i32,
-    radius: i32,
-    buf_w: i32,
-    buf_h: i32,
-) -> u64 {
-    let stride = width as usize + 1;
-    let x0 = x.saturating_sub(radius).clamp(0, buf_w) as usize;
-    let y0 = y.saturating_sub(radius).clamp(0, buf_h) as usize;
-    let x1 = (x + radius + 1).clamp(0, buf_w) as usize;
-    let y1 = (y + radius + 1).clamp(0, buf_h) as usize;
-    if x0 >= x1 || y0 >= y1 {
-        return 0;
-    }
-    sums[y1 * stride + x1] + sums[y0 * stride + x0]
-        - sums[y0 * stride + x1]
-        - sums[y1 * stride + x0]
-}
-
-fn selection_from_points(points: &[(i32, i32, u8)], width: u32, height: u32) -> Selection {
-    let inside: Vec<_> = points
-        .iter()
-        .copied()
-        .filter(|(x, y, coverage)| {
-            *coverage > 0 && *x >= 0 && *y >= 0 && (*x as u32) < width && (*y as u32) < height
-        })
-        .collect();
-    if inside.is_empty() {
-        return Selection::Empty;
-    }
-    let min_x = inside.iter().map(|point| point.0).min().unwrap();
-    let min_y = inside.iter().map(|point| point.1).min().unwrap();
-    let max_x = inside.iter().map(|point| point.0).max().unwrap();
-    let max_y = inside.iter().map(|point| point.1).max().unwrap();
-    let buf_w = (max_x - min_x + 1) as u32;
-    let buf_h = (max_y - min_y + 1) as u32;
-    let mut pixels = vec![0u8; buf_w as usize * buf_h as usize];
-    for (x, y, coverage) in inside {
-        let index = ((y - min_y) as u32 * buf_w + (x - min_x) as u32) as usize;
-        pixels[index] = pixels[index].max(coverage);
-    }
-    finish_mask(min_x, min_y, buf_w, buf_h, pixels, width, height)
 }
 
 fn finish_mask(
@@ -1312,5 +1373,125 @@ mod tests {
                 && line.first() == line.last()
                 && line[line.len() - 2] != *line.last().unwrap()
         }));
+    }
+
+    #[test]
+    fn diagonal_islands_have_separate_repeatable_stroke_loops() {
+        let mask = Selection::Rect(PixelRect::new(0, 0, 1, 1)).combine(
+            Selection::Rect(PixelRect::new(1, 1, 1, 1)),
+            SelectionOp::Add,
+            3,
+            3,
+        );
+        let lines = mask.stroke_polylines(3, 3);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.len() == 5 && line.first() == line.last())
+        );
+        assert_eq!(lines, mask.stroke_polylines(3, 3));
+        let reversed = mask
+            .outline_edges()
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(lines, chain_edges(&reversed));
+    }
+
+    #[test]
+    fn an_inverse_touching_the_canvas_strokes_only_the_selected_boundary() {
+        let selection = Selection::Inverse(PixelRect::new(0, 0, 2, 2));
+        let lines = selection.stroke_polylines(4, 4);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].first(), lines[0].last());
+        assert!(!lines[0].contains(&(0.0, 0.0)));
+        let length: f64 = lines[0]
+            .windows(2)
+            .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+            .sum();
+        assert_eq!(length, 16.0);
+        let strips = Selection::Inverse(PixelRect::new(1, 0, 2, 4)).stroke_polylines(4, 4);
+        assert_eq!(strips.len(), 2);
+        assert!(strips.iter().all(|line| line.first() == line.last()));
+        assert!(
+            Selection::Inverse(PixelRect::new(0, 0, 4, 4))
+                .stroke_polylines(4, 4)
+                .is_empty()
+        );
+    }
+    #[test]
+    fn mask_mapping_keeps_partial_coverage_and_clips_outside_points() {
+        let source = finish_mask(0, 0, 3, 2, vec![0, 80, 160, 240, 0, 40], 3, 2);
+        let rotated = source.clone().map_mask(2, 3, |x, y| (1 - y, x));
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(
+                    source.coverage(x, y, 3, 2),
+                    rotated.coverage(1 - y, x, 2, 3)
+                );
+            }
+        }
+        let clipped = source.clone().map_mask(3, 2, |x, y| (x - 1, y));
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(
+                    clipped.coverage(x, y, 3, 2),
+                    source.coverage(x + 1, y, 3, 2)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_morphology_matches_direct_neighborhood_sums() {
+        for (width, height) in [(5, 4), (1, 5), (5, 1)] {
+            let source = finish_mask(
+                0,
+                0,
+                width,
+                height,
+                (0..width * height)
+                    .map(|i| ((i * 59 + 20) % 256) as u8)
+                    .collect(),
+                width,
+                height,
+            );
+            for radius in [1, 2, 6] {
+                for kind in [Reshape::Grow, Reshape::Shrink, Reshape::Feather] {
+                    let mut expected = Vec::new();
+                    let area = u64::from((radius * 2 + 1) * (radius * 2 + 1));
+                    for y in 0..i64::from(height) {
+                        for x in 0..i64::from(width) {
+                            let mut sum = 0u64;
+                            for dy in -i64::from(radius)..=i64::from(radius) {
+                                for dx in -i64::from(radius)..=i64::from(radius) {
+                                    let value = source.coverage(x + dx, y + dy, width, height);
+                                    sum += match kind {
+                                        Reshape::Feather => u64::from(value),
+                                        _ => u64::from(value > 0),
+                                    };
+                                }
+                            }
+                            expected.push(match kind {
+                                Reshape::Grow => u8::from(sum > 0) * 255,
+                                Reshape::Shrink => u8::from(sum == area) * 255,
+                                Reshape::Feather => ((sum + area / 2) / area) as u8,
+                            });
+                        }
+                    }
+                    let result = reshape(source.clone(), radius, width, height, kind);
+                    for y in 0..height {
+                        for x in 0..width {
+                            assert_eq!(
+                                result.coverage(i64::from(x), i64::from(y), width, height),
+                                expected[(y * width + x) as usize]
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

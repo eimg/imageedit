@@ -151,6 +151,10 @@ pub struct Workspace {
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     text_draft: Option<text_ui::TextDraft>,
+    text_generation: u64,
+    text_busy: bool,
+    text_dirty: bool,
+    text_error: Option<crate::text::TextError>,
     text_overlay: Option<layers::MovePaint>,
     pencil: crate::paint::Brush,
     copy_token: u64,
@@ -180,6 +184,18 @@ impl Workspace {
         cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() {
                 workspace.canvas_cursor.leave();
+                workspace.pan_drag = None;
+                workspace.crop_drag = None;
+                workspace.selection_drag = None;
+                workspace.selection_preview = None;
+                workspace.opacity_drag = None;
+                if workspace.free_mode == selection::FreeMode::Freehand {
+                    workspace.free_points.clear();
+                }
+                workspace.cancel_path_gesture(cx);
+                if workspace.move_drag.is_some() {
+                    workspace.cancel_move(window, cx);
+                }
                 if workspace.stroke.is_some() {
                     workspace.cancel_stroke(window, cx);
                 }
@@ -277,6 +293,10 @@ impl Workspace {
             stroke: None,
             stroke_commit_preview: None,
             text_draft: None,
+            text_generation: 0,
+            text_busy: false,
+            text_dirty: false,
+            text_error: None,
             text_overlay: None,
             pencil: crate::paint::Brush {
                 diameter: 1,
@@ -361,8 +381,11 @@ impl Workspace {
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
+        if switched && self.refuse_pending_text(cx) {
+            return;
+        }
         if switched {
-            self.dismiss_effect_form(window, cx);
+            self.dismiss_form(window, cx);
             self.clear_path_edit();
             self.clear_crop();
             self.clear_selection_gesture();
@@ -396,7 +419,8 @@ impl Workspace {
         self.pan_drag = None;
         let closed_active = self.active == Some(index);
         if closed_active {
-            self.dismiss_effect_form(window, cx);
+            self.opacity_drag = None;
+            self.dismiss_form(window, cx);
             self.clear_path_edit();
             self.clear_crop();
             self.clear_selection_gesture();
@@ -441,14 +465,15 @@ impl Workspace {
     }
 
     fn can_step_history(&self, change: Change) -> bool {
-        self.active_tab().is_some_and(|tab| {
-            !tab.busy()
-                && match change {
-                    Change::Edit | Change::Stroke { .. } | Change::Selection => false,
-                    Change::Undo => tab.history.undo_target().is_some(),
-                    Change::Redo => tab.history.redo_target().is_some(),
-                }
-        })
+        self.text_draft.is_none()
+            && self.active_tab().is_some_and(|tab| {
+                !tab.busy()
+                    && match change {
+                        Change::Edit | Change::Stroke { .. } | Change::Selection => false,
+                        Change::Undo => tab.history.undo_target().is_some(),
+                        Change::Redo => tab.history.redo_target().is_some(),
+                    }
+            })
     }
 
     fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
@@ -480,8 +505,15 @@ impl Workspace {
         if self.tabs[index].busy() {
             return;
         }
+        if self.refuse_pending_text(cx) {
+            return;
+        }
         self.dismiss_effect_form(window, cx);
+        self.clear_crop();
+        self.clear_selection_gesture();
         self.cancel_path_gesture(cx);
+        self.opacity_drag = None;
+        self.cancel_text(window, cx);
         self.cancel_warp(window, cx);
         self.cancel_stroke(window, cx);
         self.cancel_gradient(window, cx);
@@ -556,6 +588,9 @@ impl Workspace {
             .is_some_and(|(tab, _)| *tab == id)
         {
             self.clear_stroke_commit_preview(window, cx);
+        }
+        if self.active == Some(index) {
+            self.path_hold = None;
         }
         self.history_clock += 1;
         let stamp = self.history_clock;

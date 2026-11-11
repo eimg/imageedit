@@ -298,6 +298,9 @@ impl Workspace {
     }
 
     pub(super) fn jpeg_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_pending_file_edit(cx) {
+            return;
+        }
         if self.active_tab().is_some_and(|tab| !tab.busy()) {
             let quality = Field::new(self.jpeg_quality.to_string());
             self.show_form(FormKind::JpegQuality { quality }, window, cx);
@@ -451,6 +454,9 @@ impl Workspace {
         if self.dialog_open || self.form.is_some() {
             return;
         }
+        if !matches!(kind, FormKind::Color { .. }) && self.refuse_pending_text(cx) {
+            return;
+        }
         let focus = cx.focus_handle();
         focus.focus(window);
         self.form = Some(Form {
@@ -461,7 +467,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_adjustment(window, cx);
         self.clear_filter(window, cx);
         self.form = None;

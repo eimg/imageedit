@@ -346,20 +346,27 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
-        let pixels = self.mode.constrain_image(rendered.image);
+        let pixels = if self.mode == crate::transform::ColorMode::Rgb {
+            rendered.image
+        } else {
+            Arc::new(
+                self.mode
+                    .constrain_image(Arc::unwrap_or_clone(rendered.image)),
+            )
+        };
         let mut style = rendered.style;
         style.color = self.mode.constrain(style.color);
         let offset = style.offset_for(anchor);
         if self.layers[index].text.as_ref() == Some(&style)
             && self.layers[index].offset == offset
-            && self.layers[index].pixels.as_ref() == &pixels
+            && self.layers[index].pixels.as_ref() == pixels.as_ref()
         {
             return Dirty::None;
         }
         if !self.accepts_replacement(id, pixels.dimensions()) {
             return Dirty::None;
         }
-        self.layers[index].pixels = Arc::new(pixels);
+        self.layers[index].pixels = pixels;
         self.layers[index].offset = offset;
         self.layers[index].text = Some(style);
         Dirty::Canvas
@@ -387,7 +394,14 @@ impl DocumentContent {
         if !self.can_add_layer() {
             return None;
         }
-        let pixels = self.mode.constrain_image(rendered.image);
+        let pixels = if self.mode == crate::transform::ColorMode::Rgb {
+            rendered.image
+        } else {
+            Arc::new(
+                self.mode
+                    .constrain_image(Arc::unwrap_or_clone(rendered.image)),
+            )
+        };
         let bytes = image_bytes(&pixels)?;
         if !self.fits_stack(0, bytes) {
             return None;
@@ -404,7 +418,7 @@ impl DocumentContent {
             RasterLayer {
                 id,
                 name: "Text".into(),
-                pixels: Arc::new(pixels),
+                pixels,
                 offset,
                 visible: true,
                 opacity: 255,
@@ -446,8 +460,10 @@ impl DocumentContent {
 
     // One full-canvas layer with default properties and its import name.
     pub fn is_plain_raster(&self) -> bool {
-        self.full_canvas_layer()
-            .is_some_and(|layer| layer.name == IMPORTED_LAYER_NAME)
+        self.paths.is_empty()
+            && self
+                .full_canvas_layer()
+                .is_some_and(|layer| layer.name == IMPORTED_LAYER_NAME && layer.text.is_none())
     }
 
     pub fn composite(&self) -> Arc<RgbaImage> {
@@ -743,7 +759,7 @@ impl DocumentContent {
     fn merge_bounds(&self, id: LayerId) -> Option<(usize, PixelBounds)> {
         let index = self.layer_index(id)?.checked_sub(1)?;
         let [lower, upper] = [&self.layers[index], &self.layers[index + 1]];
-        if !lower.visible || !upper.visible {
+        if !lower.visible || !upper.visible || lower.text.is_some() || upper.text.is_some() {
             return None;
         }
         let union = lower.bounds().union(upper.bounds());
@@ -1375,6 +1391,21 @@ impl DocumentContent {
     // Flatten the layers on each side of a moving layer so it can be painted in stack order.
     pub fn composite_around(&self, id: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
         let index = self.layer_index(id).expect("the moving layer exists");
+        self.composite_partition(index, index + 1)
+    }
+
+    pub fn composite_at_insertion(&self, above: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
+        let index = self
+            .layer_index(above)
+            .map_or(self.layers.len(), |index| index + 1);
+        self.composite_partition(index, index)
+    }
+
+    fn composite_partition(
+        &self,
+        below: usize,
+        above: usize,
+    ) -> (Option<RgbaImage>, Option<RgbaImage>) {
         let bounds = PixelBounds {
             left: 0,
             top: 0,
@@ -1392,8 +1423,8 @@ impl DocumentContent {
                 .then(|| composite::flatten_region(layers, bounds))
         };
         (
-            composite(&self.layers[..index]),
-            composite(&self.layers[index + 1..]),
+            composite(&self.layers[..below]),
+            composite(&self.layers[above..]),
         )
     }
 
@@ -3132,7 +3163,7 @@ mod tests {
         let anchor = rendered.style.origin;
         assert_ne!(content.set_text(id, anchor, rendered.clone()), Dirty::None);
         assert_eq!(content.layer(id).unwrap().offset, (0, 0));
-        assert_eq!(content.composite().as_ref(), &rendered.image);
+        assert_eq!(content.composite().as_ref(), rendered.image.as_ref());
         let before = content.layer(id).unwrap().pixels.clone();
         assert!(
             content
@@ -3154,5 +3185,65 @@ mod tests {
             content.layer(id).unwrap().text.as_ref().unwrap().color.0,
             [77, 77, 77, 255]
         );
+    }
+
+    #[test]
+    fn raster_save_cannot_drop_paths_or_cached_text() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+        let mut content = DocumentContent::single_layer("Image".into(), RgbaImage::new(2, 2));
+        assert!(content.is_plain_raster());
+        let mut with_path = content.clone();
+        assert!(with_path.upsert_path(VectorPath {
+            id: PathId(0),
+            closed: false,
+            anchors: vec![Anchor::corner(AnchorId(0), (0.0, 0.0))]
+        }));
+        assert!(!with_path.is_plain_raster());
+        content.layers[0].text = Some(crate::text::TextStyle {
+            source: "Cached text".into(),
+            family: "Missing Family".into(),
+            resolved_family: "Fallback".into(),
+            size: 24.0,
+            color: Rgba([0, 0, 0, 255]),
+            origin: (0, 0),
+        });
+        assert!(!content.is_plain_raster());
+        let layer = &content.layers[0];
+        let cached = crate::text::RenderedText {
+            image: layer.pixels.clone(),
+            style: layer.text.clone().unwrap(),
+        };
+        assert!(cached.matches("Cached text", "Missing Family", 24.0, Rgba([0, 0, 0, 255])));
+        assert_eq!(content.set_text(LayerId(0), (0, 0), cached), Dirty::None);
+        assert!(content.rasterize_text(LayerId(0)));
+        assert!(content.is_plain_raster());
+    }
+
+    #[test]
+    fn insertion_preview_uses_the_same_layer_order_as_apply() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255])),
+        );
+        let middle = content
+            .add_layer(LayerId(0), "Middle".into(), Rgba([0, 255, 0, 255]))
+            .unwrap();
+        let upper = content
+            .add_layer(middle, "Upper".into(), Rgba([0, 0, 255, 255]))
+            .unwrap();
+        let (below, above) = content.composite_at_insertion(middle);
+        assert_eq!(below.unwrap().get_pixel(0, 0)[1], 255);
+        assert_eq!(above.unwrap().get_pixel(0, 0)[2], 255);
+        assert!(content.composite_at_insertion(upper).1.is_none());
+        content.layers[1].text = Some(crate::text::TextStyle {
+            source: "Hi".into(),
+            family: "sans-serif".into(),
+            resolved_family: "sans-serif".into(),
+            size: 24.0,
+            color: Rgba([0, 0, 0, 255]),
+            origin: (0, 0),
+        });
+        assert!(!content.can_merge_down(middle));
+        assert!(!content.can_merge_down(upper));
     }
 }

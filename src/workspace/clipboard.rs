@@ -21,6 +21,14 @@ impl Workspace {
                 this.new_from_clipboard(window, cx);
             }));
         }
+        if self.text_draft.is_some() {
+            return root
+                .on_action(cx.listener(|this, _: &CopyImage, _, cx| this.copy_text(cx)))
+                .on_action(cx.listener(|this, _: &CutImage, window, cx| this.cut_text(window, cx)))
+                .on_action(
+                    cx.listener(|this, _: &PasteImage, window, cx| this.paste_text(window, cx)),
+                );
+        }
         if !self.clipboard_target() {
             return root;
         }
@@ -33,7 +41,11 @@ impl Workspace {
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.visible)
         });
-        if visible {
+        if visible
+            && self
+                .active_tab()
+                .is_some_and(|tab| !tab.document.content.layer_is_text(tab.active_layer))
+        {
             root = root.on_action(
                 cx.listener(|this, _: &CutImage, window, cx| this.copy_image(true, window, cx)),
             );
@@ -57,11 +69,16 @@ impl Workspace {
     }
 
     fn clipboard_target(&self) -> bool {
-        self.move_drag.is_none() && self.active_tab().is_some_and(|tab| !tab.busy())
+        self.move_drag.is_none()
+            && !self.has_pending_text()
+            && self.active_tab().is_some_and(|tab| !tab.busy())
     }
 
     fn copy_image(&mut self, cut: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.clipboard_target() {
+            return;
+        }
+        if cut && self.refuse_text_pixels(false, cx) {
             return;
         }
         let Some(tab) = self.active_tab() else {
@@ -124,6 +141,7 @@ impl Workspace {
                 let tab = &workspace.tabs[index];
                 if workspace.active != Some(index)
                     || tab.history.generation() != generation
+                    || tab.active_layer != layer_id
                     || tab.busy()
                 {
                     workspace.tabs[index].notice = Some(
@@ -166,6 +184,7 @@ impl Workspace {
         };
         let tab_id = tab.id;
         let above = tab.active_layer;
+        let generation = tab.history.generation();
         self.paste_token = self.paste_token.wrapping_add(1);
         let token = self.paste_token;
         let job = cx
@@ -175,7 +194,12 @@ impl Workspace {
             let pixels = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
                 if workspace.paste_token != token
-                    || workspace.active_tab().map(|tab| tab.id) != Some(tab_id)
+                    || workspace.active_tab().is_none_or(|tab| {
+                        tab.id != tab_id
+                            || tab.history.generation() != generation
+                            || tab.active_layer != above
+                            || tab.busy()
+                    })
                 {
                     return;
                 }
@@ -309,25 +333,24 @@ impl Workspace {
             self.tell("Open as Layers was canceled because the image changed.", cx);
             return;
         }
-        let job = cx.background_executor().spawn(async move {
-            let mut loaded = Vec::new();
-            let mut failed = Vec::new();
-            for path in paths {
-                match document::read_raster(&path) {
-                    Ok(pixels) => loaded.push(ImageLayer {
-                        name: import_name(&path),
-                        pixels,
-                    }),
-                    Err(error) => {
-                        failed.push(format!("{}: {error}", document::file_name(&path)));
-                    }
-                }
-            }
-            (loaded, failed)
-        });
+        let tab = self.active_tab().unwrap();
+        let generation = tab.history.generation();
+        let above = tab.active_layer;
+        let content = tab.document.content.clone();
+        let job = cx
+            .background_executor()
+            .spawn(async move { load_imports(&content, paths, document::read_raster) });
         cx.spawn_in(window, async move |workspace, cx| {
             let (loaded, failed) = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.active_tab().is_none_or(|tab| {
+                    tab.id != tab_id
+                        || tab.history.generation() != generation
+                        || tab.active_layer != above
+                }) {
+                    workspace.tell("Open as Layers was canceled because the image changed.", cx);
+                    return;
+                }
                 workspace.finish_import(tab_id, loaded, failed, window, cx);
             });
         })
@@ -406,6 +429,42 @@ impl Workspace {
             cx.notify();
         }
     }
+}
+
+// Accept each decoded image before loading the next; a batch cannot retain more
+// pixels or layers than the document can actually use.
+fn load_imports(
+    content: &document::DocumentContent,
+    paths: Vec<PathBuf>,
+    mut decode: impl FnMut(&std::path::Path) -> anyhow::Result<RgbaImage>,
+) -> (Vec<ImageLayer>, Vec<String>) {
+    let mut loaded = Vec::new();
+    let mut failed = Vec::new();
+    let mut extra_bytes = 0;
+    for path in paths {
+        if content.layers().len() + loaded.len() >= document::MAX_LAYERS {
+            failed.push("The document cannot hold another layer.".into());
+            break;
+        }
+        match decode(&path) {
+            Ok(pixels) => match content.room_for(loaded.len(), extra_bytes, &pixels) {
+                Ok(()) => {
+                    extra_bytes += pixels.as_raw().len() as u64;
+                    loaded.push(ImageLayer {
+                        name: import_name(&path),
+                        pixels,
+                    });
+                }
+                Err(stop) => failed.push(format!(
+                    "{}: {}",
+                    document::file_name(&path),
+                    insert_stop_message(stop)
+                )),
+            },
+            Err(error) => failed.push(format!("{}: {error}", document::file_name(&path))),
+        }
+    }
+    (loaded, failed)
 }
 
 // The copied image is the part of the layer the selection covers, including transparent pixels.
@@ -620,5 +679,25 @@ mod tests {
         let text = directory.path().join("notes.txt");
         std::fs::write(&text, b"hello").unwrap();
         assert!(document::read_raster(&text).is_err());
+    }
+    #[test]
+    fn imports_stop_decoding_at_the_layer_budget_and_keep_valid_files_after_errors() {
+        let content = document::DocumentContent::single_layer("Image".into(), RgbaImage::new(1, 1));
+        let mut attempts = 0;
+        let paths = (0..1000)
+            .map(|i| PathBuf::from(format!("{i}.png")))
+            .collect();
+        let (loaded, failed) = load_imports(&content, paths, |_| {
+            attempts += 1;
+            if attempts == 2 {
+                anyhow::bail!("Invalid image");
+            }
+            Ok(RgbaImage::new(1, 1))
+        });
+        assert_eq!(loaded.len(), document::MAX_LAYERS - 1);
+        assert_eq!(attempts, document::MAX_LAYERS);
+        assert_eq!(failed.len(), 2);
+        assert_eq!(loaded[0].name, "0");
+        assert_eq!(loaded[1].name, "2");
     }
 }

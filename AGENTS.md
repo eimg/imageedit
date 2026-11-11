@@ -8,7 +8,8 @@ tabbed canvas. File commands belong in the menu. The workspace favors canvas
 space and has no top toolbar.
 
 For planned work, start with [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
-and the latest pass handoff.
+and the latest pass handoff. The plan is guidance, not a requirement to preserve
+choices that hurt the overall editing experience.
 
 ## Current product scope
 
@@ -42,10 +43,15 @@ contour with the brush. The contour stays in canvas coordinates and lands on
 the active layer. Return commits one undo step. The selection stays put, and
 the brush is not clipped to it. Text (`T`) adds an editable layer.
 Click sets its origin, or loads the active text layer. Typing, Return, and the
-text clipboard stay in that draft until Apply commits one undo step. Escape
-discards it. The layer stores the source, one font, a pixel size, and a color,
-plus the raster used for display and export. A missing named font is substituted
-and the panel says which face was used. Rasterize Text Layer drops the source
+text clipboard stay in that draft until Apply commits one undo step. Native
+Edit menu actions and Undo/Redo operate on the draft. Escape discards it.
+Modified text must be applied or discarded before changing tools, layers, tabs,
+or other content. Save/Export require visible edits to be applied or discarded;
+Close/Quit count pending edits as unsaved work. The layer stores the source, one font, a pixel size, and a color,
+plus the raster used for display and export. Opening a draft preserves those
+pixels until its source or style changes. Preview jobs coalesce changes and
+preserve layer opacity and stack order. A missing named font shows a substitution
+notice. Rasterize Text Layer drops the source
 and keeps the pixels. Pixel tools stay disabled until then. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
@@ -60,7 +66,7 @@ ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
 and preserves the tab’s saved state. Raster Save is offered only while a
-document is a single plain layer.
+document is a single plain layer without paths or editable text.
 
 ## Code map
 
@@ -102,6 +108,7 @@ bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
 Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
 painted crosshair gives way to a hand or resize cursor. The outline is a
 dashed contour. Stroke polylines follow that contour, including a hole.
+Mask transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
   is stored in the version 5 project.
@@ -128,8 +135,11 @@ dashed contour. Stroke polylines follow that contour, including a hole.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.
+  Owned path and text metadata counts separately for each snapshot.
 - `src/workspace/clipboard.rs` copies the selected part of the active layer,
-  pastes a centered layer, and imports rasters above the active layer.
+  pastes a centered layer, and imports rasters above the active layer. Deferred
+  operations validate the document generation and layer; each imported image
+  must fit the stack budget before the next one is decoded.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity

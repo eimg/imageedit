@@ -204,6 +204,17 @@ impl Stroke {
         source: &RgbaImage,
         coverage: impl Fn(i32, i32) -> u8,
     ) {
+        self.sample_segment(x, y, source, coverage, false);
+    }
+
+    fn sample_segment(
+        &mut self,
+        x: f64,
+        y: f64,
+        source: &RgbaImage,
+        coverage: impl Fn(i32, i32) -> u8,
+        omit_endpoint: bool,
+    ) {
         if !x.is_finite() || !y.is_finite() || self.brush.opacity == 0 {
             return;
         }
@@ -213,8 +224,10 @@ impl Stroke {
             .plotter
             .from
             .map(|from| clip_segment(from, point, radius, source.dimensions()));
-        for point in self.plotter.push(point, clip) {
-            self.dab(point, source, &coverage);
+        for stamp in self.plotter.push(point, clip) {
+            if !omit_endpoint || !same_point((stamp.x, stamp.y), (x, y)) {
+                self.dab(stamp, source, &coverage);
+            }
         }
     }
 
@@ -239,13 +252,24 @@ impl Stroke {
     // line meets its start and is not finished, or the join would be painted again.
     pub fn trace(&mut self, points: &[(f64, f64)], source: &RgbaImage) {
         self.plotter.restart();
+        let mut end = points.len();
+        while end > 1 && same_point(points[end - 1], points[end - 2]) {
+            end -= 1;
+        }
+        let points = &points[..end];
         let closed = points.len() >= 2 && same_point(points[0], points[points.len() - 1]);
         let mut previous = None;
-        for &next in points {
+        for (index, &next) in points.iter().enumerate() {
             if previous.is_some_and(|prior| same_point(prior, next)) {
                 continue;
             }
-            self.sample(next.0, next.1, source, |_, _| 255);
+            self.sample_segment(
+                next.0,
+                next.1,
+                source,
+                |_, _| 255,
+                closed && index + 1 == points.len(),
+            );
             previous = Some(next);
         }
         if !closed {
@@ -699,6 +723,51 @@ mod tests {
             cache.tile(3, 0).unwrap()
         ));
         assert!(!std::sync::Arc::ptr_eq(&changed, cache.tile(3, 3).unwrap()));
+    }
+
+    #[test]
+    fn a_closed_trace_does_not_darken_its_start_twice() {
+        let image = RgbaImage::new(8, 8);
+        let mut stroke = Stroke::new(
+            StrokeKind::Paint,
+            Rgba([255, 0, 0, 255]),
+            Brush {
+                diameter: 1,
+                spacing: 100,
+                hardness: 100,
+                opacity: 50,
+            },
+        );
+        stroke.trace(
+            &[(1.5, 1.5), (5.5, 1.5), (5.5, 5.5), (1.5, 5.5), (1.5, 1.5)],
+            &image,
+        );
+        assert_eq!(stroke.pixel(1, 1).unwrap()[3], 128);
+        assert_eq!(stroke.pixel(2, 1).unwrap()[3], 128);
+        assert_eq!(stroke.pixel(1, 2).unwrap()[3], 128);
+        let mut repeated = Stroke::new(
+            StrokeKind::Paint,
+            Rgba([255, 0, 0, 255]),
+            Brush {
+                diameter: 1,
+                spacing: 100,
+                hardness: 100,
+                opacity: 50,
+            },
+        );
+        repeated.trace(
+            &[
+                (1.5, 1.5),
+                (1.5, 1.5),
+                (5.5, 1.5),
+                (5.5, 5.5),
+                (1.5, 5.5),
+                (1.5, 1.5),
+                (1.5, 1.5),
+            ],
+            &image,
+        );
+        assert_eq!(stroke.tiles, repeated.tiles);
     }
 
     #[test]

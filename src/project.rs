@@ -16,7 +16,8 @@ use crate::document::{
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
 const VERSION: u32 = 5;
-const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
+// Covers the maximum legal path and text metadata while keeping reads bounded.
+const MAX_MANIFEST_BYTES: u32 = 8 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
@@ -312,6 +313,10 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
     let mut total: u64 = 0;
     let mut ids = HashSet::with_capacity(manifest.layers.len());
     for layer in &manifest.layers {
+        ensure!(
+            layer.name.chars().count() <= crate::document::MAX_LAYER_NAME_CHARS,
+            "A layer name is too long"
+        );
         let bytes = pixel_bytes(layer.width, layer.height)
             .filter(|&bytes| bytes <= MAX_IMAGE_BYTES)
             .with_context(|| format!("Layer \"{}\" is empty or too large", layer.name))?;
@@ -530,13 +535,52 @@ mod tests {
     }
 
     #[test]
+    fn legal_path_and_text_metadata_can_exceed_the_old_manifest_limit() {
+        use crate::paths::{Anchor, AnchorId, MAX_ANCHORS, MAX_PATHS, PathId, VectorPath};
+        let mut content = two_layers();
+        for path in 0..MAX_PATHS {
+            assert!(
+                content.upsert_path(VectorPath {
+                    id: PathId(path as u64),
+                    closed: true,
+                    anchors: (0..MAX_ANCHORS)
+                        .map(|anchor| Anchor::corner(
+                            AnchorId((path * MAX_ANCHORS + anchor) as u64),
+                            (anchor as f64 + 0.123456789, path as f64 + 0.987654321),
+                        ))
+                        .collect(),
+                })
+            );
+        }
+        let mut layers = content.layers().to_vec();
+        layers[0].text = Some(crate::text::TextStyle {
+            source: "上".repeat(crate::text::MAX_TEXT_CHARS),
+            family: "sans-serif".into(),
+            resolved_family: "sans-serif".into(),
+            size: 32.0,
+            color: Rgba([0, 0, 0, 255]),
+            origin: (0, 0),
+        });
+        let mut full = DocumentContent::from_layers(4, 3, layers).unwrap();
+        for path in content.paths() {
+            assert!(full.upsert_path(path.clone()));
+        }
+        let bytes = write_bytes(&full).unwrap();
+        assert!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()) > 64 * 1024);
+        assert_same(&read_bytes(&bytes).unwrap(), &full);
+    }
+
+    #[test]
     fn malformed_manifests_are_rejected() {
         let valid = write_bytes(&two_layers()).unwrap();
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
-        let edits: [Edit; 24] = [
+        let edits: [Edit; 25] = [
             ("unknown version", &|m| m["version"] = json!(6)),
             ("previous version", &|m| m["version"] = json!(4)),
+            ("long layer name", &|m| {
+                m["layers"][0]["name"] = json!("x".repeat(65))
+            }),
             ("repeated path", &|m| {
                 m["paths"] = json!([{
                     "id": 1, "closed": false,
@@ -694,7 +738,7 @@ mod tests {
         assert_eq!(text.size, 28.0);
         assert_eq!(text.color.0, [10, 20, 30, 255]);
         assert!(!text.substituted());
-        assert_eq!(*opened.layers()[0].pixels, rendered.image);
+        assert_eq!(opened.layers()[0].pixels, rendered.image);
 
         let edited =
             crate::text::render("Hello\ncafé!", "serif", 28.0, Rgba([10, 20, 30, 255])).unwrap();
@@ -705,7 +749,7 @@ mod tests {
             reopened.layers()[0].text.as_ref().unwrap().source,
             "Hello\ncafé!"
         );
-        assert_ne!(*reopened.layers()[0].pixels, rendered.image);
+        assert_ne!(reopened.layers()[0].pixels, rendered.image);
 
         let missing =
             crate::text::render("Ag", "ImageEdit Missing Font", 24.0, Rgba([0, 0, 0, 255]))
@@ -717,7 +761,7 @@ mod tests {
         let style = loaded.layers()[0].text.as_ref().unwrap();
         assert!(style.substituted());
         assert_eq!(style.resolved_family, missing.style.resolved_family);
-        assert_eq!(*loaded.layers()[0].pixels, missing.image);
+        assert_eq!(loaded.layers()[0].pixels, missing.image);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use super::Workspace;
 use crate::commands::{StrokePath, StrokeSelection};
 use crate::document::solid_color;
 use crate::paths;
+use crate::selection::Selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StrokeSource {
@@ -11,12 +12,31 @@ pub(super) enum StrokeSource {
     Selection,
 }
 
+enum OutlineSource {
+    Path(paths::VectorPath),
+    Selection(Selection, (u32, u32)),
+}
+
+impl OutlineSource {
+    fn lines(self) -> Vec<Vec<(f64, f64)>> {
+        match self {
+            Self::Path(path) => vec![paths::stroke(&path)],
+            Self::Selection(selection, (width, height)) => {
+                selection.stroke_polylines(width, height)
+            }
+        }
+        .into_iter()
+        .filter(|line| separated(line))
+        .collect()
+    }
+}
+
 enum OutlineRequest {
     Hidden,
     Missing(&'static str),
     Ready {
         layer: crate::document::LayerId,
-        lines: Vec<Vec<(f64, f64)>>,
+        outline: OutlineSource,
         color: image::Rgba<u8>,
         brush: crate::paint::Brush,
     },
@@ -24,12 +44,32 @@ enum OutlineRequest {
 
 impl Workspace {
     pub(super) fn bind_stroke_actions(&self, root: Div, cx: &Context<Self>) -> Div {
-        root.on_action(cx.listener(|this, _: &StrokePath, window, cx| {
-            this.stroke_outline(StrokeSource::Path, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &StrokeSelection, window, cx| {
-            this.stroke_outline(StrokeSource::Selection, window, cx);
-        }))
+        let ready = self.active_tab().filter(|tab| !tab.busy()).filter(|tab| {
+            tab.document
+                .content
+                .layer(tab.active_layer)
+                .is_some_and(|layer| layer.visible && layer.text.is_none())
+                && self.brush.opacity > 0
+        });
+        let path = ready.is_some_and(|tab| {
+            tab.document
+                .content
+                .active_path()
+                .is_some_and(|path| path.anchors.len() >= 2)
+        });
+        let selection = ready.is_some_and(|tab| {
+            !matches!(tab.selection, Selection::Empty | Selection::Unrestricted)
+        });
+        root.when(path, |root| {
+            root.on_action(cx.listener(|this, _: &StrokePath, window, cx| {
+                this.stroke_outline(StrokeSource::Path, window, cx);
+            }))
+        })
+        .when(selection, |root| {
+            root.on_action(cx.listener(|this, _: &StrokeSelection, window, cx| {
+                this.stroke_outline(StrokeSource::Selection, window, cx);
+            }))
+        })
     }
 
     pub(super) fn set_stroke_source(&mut self, source: StrokeSource, cx: &mut Context<Self>) {
@@ -62,12 +102,14 @@ impl Workspace {
             Some(OutlineRequest::Missing(message)) => self.notice(message, cx),
             Some(OutlineRequest::Ready {
                 layer,
-                lines,
+                outline,
                 color,
                 brush,
             }) => {
                 self.edit_content(
-                    move |content, _, _| content.stroke_lines(layer, &lines, color, brush),
+                    move |content, _, _| {
+                        content.stroke_lines(layer, &outline.lines(), color, brush)
+                    },
                     window,
                     cx,
                 );
@@ -84,40 +126,32 @@ impl Workspace {
         if self.brush.opacity == 0 {
             return None;
         }
-        let lines = match source {
+        let outline = match source {
             StrokeSource::Path => {
-                let Some(path) = tab.document.content.active_path() else {
+                let Some(path) = tab
+                    .document
+                    .content
+                    .active_path()
+                    .filter(|path| path.anchors.len() >= 2)
+                else {
                     return Some(OutlineRequest::Missing(
                         "There is no active path to stroke.",
                     ));
                 };
-                let line = paths::stroke(path);
-                if !separated(&line) {
-                    return Some(OutlineRequest::Missing(
-                        "There is no active path to stroke.",
-                    ));
-                }
-                vec![line]
+                OutlineSource::Path(path.clone())
             }
             StrokeSource::Selection => {
-                let (width, height) = tab.document.content.size();
-                let lines = tab
-                    .selection
-                    .stroke_polylines(width, height)
-                    .into_iter()
-                    .filter(|line| separated(line))
-                    .collect::<Vec<_>>();
-                if lines.is_empty() {
+                if matches!(tab.selection, Selection::Empty | Selection::Unrestricted) {
                     return Some(OutlineRequest::Missing(
                         "There is no selection edge to stroke.",
                     ));
                 }
-                lines
+                OutlineSource::Selection(tab.selection.clone(), tab.document.content.size())
             }
         };
         Some(OutlineRequest::Ready {
             layer: layer.id,
-            lines,
+            outline,
             color: solid_color(self.colors[0]),
             brush: self.brush,
         })

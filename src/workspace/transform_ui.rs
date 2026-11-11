@@ -816,6 +816,16 @@ impl Workspace {
 }
 
 impl WarpSession {
+    pub(super) fn changed(&self) -> bool {
+        match self.kind {
+            WarpKind::Rotate => self.degrees.rem_euclid(360.0).abs() > 1e-9,
+            WarpKind::Flip => true,
+            WarpKind::Perspective => {
+                self.corners != transform::layer_corners(self.offset, self.source.dimensions())
+            }
+        }
+    }
+
     pub(super) fn dragging(&self) -> bool {
         self.drag.is_some()
     }
@@ -869,4 +879,35 @@ fn drop_preview(preview: WarpPreview, window: &mut Window, cx: &mut Context<Work
         images.push(sprite.image);
     }
     super::drop_images(images, window, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn untouched_rotate_and_perspective_are_not_pending_but_a_flip_is() {
+        let mut session = WarpSession {
+            layer: LayerId(0),
+            source: Arc::new(RgbaImage::new(3, 2)),
+            offset: (1, 2),
+            opacity: 255,
+            kind: WarpKind::Rotate,
+            degrees: 0.0,
+            mirror: Mirror::Horizontal,
+            corners: transform::layer_corners((1, 2), (3, 2)),
+            drag: None,
+        };
+        assert!(!session.changed());
+        session.degrees = 360.0;
+        assert!(!session.changed());
+        session.degrees = 10.0;
+        assert!(session.changed());
+        session.kind = WarpKind::Perspective;
+        assert!(!session.changed());
+        session.corners[0].0 += 0.5;
+        assert!(session.changed());
+        session.kind = WarpKind::Flip;
+        assert!(session.changed());
+    }
 }

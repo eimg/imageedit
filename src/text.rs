@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use image::{Rgba, RgbaImage};
 
@@ -46,8 +46,17 @@ impl TextStyle {
 
 #[derive(Clone, Debug)]
 pub struct RenderedText {
-    pub image: RgbaImage,
+    pub image: Arc<RgbaImage>,
     pub style: TextStyle,
+}
+
+impl RenderedText {
+    pub fn matches(&self, source: &str, family: &str, size: f32, color: Rgba<u8>) -> bool {
+        self.style.source == source
+            && self.style.family == family
+            && self.style.size == size
+            && self.style.color == color
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,7 +254,7 @@ fn rendered(
     origin: (i32, i32),
 ) -> RenderedText {
     RenderedText {
-        image,
+        image: Arc::new(image),
         style: TextStyle {
             source: source.to_owned(),
             family,
@@ -255,6 +264,24 @@ fn rendered(
             origin,
         },
     }
+}
+
+pub(crate) fn substitution(style: &TextStyle) -> Option<String> {
+    if is_generic(&style.family) {
+        return None;
+    }
+    with_fonts(|fonts, _| {
+        if canonical_family(fonts, &style.family).is_some() {
+            style
+                .substituted()
+                .then(|| format!("Cached text uses {}.", style.resolved_family))
+        } else {
+            Some(format!(
+                "Using sans-serif instead of {} when edited.",
+                style.family
+            ))
+        }
+    })
 }
 
 fn with_fonts<T>(

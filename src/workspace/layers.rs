@@ -255,6 +255,11 @@ impl Workspace {
     }
 
     fn select_layer(&mut self, id: LayerId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_some_and(|tab| tab.active_layer != id)
+            && self.refuse_pending_text(cx)
+        {
+            return;
+        }
         let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
             return;
         };

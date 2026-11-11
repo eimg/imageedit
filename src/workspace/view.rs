@@ -74,6 +74,9 @@ impl Render for Workspace {
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     let tool = action.0;
                     let changed = this.tool != tool;
+                    if changed && this.refuse_pending_text(cx) {
+                        return;
+                    }
                     if changed {
                         this.tool = tool;
                         this.pan_drag = None;

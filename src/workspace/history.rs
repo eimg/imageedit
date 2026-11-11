@@ -136,7 +136,7 @@ impl History {
         while self.retained_bytes(current, selection) > limits.tab_bytes && self.evict_oldest() {}
     }
 
-    // Counts pixel buffers that only history keeps alive, charging each shared buffer once.
+    // Shared pixels and masks count once; path and text metadata is owned by each snapshot.
     pub fn retained_bytes(&self, current: &DocumentContent, selection: &Selection) -> u64 {
         let live: HashSet<*const RgbaImage> = current
             .layers()
@@ -161,7 +161,27 @@ impl History {
             .filter_map(|entry| entry.state.selection.mask_storage())
             .filter_map(|(pixels, bytes)| seen_masks.insert(pixels).then_some(bytes))
             .sum();
-        layer_bytes + mask_bytes
+        let metadata_bytes: u64 = entries()
+            .map(|entry| {
+                let content = &entry.state.content;
+                let paths = content.paths();
+                let paths_bytes = std::mem::size_of_val(paths) as u64
+                    + paths
+                        .iter()
+                        .map(|path| std::mem::size_of_val(path.anchors.as_slice()) as u64)
+                        .sum::<u64>();
+                let text_bytes: u64 = content
+                    .layers()
+                    .iter()
+                    .filter_map(|layer| layer.text.as_ref())
+                    .map(|text| {
+                        (text.source.len() + text.family.len() + text.resolved_family.len()) as u64
+                    })
+                    .sum();
+                paths_bytes + text_bytes
+            })
+            .sum();
+        layer_bytes + mask_bytes + metadata_bytes
     }
 
     fn oldest_stamp(&self) -> Option<u64> {
@@ -1082,15 +1102,53 @@ mod tests {
         assert!(session.current.content.layer_is_text(id));
         session.edit(|content| content.rasterize_text(id), &LIMITS);
         assert!(session.current.content.layer(id).unwrap().text.is_none());
-        assert_eq!(*session.current.content.layer(id).unwrap().pixels, pixels);
+        assert_eq!(session.current.content.layer(id).unwrap().pixels, pixels);
         assert!(session.undo());
         let restored = session.current.content.layer(id).unwrap();
         assert_eq!(restored.text.as_ref().unwrap().source, "Hi");
-        assert_eq!(*restored.pixels, pixels);
+        assert_eq!(restored.pixels, pixels);
 
         let mut plain = Session::new(true, 4);
         let plain_id = plain.current.active_layer;
         plain.edit(|content| content.rasterize_text(plain_id), &LIMITS);
         assert!(!plain.history.is_dirty());
+    }
+
+    #[test]
+    fn history_budget_includes_owned_path_and_text_metadata() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+        let mut session = Session::new(true, 4);
+        let id = session.current.active_layer;
+        session.current.content.upsert_path(VectorPath {
+            id: PathId(0),
+            closed: false,
+            anchors: vec![Anchor::corner(AnchorId(0), (1.0, 1.0))],
+        });
+        let rendered =
+            crate::text::render("Some text", "sans-serif", 12.0, Rgba([0, 0, 0, 255])).unwrap();
+        session.current.content.set_text(id, (0, 0), rendered);
+        let snapshot = session.current.clone();
+        session.history.commit(snapshot.clone(), 1, true);
+        let once = session
+            .history
+            .retained_bytes(&session.current.content, &session.current.selection);
+        assert!(once >= "Some text".len() as u64 + std::mem::size_of::<Anchor>() as u64);
+        session.history.commit(snapshot, 2, true);
+        assert_eq!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &session.current.selection),
+            2 * once
+        );
+        session.history.enforce_tab_limits(
+            &session.current.content,
+            &session.current.selection,
+            &Limits {
+                tab_bytes: once,
+                ..LIMITS
+            },
+        );
+        assert_eq!(session.history.undo.len(), 1);
+        assert!(session.current.content.layer_is_text(id));
     }
 }

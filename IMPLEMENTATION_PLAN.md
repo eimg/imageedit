@@ -1,8 +1,18 @@
 # ImageEdit implementation plan
 
-Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
+Baseline assessed at commit `5c4cfcf` on `main`. This document records proposed behavior and historical acceptance criteria. Treat it as planning guidance; prefer correctness and a coherent editing experience when a planned detail no longer fits the app.
 
-## Latest handoff · P22
+## Latest handoff · Review
+
+The review of the integrated editor is on `main`, starting from the release check (`333657c`).
+
+- Raster Save stays on a project when the document has paths or editable text. The manifest cap is 8 MiB, enough for the allowed path and text metadata, and layer names stay within 64 characters. Version 5 and the golden fixture are unchanged.
+- A text draft keeps its own undo until Apply, which is still one image step. Modified text must be applied or discarded before changing tools, layers, tabs, or other content. Save and export refuse that draft. Close and Quit count a pending preview as unsaved work. Opening a clean text draft does not.
+- Paste, cut, and Open as Layers check the document generation, and imports stop when the layer budget is full. Losing the window drops an in-progress stroke, freehand selection, or move.
+- A closed stroke does not stamp its start twice. Feather, Grow, and Shrink use running column sums. History counts owned path and text metadata as well as shared pixels.
+- Formatting, Clippy, and locked tests passed: 179, plus the ignored preview and stroke benchmarks. Gestures were not driven.
+
+## Feature handoff · P22
 
 P22 is the release check on `main`, starting from the text-layer commit (`236b825`).
 

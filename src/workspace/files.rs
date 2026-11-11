@@ -46,6 +46,43 @@ fn save_route(mode: SaveMode, has_path: bool, format: FileFormat, raster_ok: boo
 }
 
 impl Workspace {
+    fn pending_edit_name(&self) -> Option<&'static str> {
+        if self.has_pending_text() {
+            Some("text")
+        } else if self.gradient.is_some() {
+            Some("gradient")
+        } else if self
+            .warp
+            .as_ref()
+            .is_some_and(super::transform_ui::WarpSession::changed)
+        {
+            Some("transform")
+        } else if self.crop.is_some() {
+            Some("crop")
+        } else if self.move_drag.is_some()
+            || self.stroke.is_some()
+            || self.path_gesture.is_some()
+            || self.opacity_drag.is_some()
+        {
+            Some("gesture")
+        } else if self.adjustment.is_some() || self.filter.is_some() {
+            Some("effect")
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn refuse_pending_file_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(edit) = self.pending_edit_name() else {
+            return false;
+        };
+        self.notice(
+            &format!("Apply or discard the {edit} preview before saving or exporting."),
+            cx,
+        );
+        true
+    }
+
     pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open || self.form.is_some() {
             return;
@@ -104,6 +141,9 @@ impl Workspace {
     }
 
     pub(super) fn save(&mut self, mode: SaveMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_pending_file_edit(cx) {
+            return;
+        }
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -155,6 +195,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_pending_file_edit(cx) {
+            return;
+        }
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -317,7 +360,7 @@ impl Workspace {
         if self.dialog_open || self.form.is_some() || tab.busy() {
             return;
         }
-        if !tab.dirty() {
+        if !tab.dirty() && !(self.active == Some(index) && self.pending_edit_name().is_some()) {
             self.close_tab(index, window, cx);
             return;
         }
@@ -340,7 +383,14 @@ impl Workspace {
         if self.dialog_open || self.creating || self.tabs.iter().any(|tab| tab.busy()) {
             return false;
         }
-        let unsaved = self.tabs.iter().filter(|tab| tab.dirty()).count();
+        let unsaved = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, tab)| {
+                tab.dirty() || (self.active == Some(*index) && self.pending_edit_name().is_some())
+            })
+            .count();
         if unsaved == 0 {
             return true;
         }

@@ -27,9 +27,11 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
   also drop files onto the canvas or use Finder’s **Open With** menu.
   Reopening the same file focuses its existing tab.
+- Apply or discard an active text, transform, gradient, or crop preview before
+  saving or exporting. Closing an image with a pending edit asks before discarding it.
 - **Save** updates the current file. New canvases are saved as `.imageedit`
   projects. An opened PNG, JPEG, or WebP keeps saving to its own format while
-  it is still a single plain layer. **Save As** adopts the new filename and
+  it is still a single plain layer without paths or editable text. **Save As** adopts the new filename and
   uses its extension to choose the format. Projects, new canvases, and layered
   documents can only be saved as `.imageedit`. **Save Project As** suggests
   `.imageedit` when converting an opened image to a project.
@@ -111,10 +113,14 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   the selection. Undo restores the previous pixels and leaves the path in place.
   **Text** (`T`) clicks an origin, or loads the active text layer. Type into
   the draft. Return starts a new line, and the copy, cut, paste, and select-all
-  shortcuts edit the text instead of the image. Apply commits one undo step
-  and Escape discards the draft. Sans, serif, and monospace are the font
+  shortcuts and native Edit menu actions edit the text instead of the image.
+  Undo and Redo stay inside the draft. Apply commits one image undo step
+  and Escape discards the draft. Apply or discard modified text before switching
+  tools, layers, or tabs. Sans, serif, and monospace are the font
   choices, with a pixel size from 1 to 256 and the foreground color. A missing
-  named font shows which face was used instead. The layer keeps the words and
+  named font shows a substitution notice. Reopening a text layer keeps its saved
+  pixels until its words or style change. Previews render in the background and
+  follow the layer's opacity and stack position. The layer keeps the words and
   a raster copy, so export matches the canvas. **Layer → Rasterize Text
   Layer** keeps those pixels and lets the pixel tools edit them. Until then,
   painting, fills, filters, and transforms ask you to rasterize first.

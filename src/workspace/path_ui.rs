@@ -47,9 +47,20 @@ enum Target {
 
 impl Workspace {
     pub(super) fn bind_path_actions(&self, root: Div, cx: &Context<Self>) -> Div {
-        root.on_action(cx.listener(|this, _: &PathToSelection, window, cx| {
-            this.path_to_selection(window, cx);
-        }))
+        let available = self.active_tab().is_some_and(|tab| {
+            !tab.busy()
+                && tab
+                    .document
+                    .content
+                    .paths()
+                    .iter()
+                    .any(|path| path.closed && path.anchors.len() >= 3)
+        });
+        root.when(available, |root| {
+            root.on_action(cx.listener(|this, _: &PathToSelection, window, cx| {
+                this.path_to_selection(window, cx);
+            }))
+        })
     }
 
     pub(super) fn displayed_paths(&self) -> Vec<VectorPath> {
@@ -272,7 +283,11 @@ impl Workspace {
             path = base.clone();
             path.closed = true;
         }
-        if gesture.baseline.as_ref() == Some(&path) {
+        if gesture.baseline.as_ref() == Some(&path)
+            && self
+                .active_document()
+                .is_some_and(|doc| doc.content.active_path_id() == Some(path.id))
+        {
             return;
         }
         self.path_hold = Some(path.clone());
