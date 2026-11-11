@@ -101,7 +101,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   in place. Perspective requires a convex shape within the layer size limit.
   **Pencil**, **Brush**, and **Eraser** (`E`) draw on the
   active layer. Pencil starts at one pixel and uses a hard edge. Brush and
-  Eraser also offer a hardness control. Release commits the whole stroke and
+  Eraser also offer a hardness control. The pointer is a size-accurate ring
+  that follows the brush diameter and zoom: solid for Pencil, with a soft
+  inner ring for Brush and Eraser. Release commits the whole stroke and
   Escape discards it. Shift-click extends from the last committed stroke in
   the current tab when it was on the same layer. The eraser lowers alpha, and
   a selection limits where the stroke lands.

@@ -37,7 +37,8 @@ by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Perspective
 corner grips keep a dark rim so they stay visible on a white image. Pencil, Brush, and
 Eraser paint the active layer inside the selection; a stroke commits when the
-pointer is released. Gradient fills the active layer between two colors, and
+pointer is released. Their pointer is a size-scaled ring, hard for Pencil and
+soft for Brush and Eraser. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
 dialog and apply inside the selection. The layer's alpha stays in place. Cancel

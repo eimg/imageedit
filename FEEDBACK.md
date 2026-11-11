@@ -92,7 +92,12 @@ dark understroke.
 
 ## 6. Pencil, brush, and eraser cursors match the size
 
-- Status: `open`
+- Status: `done`
+- 2026-11-11: Pencil, Brush, and Eraser now use a size-scaled ring cursor that
+  follows the brush diameter and zoom. The ring has a dark understroke and
+  white center for contrast. Pencil is solid; Brush and Eraser add a dashed
+  inner ring at the hardness radius. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.
 
 Those tools use a crosshair plus a 20 px tool icon (`tool_cursor` in
 `src/workspace/view.rs`). Replace the crosshair with a circle, or another

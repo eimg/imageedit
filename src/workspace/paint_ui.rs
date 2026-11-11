@@ -292,6 +292,11 @@ impl Workspace {
             &self.brush
         }
     }
+
+    pub(super) fn active_brush_settings(&self) -> (u32, u8) {
+        let brush = self.active_brush();
+        (brush.diameter, brush.hardness)
+    }
 }
 
 impl StrokeSession {

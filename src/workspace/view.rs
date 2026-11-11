@@ -351,6 +351,21 @@ impl Render for Workspace {
 }
 
 impl Workspace {
+    fn brush_cursor(&self, tab: &Tab, scale: f32) -> Option<BrushCursor> {
+        if !matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser) {
+            return None;
+        }
+        let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
+        let canvas_width = tab.document.width().max(1) as f32;
+        let scale = f32::from(geometry.bounds.size.width) / canvas_width;
+        let (diameter, hardness) = self.active_brush_settings();
+        Some(BrushCursor {
+            diameter: diameter as f32 * scale,
+            hardness,
+            soft: self.tool != Tool::Pencil,
+        })
+    }
+
     fn toolbox(&self, cx: &Context<Self>) -> Div {
         let folded = self.toolbox_folded;
         let width = if folded {
@@ -1191,7 +1206,8 @@ impl Workspace {
                             area.cursor(CursorStyle::None)
                         })
                         .when(!native_cursor, |area| {
-                            area.child(tool_cursor(self.tool, self.canvas_cursor.clone()))
+                            let brush = self.brush_cursor(tab, scale);
+                            area.child(tool_cursor(self.tool, self.canvas_cursor.clone(), brush))
                         })
                     }),
                 None => area.child(dot_grid()).child(
@@ -2025,7 +2041,18 @@ pub(super) fn icon(path: &'static str, edge: f32) -> Icon {
     Icon { path, edge }
 }
 
-fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
+#[derive(Clone, Copy)]
+struct BrushCursor {
+    diameter: f32,
+    hardness: u8,
+    soft: bool,
+}
+
+fn tool_cursor(
+    tool: Tool,
+    cursor: Rc<CanvasCursor>,
+    brush: Option<BrushCursor>,
+) -> impl IntoElement {
     let icon = tool.info().icon;
     let outline = gpui::SharedString::from(format!("cursor-outline/{icon}"));
     canvas(
@@ -2045,6 +2072,10 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
             let Some(hotspot) = hotspot else {
                 return;
             };
+            if let Some(brush) = brush {
+                paint_brush_cursor(window, hotspot, brush);
+                return;
+            }
 
             let horizontal = if hotspot.x + px(27.) < bounds.right() {
                 7.
@@ -2090,6 +2121,35 @@ fn tool_cursor(tool: Tool, cursor: Rc<CanvasCursor>) -> impl IntoElement {
     )
     .absolute()
     .size_full()
+}
+
+fn paint_brush_cursor(window: &mut Window, center: Point<Pixels>, brush: BrushCursor) {
+    let radius = (brush.diameter / 2.).max(1.5);
+    let ring = |window: &mut Window, radius: f32, weight: f32, color: gpui::Rgba, dashed: bool| {
+        let segments = (radius * 3.).clamp(24., 160.) as usize;
+        let mut path = PathBuilder::stroke(px(weight));
+        if dashed {
+            path = path.dash_array(&[px(2.), px(2.)]);
+        }
+        let mut points = Vec::with_capacity(segments);
+        for index in 0..segments {
+            let angle = index as f32 / segments as f32 * std::f32::consts::TAU;
+            points.push(center + point(px(angle.cos() * radius), px(angle.sin() * radius)));
+        }
+        path.add_polygon(&points, true);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    };
+    ring(window, radius, 2., rgb(0x12151c), false);
+    ring(window, radius, 1., rgb(0xffffff), false);
+    if brush.soft && brush.hardness < 100 {
+        let core = radius * f32::from(brush.hardness) / 100.;
+        if core >= 2. {
+            ring(window, core, 2., rgba(0x12151caa), true);
+            ring(window, core, 1., rgba(0xffffffaa), true);
+        }
+    }
 }
 
 struct CanvasDecorations {
