@@ -867,4 +867,91 @@ mod tests {
         assert!(!session.history.is_dirty());
         assert_eq!(session.current.selection, selection);
     }
+
+    #[test]
+    fn an_identity_blur_keeps_the_saved_document_and_a_shadow_undoes() {
+        use crate::filters::FilterSpec;
+        use crate::preview::{Dirty, PixelRect};
+        use image::Rgba;
+
+        let mut session = Session::new(true, 2);
+        let layer = session.current.active_layer;
+        let selection = Selection::Unrestricted;
+        session.edit(
+            |content| {
+                content.apply_filter(layer, FilterSpec::Blur { radius: 0 }, &selection)
+                    != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(!session.history.is_dirty());
+        session.fill(200, &LIMITS);
+        session.edit(
+            |content| {
+                content.apply_adjustment(
+                    layer,
+                    crate::adjustments::Adjustment::Invert,
+                    &Selection::Rect(PixelRect::new(0, 0, 1, 1)),
+                ) != Dirty::None
+            },
+            &LIMITS,
+        );
+        let before = session.current.content.layer(layer).unwrap().pixels.clone();
+        session.edit(
+            |content| {
+                content.apply_filter(layer, FilterSpec::Blur { radius: 1 }, &selection)
+                    != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(session.history.is_dirty());
+        assert_ne!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            before.get_pixel(0, 0).0
+        );
+        assert!(session.undo());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            before.get_pixel(0, 0).0
+        );
+
+        let mut clean = Session::new(true, 2);
+        let source = clean.current.active_layer;
+        clean.edit(
+            |content| {
+                content
+                    .place_drop_shadow(
+                        source,
+                        FilterSpec::Shadow {
+                            radius: 0,
+                            offset: (1, -1),
+                            opacity: 100,
+                            color: Rgba([0, 0, 0, 255]),
+                        },
+                    )
+                    .is_ok()
+            },
+            &LIMITS,
+        );
+        assert_eq!(clean.current.content.layers().len(), 2);
+        assert!(clean.history.is_dirty());
+        assert!(clean.undo());
+        assert_eq!(clean.current.content.layers().len(), 1);
+        assert!(!clean.history.is_dirty());
+        assert_eq!(clean.current.active_layer, source);
+    }
 }

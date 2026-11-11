@@ -112,6 +112,12 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   a point to move it, and right-click an interior point to remove it. The
   endpoints stay at 0 and 255. A fully transparent selection shows an empty
   histogram.
+  **Filters** opens Blur, Sharpen, or Drop Shadow for the active layer. The
+  dialog shows a reduced preview. Return applies the change and Escape cancels
+  it. Blur and Sharpen follow the selection. Drop Shadow adds a layer
+  underneath, offset from the source and colored with the foreground color. A
+  radius or amount of zero does not change the image. Undo restores the
+  previous pixels, and undoing a shadow removes its layer.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened
@@ -159,7 +165,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Menus and the toolbox still show planned features such as text and filters.
+Menus and the toolbox still show planned features such as text.
 Commands without handlers appear disabled. Windows is a future target.
 
 ## Development

@@ -29,7 +29,10 @@ dialog and apply inside the selection. The layer's alpha stays in place. Cancel
 leaves the pixels unchanged, and identity settings do not create a history
 entry. Color Balance, Levels, and Curves use that dialog. Levels and Curves
 share a per-channel lookup table, and their histogram skips transparent pixels.
-The Image menu
+Blur, Sharpen, and Drop Shadow preview the active layer in a dialog. Blur and
+Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
+beneath the source from its blurred silhouette. A zero radius or amount does
+not create a history entry. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
@@ -64,6 +67,10 @@ document is a single plain layer.
   levels and curves through a 256-entry lookup table per channel.
   `src/workspace/adjust_ui.rs` shows the reduced preview for the latest slider
   position. Apply writes the active layer in the background.
+- `src/filters.rs` blurs and sharpens the active layer and builds a drop shadow
+  from its alpha. `src/workspace/filter_ui.rs` shows the reduced preview for
+  the latest slider position. Apply writes the layer, or inserts the shadow
+  beneath it, in the background.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
@@ -106,7 +113,7 @@ dashed contour.
   the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options repeat the align, fit, and content-crop commands.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
-  layer, and adjustment dialogs. `src/workspace/color.rs`
+  layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels. `src/workspace/view.rs` lays out the shell and paints the canvas

@@ -67,6 +67,9 @@ actions!(
         ColorBalance,
         Levels,
         Curves,
+        GaussianBlur,
+        Sharpen,
+        DropShadow,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -513,9 +516,9 @@ pub fn register(cx: &mut App) {
         menu(
             "Filters",
             vec![
-                planned("Drop Shadow…"),
-                planned("Blur…"),
-                planned("Sharpen…"),
+                MenuItem::action("Blur…", GaussianBlur),
+                MenuItem::action("Sharpen…", Sharpen),
+                MenuItem::action("Drop Shadow…", DropShadow),
             ],
         ),
         menu(
@@ -590,6 +593,7 @@ fn tool(tool: Tool) -> MenuItem {
     MenuItem::action(tool.info().label, SelectTool(tool))
 }
 
+#[allow(dead_code)]
 fn planned(label: &'static str) -> MenuItem {
     MenuItem::action(label, Planned)
 }

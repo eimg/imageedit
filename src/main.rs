@@ -6,6 +6,7 @@
 mod adjustments;
 mod commands;
 mod document;
+mod filters;
 mod geometry;
 mod icons;
 #[cfg(target_os = "macos")]

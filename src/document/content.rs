@@ -661,6 +661,148 @@ impl DocumentContent {
         ))
     }
 
+    pub fn apply_filter(
+        &mut self,
+        id: LayerId,
+        spec: crate::filters::FilterSpec,
+        selection: &Selection,
+    ) -> Dirty {
+        let (radius, filtered) = match spec {
+            crate::filters::FilterSpec::Blur { radius } => (radius, None),
+            crate::filters::FilterSpec::Sharpen { radius, amount } => {
+                if radius == 0 || amount == 0 {
+                    return Dirty::None;
+                }
+                (radius, Some(amount))
+            }
+            crate::filters::FilterSpec::Shadow { .. } => return Dirty::None,
+        };
+        if radius == 0 {
+            return Dirty::None;
+        }
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let offset = self.layers[index].offset;
+        let canvas = (self.width, self.height);
+        let mode = self.mode;
+        let source = Arc::clone(&self.layers[index].pixels);
+        let filtered = match filtered {
+            None => crate::filters::gaussian_blur(&source, radius),
+            Some(amount) => crate::filters::sharpen(&source, radius, amount),
+        };
+        let Some(adjusted) = crate::filters::apply_covered(
+            &source,
+            &filtered,
+            |x, y| {
+                selection.coverage(
+                    i64::from(offset.0) + i64::from(x),
+                    i64::from(offset.1) + i64::from(y),
+                    canvas.0,
+                    canvas.1,
+                )
+            },
+            |pixel| mode.constrain(pixel),
+        ) else {
+            return Dirty::None;
+        };
+        self.layers[index].pixels = Arc::new(adjusted.pixels);
+        Dirty::Region(PixelRect::new(
+            i64::from(offset.0) + i64::from(adjusted.left),
+            i64::from(offset.1) + i64::from(adjusted.top),
+            adjusted.right - adjusted.left + 1,
+            adjusted.bottom - adjusted.top + 1,
+        ))
+    }
+
+    pub fn place_drop_shadow(
+        &mut self,
+        id: LayerId,
+        spec: crate::filters::FilterSpec,
+    ) -> Result<PixelRect, crate::filters::FilterStop> {
+        let crate::filters::FilterSpec::Shadow {
+            radius,
+            offset,
+            opacity,
+            color,
+        } = spec
+        else {
+            return Err(crate::filters::FilterStop::Unchanged);
+        };
+        if opacity == 0 {
+            return Err(crate::filters::FilterStop::Unchanged);
+        }
+        let Some(index) = self.layer_index(id) else {
+            return Err(crate::filters::FilterStop::Unchanged);
+        };
+        let source_offset = self.layers[index].offset;
+        let Some((width, height)) = crate::filters::shadow_dimensions(
+            self.layers[index].pixels.width(),
+            self.layers[index].pixels.height(),
+            radius,
+        ) else {
+            return Err(crate::filters::FilterStop::TooLarge);
+        };
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(crate::filters::FilterStop::TooLarge)?;
+        if !self.can_add_layer() || !self.fits_stack(0, bytes) {
+            return Err(crate::filters::FilterStop::TooLarge);
+        }
+        let color = self.mode.constrain(color);
+        let Some(shadow) =
+            crate::filters::render_shadow(&self.layers[index].pixels, radius, opacity, color)
+        else {
+            return Err(crate::filters::FilterStop::Unchanged);
+        };
+        let pixels = self.mode.constrain_image(shadow.pixels);
+        let layer_offset = (
+            source_offset.0 - shadow.pad + offset.0,
+            source_offset.1 - shadow.pad + offset.1,
+        );
+        let Some(shadow_id) = self.next_layer_id() else {
+            return Err(crate::filters::FilterStop::TooLarge);
+        };
+        let rect = PixelRect::new(
+            i64::from(layer_offset.0),
+            i64::from(layer_offset.1),
+            pixels.width(),
+            pixels.height(),
+        );
+        self.layers.insert(
+            index,
+            RasterLayer {
+                id: shadow_id,
+                name: "Drop Shadow".into(),
+                pixels: Arc::new(pixels),
+                offset: layer_offset,
+                visible: true,
+                opacity: 255,
+                blend_mode: BlendMode::Normal,
+            },
+        );
+        Ok(rect)
+    }
+
+    pub fn drop_shadow_fits(&self, id: LayerId, radius: u32) -> bool {
+        let Some(layer) = self.layer(id) else {
+            return false;
+        };
+        let Some((width, height)) =
+            crate::filters::shadow_dimensions(layer.pixels.width(), layer.pixels.height(), radius)
+        else {
+            return false;
+        };
+        let Some(bytes) = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return false;
+        };
+        self.can_add_layer() && self.fits_stack(0, bytes)
+    }
+
     pub fn composite_stroke_tile(
         &self,
         id: LayerId,
@@ -2216,6 +2358,111 @@ mod tests {
         assert_eq!(
             content.layers[0].pixels.get_pixel(2, 0).0,
             [10, 20, 30, 255]
+        );
+    }
+
+    #[test]
+    fn a_blur_follows_an_offset_mask_and_grayscale_stays_gray() {
+        use crate::filters::FilterSpec;
+
+        let mut content = DocumentContent::single_layer(
+            "Layer".into(),
+            RgbaImage::from_fn(3, 1, |x, _| {
+                if x == 1 {
+                    Rgba([255, 0, 0, 255])
+                } else {
+                    Rgba([0, 0, 0, 255])
+                }
+            }),
+        );
+        content.layers[0].offset = (2, 1);
+        content.width = 8;
+        content.height = 4;
+        let id = content.top_layer_id();
+        let selection = Selection::Rect(PixelRect::new(3, 1, 1, 1));
+        assert!(matches!(
+            content.apply_filter(id, FilterSpec::Blur { radius: 0 }, &selection),
+            Dirty::None
+        ));
+        assert!(matches!(
+            content.apply_filter(id, FilterSpec::Blur { radius: 1 }, &selection),
+            Dirty::Region(_)
+        ));
+        assert_eq!(content.layers[0].pixels.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_ne!(content.layers[0].pixels.get_pixel(1, 0).0, [255, 0, 0, 255]);
+        content.mode = crate::transform::ColorMode::Grayscale;
+        content.apply_filter(id, FilterSpec::Blur { radius: 1 }, &Selection::Unrestricted);
+        let pixel = content.layers[0].pixels.get_pixel(1, 0).0;
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+    }
+
+    #[test]
+    fn a_drop_shadow_lands_below_its_layer_and_round_trips() {
+        use std::io::Cursor;
+
+        use crate::filters::{FilterSpec, FilterStop};
+
+        let mut pixels = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 0]));
+        pixels.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let mut content = DocumentContent::single_layer("Layer".into(), pixels);
+        content.layers[0].offset = (2, 1);
+        let id = content.top_layer_id();
+        let spec = FilterSpec::Shadow {
+            radius: 0,
+            offset: (1, 0),
+            opacity: 100,
+            color: Rgba([0, 0, 40, 255]),
+        };
+        assert_eq!(
+            content.place_drop_shadow(id, spec).unwrap(),
+            PixelRect::new(3, 1, 2, 1)
+        );
+        assert_eq!(content.layers[0].name, "Drop Shadow");
+        assert_eq!(content.layers[0].offset, (3, 1));
+        assert_eq!(content.layers[0].pixels.get_pixel(0, 0).0, [0, 0, 40, 255]);
+        assert_eq!(content.layers[1].id, id);
+        assert_eq!(content.layers[1].pixels.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        let mut bytes = Vec::new();
+        crate::project::write(&mut bytes, &content).unwrap();
+        let read = crate::project::read(Cursor::new(bytes)).unwrap();
+        assert_eq!(read.layers[0].name, "Drop Shadow");
+        assert_eq!(read.layers[0].offset, (3, 1));
+        assert_eq!(read.layers[0].pixels.get_pixel(0, 0).0, [0, 0, 40, 255]);
+        assert_eq!(read.layers[1].pixels.get_pixel(0, 0).0, [255, 0, 0, 255]);
+
+        content.mode = crate::transform::ColorMode::Grayscale;
+        let gray = content
+            .place_drop_shadow(
+                id,
+                FilterSpec::Shadow {
+                    radius: 0,
+                    offset: (0, 0),
+                    opacity: 100,
+                    color: Rgba([255, 0, 0, 255]),
+                },
+            )
+            .unwrap();
+        assert_eq!(gray, PixelRect::new(2, 1, 2, 1));
+        let pixel = content
+            .layers
+            .iter()
+            .find(|layer| layer.offset == (2, 1))
+            .unwrap()
+            .pixels
+            .get_pixel(0, 0)
+            .0;
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+
+        while content.can_add_layer() {
+            content
+                .add_layer(id, "Fill".into(), Rgba([0, 0, 0, 0]))
+                .unwrap();
+        }
+        assert_eq!(
+            content.place_drop_shadow(id, spec),
+            Err(FilterStop::TooLarge)
         );
     }
 }

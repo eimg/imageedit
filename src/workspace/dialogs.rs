@@ -9,6 +9,7 @@ use gpui::{
 use super::Workspace;
 use super::adjust_ui::AdjustKind;
 use super::color::{ColorControl, Hsv, control};
+use super::filter_ui::FilterKind;
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
 use crate::adjustments::{
@@ -16,6 +17,7 @@ use crate::adjustments::{
     Histogram, Levels, MapChannel,
 };
 use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
+use crate::filters::{self, FilterSpec};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
 
@@ -86,6 +88,15 @@ enum FormKind {
         levels: Levels,
         curves: Curves,
         curve_drag: Option<u8>,
+    },
+    Filter {
+        kind: FilterKind,
+        radius: i16,
+        amount: i16,
+        offset_x: i16,
+        offset_y: i16,
+        opacity: i16,
+        color: image::Rgba<u8>,
     },
 }
 
@@ -446,6 +457,7 @@ impl Workspace {
 
     fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_adjustment(window, cx);
+        self.clear_filter(window, cx);
         self.form = None;
         self.focus.focus(window);
         cx.notify();
@@ -498,6 +510,43 @@ impl Workspace {
         if matches!(operation, AdjustKind::Levels | AdjustKind::Curves) {
             self.start_adjustment_histogram(window, cx);
         }
+    }
+
+    pub(super) fn filter_form(
+        &mut self,
+        kind: FilterKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog_open || self.form.is_some() {
+            return;
+        }
+        let color = solid_color(self.colors[0]);
+        let (radius, amount, offset_x, offset_y, opacity) = match kind {
+            FilterKind::Blur => (4, 50, 8, 8, 75),
+            FilterKind::Sharpen => (2, 50, 8, 8, 75),
+            FilterKind::Shadow => (4, 50, 8, 8, 75),
+        };
+        if !self.begin_filter(
+            filter_spec(kind, radius, amount, offset_x, offset_y, opacity, color),
+            window,
+            cx,
+        ) {
+            return;
+        }
+        self.show_form(
+            FormKind::Filter {
+                kind,
+                radius,
+                amount,
+                offset_x,
+                offset_y,
+                opacity,
+                color,
+            },
+            window,
+            cx,
+        );
     }
 
     fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -702,6 +751,10 @@ impl Workspace {
                 self.apply_adjustment(window, cx);
                 self.dismiss_form(window, cx);
             }
+            FormKind::Filter { .. } => {
+                self.apply_filter(window, cx);
+                self.dismiss_form(window, cx);
+            }
         }
     }
 
@@ -755,7 +808,7 @@ impl Workspace {
                             height.handle_key(event, FieldMode::Digits { max: 5 }, cx);
                         }
                     }
-                    FormKind::Adjustment { .. } => {}
+                    FormKind::Adjustment { .. } | FormKind::Filter { .. } => {}
                     FormKind::Color { hex, hsv, .. } => {
                         let previous = hex.color();
                         hex.handle_key(event, FieldMode::Hex, cx);
@@ -838,6 +891,56 @@ impl Workspace {
                 self.drag_simple_slider(slider, value, window, cx);
             }
         }
+    }
+
+    fn drag_filter_slider(
+        &mut self,
+        slider: FilterSlider,
+        range: (i16, i16),
+        at: (Bounds<Pixels>, Point<Pixels>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = slider_amount(at.0, at.1, range.0, range.1);
+        let spec = {
+            let Some(Form {
+                kind:
+                    FormKind::Filter {
+                        kind,
+                        radius,
+                        amount,
+                        offset_x,
+                        offset_y,
+                        opacity,
+                        color,
+                    },
+                ..
+            }) = &mut self.form
+            else {
+                return;
+            };
+            let current = match slider {
+                FilterSlider::Radius => *radius,
+                FilterSlider::Amount => *amount,
+                FilterSlider::OffsetX => *offset_x,
+                FilterSlider::OffsetY => *offset_y,
+                FilterSlider::Opacity => *opacity,
+            };
+            if current == value {
+                return;
+            }
+            match slider {
+                FilterSlider::Radius => *radius = value,
+                FilterSlider::Amount => *amount = value,
+                FilterSlider::OffsetX => *offset_x = value,
+                FilterSlider::OffsetY => *offset_y = value,
+                FilterSlider::Opacity => *opacity = value,
+            }
+            filter_spec(
+                *kind, *radius, *amount, *offset_x, *offset_y, *opacity, *color,
+            )
+        };
+        self.set_filter(spec, window, cx);
     }
 
     fn drag_simple_slider(
@@ -1147,6 +1250,7 @@ impl Workspace {
     pub(super) fn form_overlay(&self, cx: &Context<Self>) -> Option<Div> {
         let adjustment_preview = self.adjustment_preview.clone();
         let adjustment_histogram = self.adjustment_histogram;
+        let filter_preview = self.filter_preview.clone();
         let form = self.form.as_ref()?;
         let (title, accept, content) =
             match &form.kind {
@@ -1541,6 +1645,38 @@ impl Workspace {
                     };
                     (title, "Apply", body)
                 }
+                FormKind::Filter {
+                    kind,
+                    radius,
+                    amount,
+                    offset_x,
+                    offset_y,
+                    opacity,
+                    ..
+                } => {
+                    let title = match kind {
+                        FilterKind::Blur => "Blur",
+                        FilterKind::Sharpen => "Sharpen",
+                        FilterKind::Shadow => "Drop Shadow",
+                    };
+                    let body = div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(match filter_preview {
+                            Some(image) => div()
+                                .h(px(180.))
+                                .w_full()
+                                .bg(rgb(CANVAS))
+                                .rounded_md()
+                                .child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                            None => div().h(px(180.)).w_full().child("Preview…"),
+                        })
+                        .child(filter_controls(
+                            *kind, *radius, *amount, *offset_x, *offset_y, *opacity, cx,
+                        ));
+                    (title, "Apply", body)
+                }
             };
 
         Some(
@@ -1824,6 +1960,163 @@ fn paint_adjust_slider(bounds: Bounds<Pixels>, fraction: f32, window: &mut Windo
         size(px(12.), px(12.)),
     );
     window.paint_quad(fill(knob, rgb(ACCENT)));
+}
+
+#[derive(Clone, Copy)]
+enum FilterSlider {
+    Radius,
+    Amount,
+    OffsetX,
+    OffsetY,
+    Opacity,
+}
+
+fn filter_spec(
+    kind: FilterKind,
+    radius: i16,
+    amount: i16,
+    offset_x: i16,
+    offset_y: i16,
+    opacity: i16,
+    color: image::Rgba<u8>,
+) -> FilterSpec {
+    let radius = u32::from(u16::try_from(radius).unwrap_or(0));
+    let amount = u8::try_from(amount).unwrap_or(0);
+    let opacity = u8::try_from(opacity).unwrap_or(0);
+    match kind {
+        FilterKind::Blur => FilterSpec::Blur { radius },
+        FilterKind::Sharpen => FilterSpec::Sharpen { radius, amount },
+        FilterKind::Shadow => FilterSpec::Shadow {
+            radius,
+            offset: (i32::from(offset_x), i32::from(offset_y)),
+            opacity,
+            color,
+        },
+    }
+}
+
+fn filter_controls(
+    kind: FilterKind,
+    radius: i16,
+    amount: i16,
+    offset_x: i16,
+    offset_y: i16,
+    opacity: i16,
+    cx: &Context<Workspace>,
+) -> Div {
+    let limit = i16::try_from(filters::MAX_RADIUS).unwrap_or(32);
+    let body = div().flex().flex_col().gap_3().child(filter_slider(
+        "Radius",
+        radius.to_string(),
+        radius,
+        0,
+        limit,
+        FilterSlider::Radius,
+        cx,
+    ));
+    match kind {
+        FilterKind::Blur => body.child("Softens the active layer inside the selection."),
+        FilterKind::Sharpen => body
+            .child(filter_slider(
+                "Amount",
+                format!("{amount}%"),
+                amount,
+                0,
+                100,
+                FilterSlider::Amount,
+                cx,
+            ))
+            .child("Sharpens the active layer inside the selection."),
+        FilterKind::Shadow => body
+            .child(filter_slider(
+                "Offset X",
+                offset_x.to_string(),
+                offset_x,
+                -64,
+                64,
+                FilterSlider::OffsetX,
+                cx,
+            ))
+            .child(filter_slider(
+                "Offset Y",
+                offset_y.to_string(),
+                offset_y,
+                -64,
+                64,
+                FilterSlider::OffsetY,
+                cx,
+            ))
+            .child(filter_slider(
+                "Opacity",
+                format!("{opacity}%"),
+                opacity,
+                0,
+                100,
+                FilterSlider::Opacity,
+                cx,
+            ))
+            .child("Adds a layer under the active layer, using the foreground color."),
+    }
+}
+
+fn filter_slider(
+    label: &'static str,
+    readout: String,
+    value: i16,
+    min: i16,
+    max: i16,
+    slider: FilterSlider,
+    cx: &Context<Workspace>,
+) -> Div {
+    let fraction = f32::from(value - min) / f32::from(max - min).max(1.);
+    let bounds = Rc::new(Cell::new(Bounds::default()));
+    let (layout, down, moved) = (bounds.clone(), bounds.clone(), bounds);
+    let (down_slider, move_slider) = (slider, slider);
+    let (down_min, down_max, move_min, move_max) = (min, max, min, max);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().flex().justify_between().child(label).child(readout))
+        .child(
+            div()
+                .id(label)
+                .h(px(22.))
+                .w_full()
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.drag_filter_slider(
+                            down_slider,
+                            (down_min, down_max),
+                            (down.get(), event.position),
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                        if event.dragging() {
+                            this.drag_filter_slider(
+                                move_slider,
+                                (move_min, move_max),
+                                (moved.get(), event.position),
+                                window,
+                                cx,
+                            );
+                        }
+                    }),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _, _| layout.set(bounds),
+                        move |bounds, _, window, _| paint_adjust_slider(bounds, fraction, window),
+                    )
+                    .size_full(),
+                ),
+        )
 }
 
 fn slider_amount(bounds: Bounds<Pixels>, position: Point<Pixels>, min: i16, max: i16) -> i16 {

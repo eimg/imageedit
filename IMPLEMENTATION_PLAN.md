@@ -2,7 +2,18 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P17
+## Latest handoff · P18
+
+P18 adds Blur, Sharpen, and Drop Shadow on branch `p18-filters`, which starts from P17.
+
+- Gaussian Blur and Sharpen run a separable premultiplied kernel on the active layer. Selection coverage mixes the filtered color and alpha. Sharpen leaves a fully transparent pixel unchanged. A zero radius, or a sharpen amount of zero, does not create a history entry.
+- Drop Shadow inserts a layer beneath the source from its blurred silhouette. The offset is in canvas pixels, and the dialog captures the foreground color when it opens. Opacity zero does nothing. A shadow that does not fit the layer stack is refused. Undo removes the layer, and the shadow round-trips through the version 3 project.
+- The dialog keeps the latest reduced preview. Return or Apply commits in the background. Escape or Cancel leaves the pixels and the saved state unchanged.
+- Formatting, Clippy and locked tests passed. P17 ended with 128 tests and P18 ends with 136, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P19**, editable paths.
+
+## Feature handoff · P17
 
 P17 adds Color Balance, Levels, and Curves on branch `p17-color`, which starts from P16.
 

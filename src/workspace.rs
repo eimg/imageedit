@@ -5,6 +5,7 @@ mod color;
 mod cursor;
 mod dialogs;
 mod files;
+mod filter_ui;
 mod gradient_ui;
 mod history;
 mod layers;
@@ -135,6 +136,11 @@ pub struct Workspace {
     adjustment_dirty: bool,
     adjustment_histogram: Option<crate::adjustments::Histogram>,
     histogram_token: u64,
+    filter: Option<filter_ui::FilterSession>,
+    filter_preview: Option<Arc<RenderImage>>,
+    filter_generation: crate::adjustments::PreviewGeneration,
+    filter_busy: bool,
+    filter_dirty: bool,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     pencil: crate::paint::Brush,
@@ -250,6 +256,11 @@ impl Workspace {
             adjustment_dirty: false,
             adjustment_histogram: None,
             histogram_token: 0,
+            filter: None,
+            filter_preview: None,
+            filter_generation: crate::adjustments::PreviewGeneration::default(),
+            filter_busy: false,
+            filter_dirty: false,
             stroke: None,
             stroke_commit_preview: None,
             pencil: crate::paint::Brush {
