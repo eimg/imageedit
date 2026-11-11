@@ -639,13 +639,13 @@ impl DocumentContent {
 
     fn insert_centered_layer(&mut self, above: LayerId, layer: ImageLayer) -> Option<LayerId> {
         let id = self.next_layer_id()?;
-        let offset = crate::geometry::centered_offset(
+        let offset = crate::geometry::aligned_offset(
             (0, 0),
             layer.pixels.width(),
             layer.pixels.height(),
             self.width,
             self.height,
-            crate::geometry::Axis::Both,
+            crate::geometry::Alignment::Both,
         );
         let index = self
             .layer_index(above)
@@ -1287,17 +1287,17 @@ impl DocumentContent {
         Dirty::Canvas
     }
 
-    pub fn align_layer(&mut self, id: LayerId, axis: crate::geometry::Axis) -> Dirty {
+    pub fn align_layer(&mut self, id: LayerId, alignment: crate::geometry::Alignment) -> Dirty {
         let Some(layer) = self.layer(id) else {
             return Dirty::None;
         };
-        let offset = crate::geometry::centered_offset(
+        let offset = crate::geometry::aligned_offset(
             layer.offset,
             layer.pixels.width(),
             layer.pixels.height(),
             self.width,
             self.height,
-            axis,
+            alignment,
         );
         self.set_offset(id, offset)
     }
@@ -2368,7 +2368,7 @@ mod tests {
         );
         assert_eq!(content.layers[0].offset, (2, 3));
         assert_eq!(
-            content.align_layer(id, crate::geometry::Axis::Horizontal),
+            content.align_layer(id, crate::geometry::Alignment::HorizontalCenter),
             Dirty::Region(PixelRect::new(0, 3, 6, 2))
         );
         assert_eq!(content.layers[0].offset, (0, 3));

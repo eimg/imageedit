@@ -76,10 +76,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   **Move** (`M`) drags the active layer. Its crosshair has a four-arrow badge.
   The layer follows the pointer, and releasing it saves one undo step. Escape or
   Cancel puts it back. A hidden layer cannot be moved. The Move tool options
-  also center the layer, fit it to the canvas, crop it to its opaque pixels,
-  and toggle a global subtle layer boundary that follows the active layer.
-  **Layer → Align** centers the active layer on the
-  canvas, horizontally, vertically, or both. **Layer to Image Size** keeps
+  align the layer to any canvas edge or center it with icon buttons.
+  **View → Toggle Layer Boundary** shows a global subtle outline that follows
+  the active layer. **Layer → Align** offers the same placements. **Layer to
+  Image Size** keeps
   the pixels that already lie on the canvas and drops the rest. **Crop to
   Content**, on the Layer and Image menus, trims to pixels that are not fully
   transparent. A fully transparent layer or image is left unchanged.

@@ -27,9 +27,11 @@ Rectangle Select has a corner radius control with minus and plus buttons.
 Width/Height fields show the current size.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
-Shrink edit the mask. Move repositions the active layer, the Move tool options
-have a global layer-boundary toggle, and the Layer menu can center it, fit it
-to the canvas, or crop it to its opaque pixels. Image → Crop to Content
+Shrink edit the mask. Move repositions the active layer, and its tool options
+align it to any canvas edge or center it with icon buttons. View → Toggle
+Layer Boundary shows a global subtle outline that follows the active layer.
+The Layer menu can align, fit it to the canvas, or crop it to its opaque
+pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Perspective
@@ -166,8 +168,8 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
   drag coalescing, and the Move preview. The preview is display-only until
   the pointer is released. Move's crosshair has a four-arrow badge, and
-  its tool options repeat the align, fit, and content-crop commands and the
-  global layer-boundary toggle.
+  its tool options align the layer to canvas edges or center it with icon
+  buttons. The Layer menu has the fit and content-crop commands.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.

@@ -66,10 +66,11 @@ opaque, the checker stays hidden behind that content.
 ## 4. Subtle layer boundary, with a global switch
 
 - Status: `done`
-- 2026-11-11: The Move tool options have a global Show Layer Boundary
-  toggle. The subtle outline follows the active layer's offset and size,
-  including the live Move preview, and stays on across tools and tabs.
-  Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+- 2026-11-11: View → Toggle Layer Boundary controls a global subtle outline
+  that follows the active layer's offset and size, including the live Move
+  preview, and stays on across tools and tabs. Item 20 moved the control from
+  the Move options to the View menu. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.
 
 Show a subtle outline of the active layer's bounds on the canvas. Put a
 boundary on/off control in the Move tool options. The switch is global: it
@@ -265,3 +266,16 @@ vertices. Close only by clicking the start node or pressing Return.
   drag now leaves the draft open. The start node or Return closes it, and Escape
   cancels it. Formatting, Clippy, locked tests, and
   `./scripts/bundle-macos.sh` passed.
+
+## 20. Compact Move arrange controls
+
+Reorganize the Move tool options: replace the stacked text buttons with compact
+icon buttons for top, bottom, left, right, horizontal center, and vertical
+center. Move the layer-boundary toggle to the View menu. Keep Layer to Image
+Size and Crop to Content in the Layer menu only.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. Move now shows six icon
+  alignment buttons and no longer repeats the Layer menu fit and crop commands.
+  View → Toggle Layer Boundary replaces the Move options toggle. Formatting,
+  Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.

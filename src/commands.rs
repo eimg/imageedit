@@ -89,6 +89,7 @@ actions!(
         PreviousTab,
         ToggleGrid,
         ToggleGuides,
+        ToggleLayerBoundary,
         MinimizeWindow,
         ZoomWindow,
         Hide,
@@ -324,6 +325,10 @@ pub struct SelectTool(pub Tool);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
 #[action(namespace = imageedit, no_json)]
 pub enum AlignLayer {
+    Left,
+    Right,
+    Top,
+    Bottom,
     Horizontal,
     Vertical,
     Both,
@@ -573,6 +578,7 @@ fn application_menus(macos: bool) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Toggle Grid", ToggleGrid),
                 MenuItem::action("Toggle Guides", ToggleGuides),
+                MenuItem::action("Toggle Layer Boundary", ToggleLayerBoundary),
             ],
         ),
         menu(
@@ -613,6 +619,10 @@ fn application_menus(macos: bool) -> Vec<Menu> {
                 MenuItem::submenu(menu(
                     "Align",
                     vec![
+                        MenuItem::action("Align Top", AlignLayer::Top),
+                        MenuItem::action("Align Bottom", AlignLayer::Bottom),
+                        MenuItem::action("Align Left", AlignLayer::Left),
+                        MenuItem::action("Align Right", AlignLayer::Right),
                         MenuItem::action("Center Horizontally in Image", AlignLayer::Horizontal),
                         MenuItem::action("Center Vertically in Image", AlignLayer::Vertical),
                         MenuItem::action("Center in Image", AlignLayer::Both),
@@ -877,6 +887,7 @@ mod tests {
             "Pan",
             "Toggle Grid",
             "Toggle Guides",
+            "Toggle Layer Boundary",
             "menu:Image",
             "menu:Mode",
             "RGB",
@@ -912,6 +923,10 @@ mod tests {
             "Flip Vertically",
             "Perspective",
             "menu:Align",
+            "Align Top",
+            "Align Bottom",
+            "Align Left",
+            "Align Right",
             "Center Horizontally in Image",
             "Center Vertically in Image",
             "Center in Image",

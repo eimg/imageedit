@@ -15,12 +15,11 @@ use gpui::{
 use crate::commands::{
     AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, CancelCrop,
     CancelFreeSelect, CancelGradient, CancelMove, CancelPath, CancelStroke, CancelTransform,
-    CloseFreeSelect, ClosePath, CloseTab, CommitStroke, CropLayerToContent, DeletePathAnchor,
-    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
-    InvertSelection, LayerToImageSize, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT,
-    OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone,
-    SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo,
-    Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    CloseFreeSelect, ClosePath, CloseTab, CommitStroke, DeletePathAnchor, ExportJpeg, ExportPng,
+    ExportWebp, FeatherSelection, ForegroundColor, GrowSelection, InvertSelection, MinimizeWindow,
+    NEW_HINT, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage,
+    SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS,
+    ToggleGrid, ToggleGuides, ToggleLayerBoundary, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -306,6 +305,12 @@ impl Render for Workspace {
                     this.show_guides = !this.show_guides;
                     cx.notify();
                 }))
+                .on_action(cx.listener(
+                    |this, _: &ToggleLayerBoundary, _, cx| {
+                        this.show_layer_bounds = !this.show_layer_bounds;
+                        cx.notify();
+                    },
+                ))
             })
             .when(interactive && self.tabs.len() > 1, |root| {
                 root.on_action(cx.listener(|this, _: &NextTab, window, cx| {
@@ -1474,85 +1479,50 @@ impl Workspace {
                                         panel.child(format!("Offset {}, {}", offset.0, offset.1))
                                     })
                                     .child(
-                                        form_button(
-                                            "Show Layer Boundary",
-                                            self.show_layer_bounds,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_layer_bounds = !this.show_layer_bounds;
-                                            cx.notify();
-                                        })),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(
-                                                selection_button(
-                                                    "Center Horizontally",
-                                                    enabled,
-                                                    |window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(AlignLayer::Horizontal),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                                .w_full(),
-                                            )
-                                            .child(
-                                                selection_button(
-                                                    "Center Vertically",
-                                                    enabled,
-                                                    |window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(AlignLayer::Vertical),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                                .w_full(),
-                                            )
-                                            .child(
-                                                selection_button(
-                                                    "Center in Image",
-                                                    enabled,
-                                                    |window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(AlignLayer::Both),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                                .w_full(),
-                                            )
-                                            .child(
-                                                selection_button(
-                                                    "Layer to Image Size",
-                                                    enabled,
-                                                    |window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(LayerToImageSize),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                                .w_full(),
-                                            )
-                                            .child(
-                                                selection_button(
-                                                    "Crop to Content",
-                                                    enabled,
-                                                    |window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(CropLayerToContent),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                                .w_full(),
+                                        div().flex().flex_wrap().gap_1().children([
+                                            align_button(
+                                                "align-top",
+                                                "Align Top",
+                                                AlignLayer::Top,
+                                                enabled,
+                                                cx,
                                             ),
+                                            align_button(
+                                                "align-bottom",
+                                                "Align Bottom",
+                                                AlignLayer::Bottom,
+                                                enabled,
+                                                cx,
+                                            ),
+                                            align_button(
+                                                "align-left",
+                                                "Align Left",
+                                                AlignLayer::Left,
+                                                enabled,
+                                                cx,
+                                            ),
+                                            align_button(
+                                                "align-right",
+                                                "Align Right",
+                                                AlignLayer::Right,
+                                                enabled,
+                                                cx,
+                                            ),
+                                            align_button(
+                                                "align-h-center",
+                                                "Center Horizontally",
+                                                AlignLayer::Horizontal,
+                                                enabled,
+                                                cx,
+                                            ),
+                                            align_button(
+                                                "align-v-center",
+                                                "Center Vertically",
+                                                AlignLayer::Vertical,
+                                                enabled,
+                                                cx,
+                                            ),
+                                        ]),
                                     )
                                     .when(self.move_drag.is_some(), |panel| {
                                         panel.child(form_button("Cancel", false).on_click(
@@ -2560,6 +2530,36 @@ fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
                 cx.notify();
             })),
         )
+}
+
+fn align_button(
+    symbol: &'static str,
+    label: &'static str,
+    action: AlignLayer,
+    enabled: bool,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(label)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.))
+        .flex_shrink_0()
+        .rounded_md()
+        .bg(rgb(CHROME))
+        .text_color(rgb(if enabled { MUTED } else { DISABLED }))
+        .tooltip(tooltip(label))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    window.dispatch_action(Box::new(action), cx);
+                }))
+        })
+        .when(!enabled, |button| button.cursor(CursorStyle::Arrow))
+        .child(icon(symbol, 15.))
 }
 
 fn selection_button(

@@ -19,7 +19,7 @@ use crate::commands::{
     ToggleLayerVisibility,
 };
 use crate::document::{self, LayerGeometry, LayerId};
-use crate::geometry::{self, Axis, ContentCrop};
+use crate::geometry::{self, Alignment, ContentCrop};
 use crate::preview::Dirty;
 
 pub(super) struct MoveDrag {
@@ -569,13 +569,17 @@ impl Workspace {
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
-        let axis = match axis {
-            AlignLayer::Horizontal => Axis::Horizontal,
-            AlignLayer::Vertical => Axis::Vertical,
-            AlignLayer::Both => Axis::Both,
+        let alignment = match axis {
+            AlignLayer::Left => Alignment::Left,
+            AlignLayer::Right => Alignment::Right,
+            AlignLayer::Top => Alignment::Top,
+            AlignLayer::Bottom => Alignment::Bottom,
+            AlignLayer::Horizontal => Alignment::HorizontalCenter,
+            AlignLayer::Vertical => Alignment::VerticalCenter,
+            AlignLayer::Both => Alignment::Both,
         };
         self.edit_content(
-            move |content, _, _| content.align_layer(id, axis),
+            move |content, _, _| content.align_layer(id, alignment),
             window,
             cx,
         );

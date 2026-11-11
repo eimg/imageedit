@@ -1,13 +1,6 @@
 use image::RgbaImage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Axis {
-    Horizontal,
-    Vertical,
-    Both,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelBox {
     pub x: u32,
     pub y: u32,
@@ -24,6 +17,17 @@ pub enum ContentCrop {
     Crop(PixelBox),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alignment {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    HorizontalCenter,
+    VerticalCenter,
+    Both,
+}
+
 pub struct LayerSample<'a> {
     pub offset: (i32, i32),
     pub pixels: &'a RgbaImage,
@@ -31,27 +35,29 @@ pub struct LayerSample<'a> {
     pub opacity: u8,
 }
 
-pub fn centered_offset(
+pub fn aligned_offset(
     offset: (i32, i32),
     layer_width: u32,
     layer_height: u32,
     canvas_width: u32,
     canvas_height: u32,
-    axis: Axis,
+    alignment: Alignment,
 ) -> (i32, i32) {
-    let center = |canvas: u32, layer: u32| {
-        let delta = i64::from(canvas) - i64::from(layer);
-        (delta / 2).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-    };
-    let x = match axis {
-        Axis::Horizontal | Axis::Both => center(canvas_width, layer_width),
-        Axis::Vertical => offset.0,
-    };
-    let y = match axis {
-        Axis::Vertical | Axis::Both => center(canvas_height, layer_height),
-        Axis::Horizontal => offset.1,
-    };
-    (x, y)
+    let clamp = |value: i64| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let center = |canvas: u32, layer: u32| clamp((i64::from(canvas) - i64::from(layer)) / 2);
+    let edge = |canvas: u32, layer: u32| clamp(i64::from(canvas) - i64::from(layer));
+    match alignment {
+        Alignment::Left => (0, offset.1),
+        Alignment::Right => (edge(canvas_width, layer_width), offset.1),
+        Alignment::Top => (offset.0, 0),
+        Alignment::Bottom => (offset.0, edge(canvas_height, layer_height)),
+        Alignment::HorizontalCenter => (center(canvas_width, layer_width), offset.1),
+        Alignment::VerticalCenter => (offset.0, center(canvas_height, layer_height)),
+        Alignment::Both => (
+            center(canvas_width, layer_width),
+            center(canvas_height, layer_height),
+        ),
+    }
 }
 
 pub fn nonzero_alpha_bounds(pixels: &RgbaImage) -> Option<PixelBox> {
@@ -180,12 +186,32 @@ mod tests {
     }
 
     #[test]
-    fn centering_keeps_the_other_axis_and_allows_a_negative_offset() {
+    fn alignment_edges_and_centers_use_the_canvas() {
         assert_eq!(
-            centered_offset((-8, 5), 4, 4, 10, 20, Axis::Horizontal),
-            (3, 5)
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::Left),
+            (0, 2)
         );
-        assert_eq!(centered_offset((1, 2), 15, 6, 10, 20, Axis::Both), (-2, 7));
+        assert_eq!(
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::Right),
+            (6, 2)
+        );
+        assert_eq!(aligned_offset((1, 2), 4, 6, 10, 20, Alignment::Top), (1, 0));
+        assert_eq!(
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::Bottom),
+            (1, 14)
+        );
+        assert_eq!(
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::HorizontalCenter),
+            (3, 2)
+        );
+        assert_eq!(
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::VerticalCenter),
+            (1, 7)
+        );
+        assert_eq!(
+            aligned_offset((1, 2), 4, 6, 10, 20, Alignment::Both),
+            (3, 7)
+        );
     }
 
     #[test]

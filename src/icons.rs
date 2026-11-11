@@ -34,6 +34,12 @@ impl AssetSource for Icons {
             }
             "arrow-up" => r#"<path d="M12 19V5m-6 6 6-6 6 6"/>"#,
             "arrow-down" => r#"<path d="M12 5v14m-6-6 6 6 6-6"/>"#,
+            "align-left" => r#"<path d="M4 4v16M20 12H8m4-4-4 4 4 4"/>"#,
+            "align-right" => r#"<path d="M20 4v16M4 12h12m-4-4 4 4-4 4"/>"#,
+            "align-top" => r#"<path d="M4 4h16M12 20V8m-4 4 4-4 4 4"/>"#,
+            "align-bottom" => r#"<path d="M4 20h16M12 4v12m-4-4 4 4 4-4"/>"#,
+            "align-h-center" => r#"<path d="M12 4v16M4 8l4 4-4 4M20 8l-4 4 4 4"/>"#,
+            "align-v-center" => r#"<path d="M4 12h16M8 4l4 4 4-4M8 20l4-4 4 4"/>"#,
             "merge" => r#"<path d="m12 4 8 4-8 4-8-4 8-4ZM12 15v6m-3-3 3 3 3-3"/>"#,
             "trash" => r#"<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>"#,
             "text" => r#"<path d="M4 7V4h16v3M12 4v16m-4 0h8"/>"#,
