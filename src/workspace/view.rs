@@ -1130,6 +1130,22 @@ impl Workspace {
                             show_grid: self.show_grid,
                             show_guides: self.show_guides,
                             crop: self.crop,
+                            layer_bounds: if self.show_layer_bounds {
+                                tab.document.content.layer(tab.active_layer).map(|layer| {
+                                    let offset = self
+                                        .move_drag
+                                        .as_ref()
+                                        .map_or(layer.offset, |drag| drag.offset);
+                                    preview::PixelRect {
+                                        x: i64::from(offset.0),
+                                        y: i64::from(offset.1),
+                                        width: layer.pixels.width(),
+                                        height: layer.pixels.height(),
+                                    }
+                                })
+                            } else {
+                                None
+                            },
                             selection: self
                                 .selection_preview
                                 .clone()
@@ -1457,6 +1473,16 @@ impl Workspace {
                                     .when_some(offset, |panel, offset| {
                                         panel.child(format!("Offset {}, {}", offset.0, offset.1))
                                     })
+                                    .child(
+                                        form_button(
+                                            "Show Layer Boundary",
+                                            self.show_layer_bounds,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_layer_bounds = !this.show_layer_bounds;
+                                            cx.notify();
+                                        })),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -2100,6 +2126,7 @@ struct CanvasDecorations {
     show_grid: bool,
     show_guides: bool,
     crop: Option<CropRect>,
+    layer_bounds: Option<preview::PixelRect>,
     selection: crate::selection::Selection,
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
@@ -2122,6 +2149,7 @@ fn image_preview(
         show_grid,
         show_guides,
         crop,
+        layer_bounds,
         selection,
         show_handles,
         move_layer,
@@ -2222,6 +2250,9 @@ fn image_preview(
                         color,
                     ));
                 }
+            }
+            if let Some(bounds) = layer_bounds {
+                paint_layer_bounds(window, &geometry, width, height, visible, bounds);
             }
             paint_contours(window, &geometry, width, height, visible, &contours);
             paint_segments(
@@ -3095,6 +3126,38 @@ fn span_draw_range(start: f32, end: f32, draw_min: f32, draw_max: f32) -> (f32, 
     let near = along(draw_min);
     let far = along(draw_max);
     (near.min(far), near.max(far))
+}
+
+fn paint_layer_bounds(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    rect: preview::PixelRect,
+) {
+    if width == 0 || height == 0 || rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let start = geometry.project(point(
+        rect.x as f32 / width as f32,
+        rect.y as f32 / height as f32,
+    ));
+    let end = geometry.project(point(
+        (rect.x + i64::from(rect.width)) as f32 / width as f32,
+        (rect.y + i64::from(rect.height)) as f32 / height as f32,
+    ));
+    let bounds = Bounds::from_corners(start, end);
+    if bounds.intersect(&visible).is_empty() {
+        return;
+    }
+    window.with_content_mask(Some(ContentMask { bounds: visible }), |window| {
+        window.paint_quad(gpui::outline(
+            bounds,
+            rgba(0xacc6ff80),
+            gpui::BorderStyle::Solid,
+        ));
+    });
 }
 
 fn paint_crop(window: &mut Window, image: Bounds<Pixels>, crop: Bounds<Pixels>) {

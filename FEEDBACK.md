@@ -65,7 +65,11 @@ opaque, the checker stays hidden behind that content.
 
 ## 4. Subtle layer boundary, with a global switch
 
-- Status: `open`
+- Status: `done`
+- 2026-11-11: The Move tool options have a global Show Layer Boundary
+  toggle. The subtle outline follows the active layer's offset and size,
+  including the live Move preview, and stays on across tools and tabs.
+  Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
 
 Show a subtle outline of the active layer's bounds on the canvas. Put a
 boundary on/off control in the Move tool options. The switch is global: it
