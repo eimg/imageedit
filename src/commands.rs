@@ -95,7 +95,6 @@ actions!(
         HideOthers,
         ShowAll,
         Quit,
-        Planned
     ]
 );
 
@@ -229,6 +228,31 @@ impl Tool {
             description,
         }
     }
+
+    /// Toolbox shortcut. Pan is chosen from the View menu and has no key.
+    pub fn shortcut(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Move => "m",
+            Self::Pan => return None,
+            Self::Zoom => "z",
+            Self::Eyedropper => "o",
+            Self::Crop => "shift-c",
+            Self::Rotate => "shift-r",
+            Self::Flip => "shift-f",
+            Self::Perspective => "shift-p",
+            Self::Select => "r",
+            Self::FreeSelect => "f",
+            Self::MagicWand => "u",
+            Self::Pencil => "n",
+            Self::Brush => "p",
+            Self::Eraser => "shift-e",
+            Self::BucketFill => "shift-b",
+            Self::Gradient => "g",
+            Self::Text => "t",
+            Self::Path => "b",
+            Self::Stroke => "s",
+        })
+    }
 }
 
 const TRANSFORM_TOOLS: &[Tool] = &[
@@ -320,10 +344,6 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("+", ZoomIn, None),
         KeyBinding::new("-", ZoomOut, None),
         KeyBinding::new("1", Zoom::Percent(100.), None),
-        KeyBinding::new("r", SelectTool(Tool::Select), None),
-        KeyBinding::new("f", SelectTool(Tool::FreeSelect), None),
-        KeyBinding::new("u", SelectTool(Tool::MagicWand), None),
-        KeyBinding::new("m", SelectTool(Tool::Move), None),
         KeyBinding::new("escape", CancelMove, Some("Move")),
         KeyBinding::new("escape", CancelFreeSelect, Some("FreeSelect")),
         KeyBinding::new("enter", CloseFreeSelect, Some("FreeSelect")),
@@ -334,30 +354,16 @@ pub fn register(cx: &mut App) {
         KeyBinding::new(&format!("{primary}-a"), SelectAll, None),
         KeyBinding::new(&format!("{primary}-shift-a"), SelectNone, None),
         KeyBinding::new(&format!("{primary}-i"), InvertSelection, None),
-        KeyBinding::new("n", SelectTool(Tool::Pencil), None),
-        KeyBinding::new("p", SelectTool(Tool::Brush), None),
-        KeyBinding::new("shift-e", SelectTool(Tool::Eraser), None),
         KeyBinding::new("escape", CancelStroke, Some("Paint")),
-        KeyBinding::new("shift-r", SelectTool(Tool::Rotate), None),
-        KeyBinding::new("shift-f", SelectTool(Tool::Flip), None),
-        KeyBinding::new("shift-p", SelectTool(Tool::Perspective), None),
-        KeyBinding::new("shift-c", SelectTool(Tool::Crop), None),
         KeyBinding::new("enter", ApplyTransform, Some("Transform")),
         KeyBinding::new("escape", CancelTransform, Some("Transform")),
-        KeyBinding::new("s", SelectTool(Tool::Stroke), None),
-        KeyBinding::new("t", SelectTool(Tool::Text), None),
         KeyBinding::new("enter", CommitStroke, Some("Stroke")),
-        KeyBinding::new("b", SelectTool(Tool::Path), None),
         KeyBinding::new("escape", CancelPath, Some("Path")),
         KeyBinding::new("enter", ClosePath, Some("Path")),
         KeyBinding::new("backspace", DeletePathAnchor, Some("Path")),
         KeyBinding::new("delete", DeletePathAnchor, Some("Path")),
-        KeyBinding::new("g", SelectTool(Tool::Gradient), None),
         KeyBinding::new("enter", ApplyGradient, Some("Gradient")),
         KeyBinding::new("escape", CancelGradient, Some("Gradient")),
-        KeyBinding::new("shift-b", SelectTool(Tool::BucketFill), None),
-        KeyBinding::new("o", SelectTool(Tool::Eyedropper), None),
-        KeyBinding::new("z", SelectTool(Tool::Zoom), None),
         KeyBinding::new("x", SwapColors, None),
         KeyBinding::new("d", ResetColors, None),
         KeyBinding::new("alt-o", ForegroundColor, None),
@@ -381,8 +387,10 @@ pub fn register(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("ctrl-z", Undo, None),
             KeyBinding::new("ctrl-y", Redo, None),
+            KeyBinding::new("ctrl-q", Quit, None),
         ]);
     }
+    bind_tool_shortcuts(cx);
     // A NoAction here is higher than the global tool letters, so key_down can type them.
     cx.bind_keys([
         KeyBinding::new("n", NoAction, Some("Text")),
@@ -426,8 +434,44 @@ pub fn register(cx: &mut App) {
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
 
-    cx.set_menus(vec![
-        menu(
+    cx.set_menus(application_menus(cfg!(target_os = "macos")));
+}
+
+fn bind_tool_shortcuts(cx: &mut App) {
+    for (_, tools) in TOOL_GROUPS {
+        for tool in *tools {
+            let Some(key) = tool.shortcut() else {
+                continue;
+            };
+            cx.bind_keys([KeyBinding::new(key, SelectTool(*tool), None)]);
+        }
+    }
+}
+
+fn application_menus(macos: bool) -> Vec<Menu> {
+    let mut file = vec![
+        MenuItem::action("New Image…", NewImage),
+        MenuItem::action("New from Clipboard", NewFromClipboard),
+        MenuItem::separator(),
+        MenuItem::action("Open…", OpenImage),
+        MenuItem::action("Open as Layers…", OpenAsLayers),
+        MenuItem::action("Close Tab", CloseTab),
+        MenuItem::separator(),
+        MenuItem::action("Save", SaveImage),
+        MenuItem::action("Save As…", SaveImageAs),
+        MenuItem::action("Save Project As…", SaveProjectAs),
+        MenuItem::separator(),
+        MenuItem::action("Export as PNG…", ExportPng),
+        MenuItem::action("Export as JPEG…", ExportJpeg),
+        MenuItem::action("Export as WebP…", ExportWebp),
+    ];
+    if !macos {
+        file.extend([MenuItem::separator(), MenuItem::action("Exit", Quit)]);
+    }
+
+    let mut menus = Vec::new();
+    if macos {
+        menus.push(menu(
             "ImageEdit",
             vec![
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -438,26 +482,10 @@ pub fn register(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Quit ImageEdit", Quit),
             ],
-        ),
-        menu(
-            "File",
-            vec![
-                MenuItem::action("New Image…", NewImage),
-                MenuItem::action("New from Clipboard", NewFromClipboard),
-                MenuItem::separator(),
-                MenuItem::action("Open…", OpenImage),
-                MenuItem::action("Open as Layers…", OpenAsLayers),
-                MenuItem::action("Close Tab", CloseTab),
-                MenuItem::separator(),
-                MenuItem::action("Save", SaveImage),
-                MenuItem::action("Save As…", SaveImageAs),
-                MenuItem::action("Save Project As…", SaveProjectAs),
-                MenuItem::separator(),
-                MenuItem::action("Export as PNG…", ExportPng),
-                MenuItem::action("Export as JPEG…", ExportJpeg),
-                MenuItem::action("Export as WebP…", ExportWebp),
-            ],
-        ),
+        ));
+    }
+    menus.extend([
+        menu("File", file),
         menu(
             "Edit",
             vec![
@@ -595,6 +623,7 @@ pub fn register(cx: &mut App) {
             ],
         ),
     ]);
+    menus
 }
 
 fn image_transform_menu() -> MenuItem {
@@ -656,7 +685,284 @@ fn tool(tool: Tool) -> MenuItem {
     MenuItem::action(tool.info().label, SelectTool(tool))
 }
 
-#[allow(dead_code)]
-fn planned(label: &'static str) -> MenuItem {
-    MenuItem::action(label, Planned)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tool_is_in_one_group_with_a_distinct_shortcut() {
+        let tools = [
+            Tool::Move,
+            Tool::Pan,
+            Tool::Zoom,
+            Tool::Eyedropper,
+            Tool::Crop,
+            Tool::Rotate,
+            Tool::Flip,
+            Tool::Perspective,
+            Tool::Select,
+            Tool::FreeSelect,
+            Tool::MagicWand,
+            Tool::Pencil,
+            Tool::Brush,
+            Tool::Eraser,
+            Tool::BucketFill,
+            Tool::Gradient,
+            Tool::Text,
+            Tool::Path,
+            Tool::Stroke,
+        ];
+        let mut shortcuts = std::collections::HashSet::new();
+        for tool in tools {
+            let groups = TOOL_GROUPS
+                .iter()
+                .filter(|(_, group)| group.contains(&tool))
+                .count();
+            assert_eq!(groups, 1, "{tool:?}");
+            match tool {
+                Tool::Pan => assert_eq!(tool.shortcut(), None),
+                Tool::Move => assert_eq!(tool.shortcut(), Some("m")),
+                Tool::Zoom => assert_eq!(tool.shortcut(), Some("z")),
+                Tool::Eyedropper => assert_eq!(tool.shortcut(), Some("o")),
+                Tool::Crop => assert_eq!(tool.shortcut(), Some("shift-c")),
+                Tool::Rotate => assert_eq!(tool.shortcut(), Some("shift-r")),
+                Tool::Flip => assert_eq!(tool.shortcut(), Some("shift-f")),
+                Tool::Perspective => assert_eq!(tool.shortcut(), Some("shift-p")),
+                Tool::Select => assert_eq!(tool.shortcut(), Some("r")),
+                Tool::FreeSelect => assert_eq!(tool.shortcut(), Some("f")),
+                Tool::MagicWand => assert_eq!(tool.shortcut(), Some("u")),
+                Tool::Pencil => assert_eq!(tool.shortcut(), Some("n")),
+                Tool::Brush => assert_eq!(tool.shortcut(), Some("p")),
+                Tool::Eraser => assert_eq!(tool.shortcut(), Some("shift-e")),
+                Tool::BucketFill => assert_eq!(tool.shortcut(), Some("shift-b")),
+                Tool::Gradient => assert_eq!(tool.shortcut(), Some("g")),
+                Tool::Text => assert_eq!(tool.shortcut(), Some("t")),
+                Tool::Path => assert_eq!(tool.shortcut(), Some("b")),
+                Tool::Stroke => assert_eq!(tool.shortcut(), Some("s")),
+            }
+            if let Some(shortcut) = tool.shortcut() {
+                assert!(shortcuts.insert(shortcut), "{shortcut}");
+            }
+        }
+        let listed: usize = TOOL_GROUPS.iter().map(|(_, group)| group.len()).sum();
+        assert_eq!(listed, tools.len());
+    }
+
+    #[test]
+    fn menus_match_the_release_checklist() {
+        let macos = menu_labels(&application_menus(true));
+        let windows = menu_labels(&application_menus(false));
+        let checklist = [
+            "menu:ImageEdit",
+            "Services",
+            "Hide ImageEdit",
+            "Hide Others",
+            "Show All",
+            "Quit ImageEdit",
+            "menu:File",
+            "New Image…",
+            "New from Clipboard",
+            "Open…",
+            "Open as Layers…",
+            "Close Tab",
+            "Save",
+            "Save As…",
+            "Save Project As…",
+            "Export as PNG…",
+            "Export as JPEG…",
+            "Export as WebP…",
+            "menu:Edit",
+            "Undo",
+            "Redo",
+            "Cut",
+            "Copy",
+            "Paste",
+            "Paste as New Layer",
+            "Clear to Transparency",
+            "Stroke Path",
+            "Stroke Selection",
+            "menu:Select",
+            "Rectangle Select",
+            "Select All",
+            "Select None",
+            "Invert Selection",
+            "Feather…",
+            "Grow…",
+            "Shrink…",
+            "Path to Selection",
+            "menu:View",
+            "menu:Zoom",
+            "Zoom In",
+            "Zoom Out",
+            "Fit Image in Window",
+            "25%",
+            "50%",
+            "100%",
+            "200%",
+            "400%",
+            "Pan",
+            "Toggle Grid",
+            "Toggle Guides",
+            "menu:Image",
+            "menu:Mode",
+            "RGB",
+            "Grayscale",
+            "menu:Transform",
+            "Rotate 90° Left",
+            "Rotate 90° Right",
+            "Rotate 180°",
+            "Flip Horizontally",
+            "Flip Vertically",
+            "Perspective",
+            "Scale Image…",
+            "Canvas Size…",
+            "Crop",
+            "Apply Crop",
+            "Crop to Selection",
+            "Crop to Content",
+            "menu:Layer",
+            "New Layer…",
+            "Duplicate Layer",
+            "Rename Layer…",
+            "Merge Down",
+            "Delete Layer",
+            "Toggle Layer Visibility",
+            "Layer Opacity…",
+            "Raise Layer",
+            "Lower Layer",
+            "menu:Transform",
+            "Rotate 90° Left",
+            "Rotate 90° Right",
+            "Rotate 180°",
+            "Flip Horizontally",
+            "Flip Vertically",
+            "Perspective",
+            "menu:Align",
+            "Center Horizontally in Image",
+            "Center Vertically in Image",
+            "Center in Image",
+            "Scale Layer…",
+            "Layer to Image Size",
+            "Crop to Content",
+            "Rasterize Text Layer",
+            "menu:Tools",
+            "menu:Transform",
+            "Move",
+            "Crop",
+            "Rotate",
+            "Flip",
+            "Perspective",
+            "menu:Selection",
+            "Select",
+            "Free Select",
+            "Magic Wand",
+            "menu:Paint",
+            "Pencil",
+            "Brush",
+            "Eraser",
+            "menu:Fill",
+            "Bucket Fill",
+            "Gradient Fill",
+            "menu:Draw",
+            "Text",
+            "Path",
+            "Stroke",
+            "menu:Utilities",
+            "Pan",
+            "Zoom",
+            "Color Picker",
+            "menu:Colors",
+            "Foreground Color…",
+            "Background Color…",
+            "Swap Foreground and Background",
+            "Default Colors",
+            "Brightness & Contrast…",
+            "Hue & Saturation…",
+            "Color Balance…",
+            "Levels…",
+            "Curves…",
+            "Desaturate…",
+            "Invert",
+            "menu:Filters",
+            "Blur…",
+            "Sharpen…",
+            "Drop Shadow…",
+            "menu:Window",
+            "Minimize",
+            "Zoom",
+            "Next Tab",
+            "Previous Tab",
+        ];
+        assert_eq!(macos, checklist.map(str::to_owned));
+        let mut expected_windows: Vec<&str> = checklist
+            .into_iter()
+            .filter(|label| {
+                !matches!(
+                    *label,
+                    "menu:ImageEdit"
+                        | "Services"
+                        | "Hide ImageEdit"
+                        | "Hide Others"
+                        | "Show All"
+                        | "Quit ImageEdit"
+                )
+            })
+            .collect();
+        let export = expected_windows
+            .iter()
+            .position(|label| *label == "Export as WebP…")
+            .unwrap();
+        expected_windows.insert(export + 1, "Exit");
+        assert_eq!(
+            windows,
+            expected_windows
+                .iter()
+                .copied()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert!(!macos.iter().any(|label| label.contains("Planned")));
+    }
+
+    #[test]
+    fn finder_claims_projects_and_raster_images() {
+        let plist = include_str!("../macos/Info.plist");
+        for needle in [
+            "com.imageedit.editor",
+            "com.imageedit.project",
+            "public.png",
+            "public.jpeg",
+            "org.webmproject.webp",
+            "public.filename-extension",
+            "<string>imageedit</string>",
+            "<string>Editor</string>",
+            "<string>Owner</string>",
+            "<string>Alternate</string>",
+        ] {
+            assert!(plist.contains(needle), "{needle}");
+        }
+    }
+
+    fn menu_labels(menus: &[Menu]) -> Vec<String> {
+        let mut labels = Vec::new();
+        for menu in menus {
+            labels.push(format!("menu:{}", menu.name));
+            collect_items(&menu.items, &mut labels);
+        }
+        labels
+    }
+
+    fn collect_items(items: &[MenuItem], labels: &mut Vec<String>) {
+        for item in items {
+            match item {
+                MenuItem::Separator => {}
+                MenuItem::Submenu(menu) => {
+                    labels.push(format!("menu:{}", menu.name));
+                    collect_items(&menu.items, labels);
+                }
+                MenuItem::SystemMenu(menu) => labels.push(menu.name.to_string()),
+                MenuItem::Action { name, .. } => labels.push(name.to_string()),
+            }
+        }
+    }
 }

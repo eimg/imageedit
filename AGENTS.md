@@ -1,7 +1,8 @@
 # ImageEdit agent guide
 
 ImageEdit is a Rust and GPUI desktop image editor. Build for macOS first and
-keep the shared workspace portable for a future Windows build. The product
+keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
+app menu. Windows uses File → Exit. The product
 takes cues from GIMP, with native menus, a fixed toolbox and Layers panel, and a
 tabbed canvas. File commands belong in the menu. The workspace favors canvas
 space and has no top toolbar.
@@ -146,7 +147,8 @@ dashed contour. Stroke polylines follow that contour, including a hole.
 - `src/macos.rs` applies the same icon to the running Dock entry, including
   development launches from Cargo.
 - `scripts/bundle-macos.sh` copies the executable, Info.plist, and icon into
-  `dist/ImageEdit.app` and signs the local bundle.
+  `dist/ImageEdit.app`, ad hoc signs the bundle, and checks that signature and
+  the project and raster document types.
 
 ## Build and check
 

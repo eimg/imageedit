@@ -2,7 +2,36 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P21
+## Latest handoff · P22
+
+P22 is the release check on `main`, starting from the text-layer commit (`236b825`).
+
+- macOS keeps Services, Hide, and Quit in the app menu. Windows omits that menu and adds File → Exit, bound to Ctrl+Q. Redo stays Ctrl+Y there. Toolbox shortcuts come from `Tool::shortcut`, and Pan stays on the View menu with no key. `menus_match_the_release_checklist` locks every label below. No menu item is left as a planned stub.
+- Checklist. Each item has a handler. Availability was compared in code and in that test. Pointer gestures and the live menu bar were not driven.
+
+  **ImageEdit** (macOS): Services, Hide ImageEdit, Hide Others, Show All, Quit ImageEdit.
+  **File:** New Image…, New from Clipboard, Open…, Open as Layers…, Close Tab, Save, Save As…, Save Project As…, Export as PNG…, Export as JPEG…, Export as WebP…. Windows adds Exit.
+  **Edit:** Undo, Redo, Cut, Copy, Paste, Paste as New Layer, Clear to Transparency, Stroke Path, Stroke Selection.
+  **Select:** Rectangle Select, Select All, Select None, Invert Selection, Feather…, Grow…, Shrink…, Path to Selection.
+  **View:** Zoom In, Zoom Out, Fit Image in Window, 25%, 50%, 100%, 200%, 400%, Pan, Toggle Grid, Toggle Guides.
+  **Image:** Mode RGB and Grayscale; Transform rotate 90° left, 90° right, and 180°, flip horizontally and vertically, and Perspective; Scale Image…, Canvas Size…, Crop, Apply Crop, Crop to Selection, Crop to Content.
+  **Layer:** New Layer…, Duplicate Layer, Rename Layer…, Merge Down, Delete Layer, Toggle Layer Visibility, Layer Opacity…, Raise Layer, Lower Layer; the same Transform commands; Align center horizontally, vertically, and both; Scale Layer…, Layer to Image Size, Crop to Content, Rasterize Text Layer.
+  **Tools:** Move, Crop, Rotate, Flip, Perspective, Select, Free Select, Magic Wand, Pencil, Brush, Eraser, Bucket Fill, Gradient Fill, Text, Path, Stroke, Pan, Zoom, Color Picker.
+  **Colors:** Foreground Color…, Background Color…, Swap Foreground and Background, Default Colors, Brightness & Contrast…, Hue & Saturation…, Color Balance…, Levels…, Curves…, Desaturate…, Invert.
+  **Filters:** Blur…, Sharpen…, Drop Shadow….
+  **Window:** Minimize, Zoom, Next Tab, Previous Tab.
+  Shortcuts: Move M, Crop Shift+C, Rotate Shift+R, Flip Shift+F, Perspective Shift+P, Select R, Free Select F, Magic Wand U, Pencil N, Brush P, Eraser Shift+E, Bucket Fill Shift+B, Gradient G, Text T, Path B, Stroke S, Zoom Z, Color Picker O. Pan has no shortcut.
+
+- History keeps 100 entries, 256 MiB on a tab, and 512 MiB across tabs. Shared pixels and a shared selection mask count once. `app_budget_evicts_the_oldest_entry_across_tabs` drops the oldest step when two tabs share the app budget. Closing a tab calls `drop_image` on that canvas. The GPU texture cache itself was not measured.
+- A save replaces the destination only after a complete, synced write. `failed_project_save_preserves_the_existing_file` leaves the previous project in place when the new one is rejected, and no temporary file remains. `malformed_project_does_not_open`, `malformed_manifests_are_rejected`, and `malformed_payloads_and_framing_are_rejected` refuse a broken project.
+- Only project version 5 opens. Version 4 and anything newer are rejected on purpose. `round_trips_layer_order_ids_offsets_alpha_and_properties` and `styled_multiline_text_round_trips_and_can_be_edited` round-trip `fixtures/projects/v5-two-layers.imageedit`.
+- Finder types live in `macos/Info.plist` and in the signed bundle: `com.imageedit.project` is the Owner of `.imageedit`, and PNG, JPEG, and WebP are Alternate editor types. `codesign --verify --strict` passed. Launch Services lists `dist/ImageEdit.app` as claiming those four types. The signature is ad hoc, so this is not a notarized install.
+- Release benchmarks, two idle runs (`cargo test --release --locked benchmark -- --ignored --nocapture`). Machine: macOS 27.3 (26C5035r), Apple M3 Pro, 11 cores, 18 GB, built-in Liquid Retina XDR at 3024 × 1964 (scale 2). These are CPU timings. On the 8192 canvas, 256 px tiles measured interior p95 109–110 µs (1 tile), boundary p95 439–522 µs (4 tiles), and a full refresh of 128–135 ms (1024 tiles). 512 px tiles measured interior p95 473–499 µs, boundary p95 1898–1901 µs, and a full refresh of 116–119 ms (256 tiles). Resizing the full preview to 4096 took 557–562 ms. The 8 ms interior target still holds. A 4K stroke measured 151–479 µs to fill the buffer, 99–125 µs to composite the live tile, and 197–202 µs to rebuild the one dirty tile. The buffer sample moved between runs.
+- `cargo check --locked --target x86_64-pc-windows-gnu` completed on this Mac after installing the MinGW gcc the `ring` build script needs. That check type-checks ImageEdit and its Windows dependencies. It does not link or launch a Windows executable, and the app was not run on Windows. No Windows runner was available.
+- Formatting, Clippy, and locked tests passed: 166, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app. This is the last scheduled pass.
+
+## Feature handoff · P21
 
 P21 adds editable text layers on `main`, starting from the path and stroke commit (`eeb5d65`).
 

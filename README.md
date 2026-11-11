@@ -187,7 +187,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Commands without handlers appear disabled. Windows is a future target.
+Commands without handlers appear disabled. On Windows, Quit is File → Exit
+(Ctrl+Q) and Redo is Ctrl+Y. The Windows gnu target is cross-checked from
+macOS. The app has not been run on Windows.
 
 ## Development
 
