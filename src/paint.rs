@@ -359,6 +359,98 @@ fn source_over(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
     ])
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GradientShape {
+    Linear,
+    Radial,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GradientBlend {
+    ForegroundToBackground,
+    ForegroundToTransparent,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Gradient {
+    pub shape: GradientShape,
+    pub blend: GradientBlend,
+    pub start: (f64, f64),
+    pub end: (f64, f64),
+    pub foreground: Rgba<u8>,
+    pub background: Rgba<u8>,
+}
+
+pub fn gradient_color(gradient: &Gradient, x: f64, y: f64) -> Rgba<u8> {
+    let t = gradient_t(gradient, x, y);
+    let (start, end) = gradient_stops(gradient);
+    if t <= 0.0 {
+        return start;
+    }
+    if t >= 1.0 {
+        return clear_if_empty(end);
+    }
+    clear_if_empty(Rgba([
+        lerp_channel(start.0[0], end.0[0], t),
+        lerp_channel(start.0[1], end.0[1], t),
+        lerp_channel(start.0[2], end.0[2], t),
+        lerp_channel(start.0[3], end.0[3], t),
+    ]))
+}
+
+fn gradient_stops(gradient: &Gradient) -> (Rgba<u8>, Rgba<u8>) {
+    match gradient.blend {
+        GradientBlend::ForegroundToBackground => (gradient.foreground, gradient.background),
+        GradientBlend::ForegroundToTransparent => (
+            gradient.foreground,
+            Rgba([
+                gradient.foreground.0[0],
+                gradient.foreground.0[1],
+                gradient.foreground.0[2],
+                0,
+            ]),
+        ),
+    }
+}
+
+fn gradient_t(gradient: &Gradient, x: f64, y: f64) -> f64 {
+    let dx = gradient.end.0 - gradient.start.0;
+    let dy = gradient.end.1 - gradient.start.1;
+    match gradient.shape {
+        GradientShape::Linear => {
+            let length = dx * dx + dy * dy;
+            if length <= 1e-12 {
+                0.0
+            } else {
+                (((x - gradient.start.0) * dx + (y - gradient.start.1) * dy) / length)
+                    .clamp(0.0, 1.0)
+            }
+        }
+        GradientShape::Radial => {
+            let radius = dx.hypot(dy);
+            if radius <= 1e-6 {
+                0.0
+            } else {
+                ((x - gradient.start.0).hypot(y - gradient.start.1) / radius).clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+fn lerp_channel(start: u8, end: u8, t: f64) -> u8 {
+    (f64::from(start) + (f64::from(end) - f64::from(start)) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn clear_if_empty(color: Rgba<u8>) -> Rgba<u8> {
+    if color.0[3] == 0 {
+        Rgba([0, 0, 0, 0])
+    } else {
+        color
+    }
+}
+
 fn erase(pixel: Rgba<u8>, amount: f64) -> Rgba<u8> {
     let keep = 1.0 - amount.clamp(0.0, 1.0);
     let alpha = (f64::from(pixel.0[3]) * keep).round().clamp(0.0, 255.0) as u8;
@@ -681,5 +773,52 @@ mod tests {
             rebuilt,
         );
         assert!(rebuilt <= 4);
+    }
+
+    fn ramp(shape: GradientShape, blend: GradientBlend) -> Gradient {
+        Gradient {
+            shape,
+            blend,
+            start: (0.0, 0.0),
+            end: (4.0, 0.0),
+            foreground: Rgba([255, 0, 0, 255]),
+            background: Rgba([0, 0, 255, 255]),
+        }
+    }
+
+    #[test]
+    fn gradient_endpoints_clamp_and_a_zero_length_line_stays_foreground() {
+        let linear = ramp(GradientShape::Linear, GradientBlend::ForegroundToBackground);
+        assert_eq!(gradient_color(&linear, 0.0, 2.0), linear.foreground);
+        assert_eq!(gradient_color(&linear, 4.0, -3.0), linear.background);
+        assert_eq!(gradient_color(&linear, -2.0, 0.0), linear.foreground);
+        assert_eq!(gradient_color(&linear, 8.0, 0.0), linear.background);
+        assert_eq!(gradient_color(&linear, 2.0, 9.0).0, [128, 0, 128, 255]);
+
+        let mut collapsed = linear;
+        collapsed.end = collapsed.start;
+        assert_eq!(gradient_color(&collapsed, 3.0, 3.0), linear.foreground);
+
+        let radial = ramp(GradientShape::Radial, GradientBlend::ForegroundToBackground);
+        assert_eq!(gradient_color(&radial, 0.0, 0.0), radial.foreground);
+        assert_eq!(gradient_color(&radial, 4.0, 0.0), radial.background);
+        assert_eq!(gradient_color(&radial, 9.0, 0.0), radial.background);
+        radial_zero_length_is_foreground(radial);
+    }
+
+    fn radial_zero_length_is_foreground(mut radial: Gradient) {
+        radial.end = radial.start;
+        assert_eq!(gradient_color(&radial, 2.0, 2.0), radial.foreground);
+    }
+
+    #[test]
+    fn foreground_to_transparent_fades_alpha_and_clears_the_end() {
+        let gradient = ramp(
+            GradientShape::Linear,
+            GradientBlend::ForegroundToTransparent,
+        );
+        assert_eq!(gradient_color(&gradient, 0.0, 0.0).0, [255, 0, 0, 255]);
+        assert_eq!(gradient_color(&gradient, 2.0, 0.0).0, [255, 0, 0, 128]);
+        assert_eq!(gradient_color(&gradient, 4.0, 0.0).0, [0, 0, 0, 0]);
     }
 }

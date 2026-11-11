@@ -248,6 +248,7 @@ impl Workspace {
             self.opacity_drag = None;
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
+            self.cancel_gradient(window, cx);
             self.begin_warp(window, cx);
             cx.notify();
         }
@@ -788,6 +789,7 @@ impl Workspace {
         self.move_overlay
             .clone()
             .or_else(|| self.warp_overlay.clone())
+            .or_else(|| self.gradient_overlay.clone())
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {

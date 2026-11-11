@@ -22,7 +22,12 @@ does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Pencil, Brush, and
 Eraser paint the active layer inside the selection; a stroke commits when the
-pointer is released. The Image menu
+pointer is released. Gradient fills the active layer between two colors, and
+Bucket Fill can cover the connected region or the whole selection. Brightness &
+Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
+dialog and apply inside the selection. The layer's alpha stays in place. Cancel
+leaves the pixels unchanged, and identity settings do not create a history
+entry. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
@@ -48,9 +53,14 @@ document is a single plain layer.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
 - `src/paint.rs` spaces pencil, brush, and eraser dabs along the pointer path
-  and stores touched 64 px tiles. `src/workspace/paint_ui.rs` composites the
-  live tiles over the existing preview. Release commits their dirty regions
-  in one undo step.
+  and stores touched 64 px tiles. It also samples linear and radial gradients.
+  `src/workspace/paint_ui.rs` composites the live tiles over the existing
+  preview. Release commits their dirty regions in one undo step.
+  `src/workspace/gradient_ui.rs` previews a gradient until Apply.
+- `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
+  lightness, and it desaturates or inverts. `src/workspace/adjust_ui.rs` shows
+  the reduced preview for the latest slider position. Apply writes the active
+  layer in the background.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
@@ -92,8 +102,8 @@ dashed contour.
   drag coalescing, and the Move preview. The preview is display-only until
   the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options repeat the align, fit, and content-crop commands.
-  `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality
-  and layer dialogs. `src/workspace/color.rs`
+  `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
+  layer, and adjustment dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels. `src/workspace/view.rs` lays out the shell and paints the canvas

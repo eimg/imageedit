@@ -110,6 +110,15 @@ impl Workspace {
             self.extend_warp_drag(event.position, window.scale_factor(), window, cx);
             self.end_warp_drag(cx);
         }
+        if event.button == MouseButton::Left
+            && self
+                .gradient
+                .as_ref()
+                .is_some_and(|session| session.dragging())
+        {
+            self.extend_gradient(event.position, window.scale_factor(), window, cx);
+            self.end_gradient_drag(cx);
+        }
         if event.button == MouseButton::Left && self.stroke.is_some() {
             self.finish_stroke(event.position, window, cx);
         }
@@ -229,11 +238,15 @@ impl Workspace {
             return;
         }
         let color = solid_color(self.colors[0]);
-        let tolerance = self.tolerance;
+        let request = crate::document::FillRequest {
+            mode: self.fill_mode,
+            sample_all: self.sample_all,
+            tolerance: self.tolerance,
+        };
         self.edit_content(
             move |content, _, selection| {
                 content
-                    .fill(layer, x, y, color, selection, tolerance)
+                    .fill_bucket(layer, x, y, color, selection, request)
                     .map(Dirty::Region)
                     .unwrap_or(Dirty::None)
             },
@@ -246,6 +259,7 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((x, y)) = self.canvas_pixel(position, scale, false) else {
@@ -255,7 +269,7 @@ impl Workspace {
             let [r, g, b, alpha] = document.canvas.pixels.get_pixel(x, y).0;
             if alpha > 0 {
                 self.set_color(0, u32::from_be_bytes([0, r, g, b]));
-                cx.notify();
+                self.refresh_gradient(window, cx);
             }
         }
     }

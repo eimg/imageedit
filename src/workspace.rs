@@ -1,9 +1,11 @@
+mod adjust_ui;
 mod canvas_tools;
 mod clipboard;
 mod color;
 mod cursor;
 mod dialogs;
 mod files;
+mod gradient_ui;
 mod history;
 mod layers;
 mod paint_ui;
@@ -18,7 +20,7 @@ use gpui::{Bounds, Context, FocusHandle, Pixels, Point, RenderImage, ScrollHandl
 
 use crate::commands::{Tool, Zoom};
 use crate::document::{
-    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, LayerId, RenderedCanvas,
+    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, FillMode, LayerId, RenderedCanvas,
     build_level, file_name,
 };
 use crate::preview::{self, Dirty};
@@ -117,6 +119,20 @@ pub struct Workspace {
     warp_error: Option<&'static str>,
     warp_resample: crate::transform::Resample,
     brush: crate::paint::Brush,
+    fill_mode: FillMode,
+    sample_all: bool,
+    gradient_shape: crate::paint::GradientShape,
+    gradient_blend: crate::paint::GradientBlend,
+    gradient: Option<gradient_ui::GradientSession>,
+    gradient_overlay: Option<layers::MovePaint>,
+    gradient_token: u64,
+    gradient_busy: bool,
+    gradient_dirty: bool,
+    adjustment: Option<adjust_ui::AdjustmentSession>,
+    adjustment_preview: Option<Arc<RenderImage>>,
+    adjustment_generation: crate::adjustments::PreviewGeneration,
+    adjustment_busy: bool,
+    adjustment_dirty: bool,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     pencil: crate::paint::Brush,
@@ -151,6 +167,7 @@ impl Workspace {
                     workspace.cancel_stroke(window, cx);
                 }
                 workspace.end_warp_drag(cx);
+                workspace.end_gradient_drag(cx);
             }
             cx.notify();
         })
@@ -215,6 +232,20 @@ impl Workspace {
             warp_error: None,
             warp_resample: crate::transform::Resample::Bilinear,
             brush: crate::paint::Brush::default(),
+            fill_mode: FillMode::Connected,
+            sample_all: false,
+            gradient_shape: crate::paint::GradientShape::Linear,
+            gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
+            gradient: None,
+            gradient_overlay: None,
+            gradient_token: 0,
+            gradient_busy: false,
+            gradient_dirty: false,
+            adjustment: None,
+            adjustment_preview: None,
+            adjustment_generation: crate::adjustments::PreviewGeneration::default(),
+            adjustment_busy: false,
+            adjustment_dirty: false,
             stroke: None,
             stroke_commit_preview: None,
             pencil: crate::paint::Brush {
@@ -306,6 +337,7 @@ impl Workspace {
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
+            self.cancel_gradient(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -336,6 +368,7 @@ impl Workspace {
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
+            self.cancel_gradient(window, cx);
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -389,6 +422,7 @@ impl Workspace {
             self.clear_move_preview(window, cx);
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
+            self.cancel_gradient(window, cx);
             self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }
@@ -411,6 +445,7 @@ impl Workspace {
         }
         self.cancel_warp(window, cx);
         self.cancel_stroke(window, cx);
+        self.cancel_gradient(window, cx);
         let tab = &mut self.tabs[index];
         self.free_points.clear();
         let target = match change {

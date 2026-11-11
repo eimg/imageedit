@@ -12,13 +12,13 @@ use gpui::{
 };
 
 use crate::commands::{
-    AlignLayer, ApplyCrop, ApplyTransform, BackgroundColor, CancelCrop, CancelFreeSelect,
-    CancelMove, CancelStroke, CancelTransform, CloseFreeSelect, CloseTab, CropLayerToContent,
-    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
-    InvertSelection, LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
-    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
-    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn,
-    ZoomOut, ZoomWindow,
+    AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, CancelCrop,
+    CancelFreeSelect, CancelGradient, CancelMove, CancelStroke, CancelTransform, CloseFreeSelect,
+    CloseTab, CropLayerToContent, ExportJpeg, ExportPng, ExportWebp, FeatherSelection,
+    ForegroundColor, GrowSelection, InvertSelection, LayerToImageSize, MinimizeWindow, NewImage,
+    NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs,
+    SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid,
+    ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -65,6 +65,7 @@ impl Render for Workspace {
                 let root = self.bind_selection_actions(root, cx);
                 let root = self.bind_clipboard_actions(root, cx);
                 let root = self.bind_transform_actions(root, cx);
+                let root = self.bind_adjustment_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     let tool = action.0;
                     let changed = this.tool != tool;
@@ -77,6 +78,7 @@ impl Render for Workspace {
                     }
                     if changed {
                         this.cancel_stroke(window, cx);
+                        this.cancel_gradient(window, cx);
                     }
                     if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
                         this.cancel_warp(window, cx);
@@ -95,13 +97,13 @@ impl Render for Workspace {
                 .on_action(cx.listener(|this, _: &BackgroundColor, window, cx| {
                     this.color_form(1, window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &SwapColors, _, cx| {
+                .on_action(cx.listener(|this, _: &SwapColors, window, cx| {
                     this.colors.swap(0, 1);
-                    cx.notify();
+                    this.refresh_gradient(window, cx);
                 }))
-                .on_action(cx.listener(|this, _: &ResetColors, _, cx| {
+                .on_action(cx.listener(|this, _: &ResetColors, window, cx| {
                     this.colors = DEFAULT_COLORS;
-                    cx.notify();
+                    this.refresh_gradient(window, cx);
                 }))
             })
             .when(
@@ -155,6 +157,20 @@ impl Render for Workspace {
                             ))
                         },
                     )
+                    .when(self.tool == Tool::Gradient, |root| {
+                        root.key_context("Gradient")
+                            .when(self.can_apply_gradient(), |root| {
+                                root.on_action(cx.listener(
+                                    |this, _: &ApplyGradient, window, cx| {
+                                        this.apply_gradient(window, cx)
+                                    },
+                                ))
+                            })
+                            .on_action(cx.listener(|this, _: &CancelGradient, window, cx| {
+                                this.cancel_gradient(window, cx);
+                                cx.notify();
+                            }))
+                    })
                     .when(
                         matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective),
                         |root| {
@@ -530,6 +546,12 @@ impl Workspace {
                                         window,
                                         cx,
                                     );
+                                    this.extend_gradient(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
                                     this.extend_stroke(
                                         event.position,
                                         window.scale_factor(),
@@ -619,7 +641,12 @@ impl Workspace {
                     .when(self.tool == Tool::Eyedropper, |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
-                                this.pick_color(event.position(), window.scale_factor(), cx);
+                                this.pick_color(
+                                    event.position(),
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
                             },
                         ))
                     })
@@ -680,6 +707,19 @@ impl Workspace {
                             },
                         ))
                     })
+                    .when(self.tool == Tool::Gradient && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_gradient(
+                                    event.position,
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                    })
                     .when(self.tool == Tool::BucketFill && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
@@ -704,6 +744,7 @@ impl Workspace {
                             show_handles: self.tool == Tool::Select,
                             move_layer: self.move_paint(),
                             warp: self.warp_frame(),
+                            gradient: self.gradient_frame(),
                             stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
                             polygon: self.free_mode == super::selection::FreeMode::Polygon,
@@ -861,6 +902,91 @@ impl Workspace {
                                 matches!(self.tool, Tool::MagicWand | Tool::BucketFill),
                                 |panel| panel.child(tolerance_row(self.tolerance, cx)),
                             )
+                            .when(self.tool == Tool::BucketFill, |panel| {
+                                let mode = self.fill_mode;
+                                let sample_all = self.sample_all;
+                                panel
+                                    .child(div().flex().gap_2().children([
+                                        fill_mode_button(
+                                            "Connected",
+                                            mode == crate::document::FillMode::Connected,
+                                            crate::document::FillMode::Connected,
+                                            cx,
+                                        ),
+                                        fill_mode_button(
+                                            "Selection",
+                                            mode == crate::document::FillMode::Selection,
+                                            crate::document::FillMode::Selection,
+                                            cx,
+                                        ),
+                                    ]))
+                                    .child(
+                                        form_button("Sample All Layers", sample_all).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.set_sample_all(!sample_all, cx);
+                                            }),
+                                        ),
+                                    )
+                            })
+                            .when(self.tool == Tool::Gradient, |panel| {
+                                let shape = self.gradient_shape;
+                                let blend = self.gradient_blend;
+                                panel
+                                    .child(div().flex().gap_2().children([
+                                        gradient_shape_button(
+                                            "Linear",
+                                            shape == crate::paint::GradientShape::Linear,
+                                            crate::paint::GradientShape::Linear,
+                                            cx,
+                                        ),
+                                        gradient_shape_button(
+                                            "Radial",
+                                            shape == crate::paint::GradientShape::Radial,
+                                            crate::paint::GradientShape::Radial,
+                                            cx,
+                                        ),
+                                    ]))
+                                    .child(div().flex().gap_2().children([
+                                        gradient_blend_button(
+                                            "FG to BG",
+                                            blend
+                                                == crate::paint::GradientBlend::ForegroundToBackground,
+                                            crate::paint::GradientBlend::ForegroundToBackground,
+                                            cx,
+                                        ),
+                                        gradient_blend_button(
+                                            "FG to Transparent",
+                                            blend
+                                                == crate::paint::GradientBlend::ForegroundToTransparent,
+                                            crate::paint::GradientBlend::ForegroundToTransparent,
+                                            cx,
+                                        ),
+                                    ]))
+                                    .when(self.gradient.is_some(), |panel| {
+                                        panel.child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    form_button("Apply", self.can_apply_gradient())
+                                                        .on_click(|_, window, cx| {
+                                                            window.dispatch_action(
+                                                                Box::new(ApplyGradient),
+                                                                cx,
+                                                            )
+                                                        }),
+                                                )
+                                                .child(form_button("Cancel", false).on_click(
+                                                    |_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(CancelGradient),
+                                                            cx,
+                                                        )
+                                                    },
+                                                )),
+                                        )
+                                    })
+                            })
                             .when_some(self.crop, |panel, crop| {
                                 panel
                                     .child(format!("{} × {} px", crop.width, crop.height))
@@ -1109,6 +1235,7 @@ impl Workspace {
                                         | Tool::Pencil
                                         | Tool::Brush
                                         | Tool::Eraser
+                                        | Tool::Gradient
                                 ),
                                 |panel| {
                                     panel.child(
@@ -1471,6 +1598,7 @@ struct CanvasDecorations {
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
     warp: Option<super::transform_ui::WarpFrame>,
+    gradient: Option<super::gradient_ui::GradientFrame>,
     stroke: Vec<super::paint_ui::StrokePaint>,
     free_path: Vec<Point<f32>>,
     polygon: bool,
@@ -1489,6 +1617,7 @@ fn image_preview(
         show_handles,
         move_layer,
         warp,
+        gradient,
         stroke,
         free_path,
         polygon,
@@ -1597,6 +1726,9 @@ fn image_preview(
             }
             if let Some(frame) = warp {
                 paint_warp_frame(window, &geometry, viewport, width, height, frame);
+            }
+            if let Some(frame) = gradient {
+                paint_gradient_frame(window, &geometry, viewport, width, height, frame);
             }
             if let Some(crop) = crop {
                 let start = geometry.project(point(
@@ -1749,6 +1881,82 @@ fn free_mode_button(
             cx.notify();
         }
     }))
+}
+
+fn fill_mode_button(
+    label: &'static str,
+    selected: bool,
+    mode: crate::document::FillMode,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
+        this.set_fill_mode(mode, cx);
+    }))
+}
+
+fn gradient_shape_button(
+    label: &'static str,
+    selected: bool,
+    shape: crate::paint::GradientShape,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+        this.set_gradient_shape(shape, window, cx);
+    }))
+}
+
+fn gradient_blend_button(
+    label: &'static str,
+    selected: bool,
+    blend: crate::paint::GradientBlend,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+        this.set_gradient_blend(blend, window, cx);
+    }))
+}
+
+fn paint_gradient_frame(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    viewport: Bounds<Pixels>,
+    width: u32,
+    height: u32,
+    frame: super::gradient_ui::GradientFrame,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let project = |corner: (f64, f64)| {
+        geometry.project(point(
+            corner.0 as f32 / width as f32,
+            corner.1 as f32 / height as f32,
+        ))
+    };
+    window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+        let start = project(frame.start);
+        let end = project(frame.end);
+        for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
+            let mut path = PathBuilder::stroke(px(weight));
+            path.move_to(start);
+            path.line_to(end);
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        let scale = window.scale_factor();
+        let snap = |value: f32| (value * scale).round() / scale;
+        for center in [start, end] {
+            let origin = point(
+                px(snap(f32::from(center.x) - 3.5)),
+                px(snap(f32::from(center.y) - 3.5)),
+            );
+            window.paint_quad(fill(
+                Bounds::new(origin, size(px(7.), px(7.))),
+                rgb(0xffffff),
+            ));
+        }
+    });
 }
 
 fn warp_choice(

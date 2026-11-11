@@ -20,9 +20,11 @@ use tempfile::NamedTempFile;
 use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
+pub(crate) use content::render_gradient;
 pub use content::{
-    BlendMode, CropRect, DocumentContent, IMPORTED_LAYER_NAME, ImageLayer, InsertStop,
-    LayerGeometry, LayerId, MAX_LAYER_NAME_CHARS, MAX_LAYERS, MAX_STACK_BYTES, RasterLayer,
+    BlendMode, CropRect, DocumentContent, FillMode, FillRequest, IMPORTED_LAYER_NAME, ImageLayer,
+    InsertStop, LayerGeometry, LayerId, MAX_LAYER_NAME_CHARS, MAX_LAYERS, MAX_STACK_BYTES,
+    RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;

@@ -2,6 +2,26 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
+## Latest handoff · P16
+
+P16 adds adjustment dialogs on branch `p16-adjust`, which starts from P15.
+
+- Brightness & Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in one dialog. Slider moves keep the latest reduced preview, and a stale result is discarded. Return or Apply writes the full-resolution layer in the background. Escape or Cancel leaves the pixels and the saved state unchanged.
+- The effect follows selection coverage, including a mask on an offset layer, and the layer's alpha stays in place. Grayscale documents stay gray. Identity settings, and a desaturate or invert that changes nothing, do not create a history entry. Undo restores the previous pixels.
+- Formatting, Clippy and locked tests passed. P15 ended with 115 tests and P16 ends with 122, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P17**, Color Balance, Levels, and Curves.
+
+## Feature handoff · P15
+
+P15 adds Gradient and expanded bucket fill on branch `p15-gradient`, which starts from the P13–P14 follow-up.
+
+- Gradient (`G`) is linear or radial, and it runs from foreground to background or from foreground to transparent. Dragging sets the line, and the two ends stay draggable. Return or Apply commits one layer change. Escape or Cancel discards the preview. A zero-length drag fills with the foreground color. Selection coverage, including a feathered mask on an offset layer, limits the write.
+- Bucket Fill fills the connected region or the whole selection. Sample All Layers uses the composite to choose the connected region and writes the active layer. The other layers stay as they are.
+- Formatting, Clippy and locked tests passed. The follow-up ended with 110 tests and P15 ends with 115, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P16**, adjustment infrastructure and common adjustments.
+
 ## P13–P14 follow-up
 
 Reviewed interactive transforms and painting on top of P14 (`32fb92b`).

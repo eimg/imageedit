@@ -715,4 +715,101 @@ mod tests {
         );
         assert!(!session.history.is_dirty());
     }
+
+    #[test]
+    fn undoing_a_gradient_restores_every_pixel_and_keeps_the_selection() {
+        use crate::paint::{Gradient, GradientBlend, GradientShape};
+        use crate::preview::Dirty;
+
+        let mut session = Session::new(true, 4);
+        let selection = Selection::Rect(crate::preview::PixelRect::new(1, 0, 2, 1));
+        session.current.selection = selection.clone();
+        let layer = session.current.active_layer;
+        let gradient = Gradient {
+            shape: GradientShape::Linear,
+            blend: GradientBlend::ForegroundToBackground,
+            start: (1.5, 0.5),
+            end: (2.5, 0.5),
+            foreground: Rgba([255, 0, 0, 255]),
+            background: Rgba([0, 0, 255, 255]),
+        };
+        session.edit(
+            |content| content.apply_gradient(layer, gradient, &selection) != Dirty::None,
+            &LIMITS,
+        );
+        let pixels = session.current.content.layer(layer).unwrap().pixels.clone();
+        assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(pixels.get_pixel(1, 0).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(2, 0).0, [0, 0, 255, 255]);
+        assert_eq!(pixels.get_pixel(3, 0).0, [0, 0, 0, 0]);
+        assert!(session.undo());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(1, 0)
+                .0,
+            [0, 0, 0, 0]
+        );
+        assert_eq!(session.current.selection, selection);
+    }
+
+    #[test]
+    fn an_identity_adjustment_keeps_the_saved_document_and_invert_undoes() {
+        use crate::adjustments::Adjustment;
+        use crate::preview::Dirty;
+
+        let mut session = Session::new(true, 2);
+        let layer = session.current.active_layer;
+        let selection = Selection::Unrestricted;
+        session.edit(
+            |content| {
+                content.apply_adjustment(
+                    layer,
+                    Adjustment::BrightnessContrast {
+                        brightness: 0,
+                        contrast: 0,
+                    },
+                    &selection,
+                ) != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(!session.history.is_dirty());
+        session.edit(
+            |content| {
+                content.apply_adjustment(layer, Adjustment::Invert, &selection) != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(session.history.is_dirty());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            [255, 255, 255, 0]
+        );
+        assert!(session.undo());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(layer)
+                .unwrap()
+                .pixels
+                .get_pixel(0, 0)
+                .0,
+            [0, 0, 0, 0]
+        );
+        assert!(!session.history.is_dirty());
+        assert_eq!(session.current.selection, selection);
+    }
 }

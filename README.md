@@ -93,6 +93,19 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   Escape discards it. Shift-click extends from the last committed stroke in
   the current tab when it was on the same layer. The eraser lowers alpha, and
   a selection limits where the stroke lands.
+  **Gradient** (`G`) drags a line across the active layer. It can be linear or
+  radial, and it fades from the foreground color to the background or to
+  transparent. Return applies the preview and Escape cancels it. A click with
+  no drag fills with the foreground color.
+  **Bucket Fill** fills either the connected region or the whole selection.
+  Sample All Layers uses the colors you see to choose that region and paints
+  the active layer.
+  **Colors** opens Brightness & Contrast, Hue & Saturation, Desaturate, or
+  Invert for the active layer. The dialog shows a reduced preview that follows
+  the latest slider position. Return applies the full-resolution change and
+  Escape cancels it. A selection blends the effect, and the layer's alpha stays
+  in place. Leaving the sliders at zero does not change the image. Undo
+  restores the previous pixels.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document
   grayscale. Grayscale images save as projects; Export still writes a flattened
@@ -132,6 +145,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Pencil / Brush / Eraser | N / P / Shift+E |
+| Gradient | G |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |
@@ -139,8 +153,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Menus and the toolbox still show planned features such as text, color
-adjustments, and filters. Commands without handlers appear
+Menus and the toolbox still show planned features such as text, color balance,
+levels, curves, and filters. Commands without handlers appear
 disabled. Windows is a future target.
 
 ## Development

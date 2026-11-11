@@ -491,6 +491,7 @@ impl DocumentContent {
     }
 
     // The rectangle covers every pixel the fill changed, in canvas coordinates.
+    #[cfg(test)]
     pub fn fill(
         &mut self,
         id: LayerId,
@@ -500,24 +501,45 @@ impl DocumentContent {
         selection: &Selection,
         tolerance: u8,
     ) -> Option<PixelRect> {
+        self.fill_bucket(
+            id,
+            x,
+            y,
+            color,
+            selection,
+            FillRequest {
+                mode: FillMode::Connected,
+                sample_all: false,
+                tolerance,
+            },
+        )
+    }
+
+    // Connected fill compares the active layer unless Sample All Layers is set, in which case
+    // the composite decides the region and only the active layer is written. Selection mode
+    // paints every covered pixel of that layer.
+    pub fn fill_bucket(
+        &mut self,
+        id: LayerId,
+        x: u32,
+        y: u32,
+        color: Rgba<u8>,
+        selection: &Selection,
+        request: FillRequest,
+    ) -> Option<PixelRect> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        if !selection.covers(i64::from(x), i64::from(y), self.width, self.height) {
+        let canvas = (self.width, self.height);
+        if !selection.covers(i64::from(x), i64::from(y), canvas.0, canvas.1) {
             return None;
         }
         let color = self.mode.constrain(color);
+        let sampled =
+            (request.sample_all && request.mode == FillMode::Connected).then(|| self.composite());
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
-        let local_x = i64::from(x) - i64::from(layer.offset.0);
-        let local_y = i64::from(y) - i64::from(layer.offset.1);
-        if !(0..i64::from(layer.pixels.width())).contains(&local_x)
-            || !(0..i64::from(layer.pixels.height())).contains(&local_y)
-        {
-            return None;
-        }
         let origin_x = i64::from(layer.offset.0);
         let origin_y = i64::from(layer.offset.1);
-        let canvas = (self.width, self.height);
         let coverage = |px: u32, py: u32| {
             selection.coverage(
                 origin_x + i64::from(px),
@@ -526,20 +548,116 @@ impl DocumentContent {
                 canvas.1,
             )
         };
-        let (pixels, left, top, right, bottom) = bucket_fill(
-            &layer.pixels,
-            local_x as u32,
-            local_y as u32,
-            color,
-            tolerance,
-            coverage,
-        )?;
+        let pixels = layer.pixels.clone();
+        let painted = match request.mode {
+            FillMode::Selection => paint_covered(&pixels, color, coverage)?,
+            FillMode::Connected => {
+                let local_x = i64::from(x) - origin_x;
+                let local_y = i64::from(y) - origin_y;
+                if !(0..i64::from(pixels.width())).contains(&local_x)
+                    || !(0..i64::from(pixels.height())).contains(&local_y)
+                {
+                    return None;
+                }
+                let local_x = local_x as u32;
+                let local_y = local_y as u32;
+                let target = sampled.as_ref().map_or_else(
+                    || *pixels.get_pixel(local_x, local_y),
+                    |image| *image.get_pixel(x, y),
+                );
+                if !request.sample_all && request.tolerance == 0 && target == color {
+                    return None;
+                }
+                let included = |px: u32, py: u32| {
+                    let Some(sample) = (|| {
+                        let Some(image) = sampled.as_ref() else {
+                            return Some(*pixels.get_pixel(px, py));
+                        };
+                        let cx = origin_x + i64::from(px);
+                        let cy = origin_y + i64::from(py);
+                        (cx >= 0 && cy >= 0 && cx < i64::from(canvas.0) && cy < i64::from(canvas.1))
+                            .then(|| *image.get_pixel(cx as u32, cy as u32))
+                    })() else {
+                        return false;
+                    };
+                    within_tolerance(sample, target, request.tolerance)
+                };
+                bucket_fill(&pixels, local_x, local_y, color, coverage, included)?
+            }
+        };
+        let (pixels, left, top, right, bottom) = painted;
         layer.pixels = Arc::new(pixels);
         Some(PixelRect::new(
             origin_x + i64::from(left),
             origin_y + i64::from(top),
             right - left + 1,
             bottom - top + 1,
+        ))
+    }
+
+    pub fn apply_gradient(
+        &mut self,
+        id: LayerId,
+        mut gradient: crate::paint::Gradient,
+        selection: &Selection,
+    ) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        gradient.foreground = self.mode.constrain(gradient.foreground);
+        gradient.background = self.mode.constrain(gradient.background);
+        let offset = self.layers[index].offset;
+        let Some((pixels, left, top, right, bottom)) = render_gradient(
+            &self.layers[index].pixels,
+            offset,
+            gradient,
+            selection,
+            (self.width, self.height),
+        ) else {
+            return Dirty::None;
+        };
+        self.layers[index].pixels = Arc::new(pixels);
+        Dirty::Region(PixelRect::new(
+            i64::from(offset.0) + i64::from(left),
+            i64::from(offset.1) + i64::from(top),
+            right - left + 1,
+            bottom - top + 1,
+        ))
+    }
+
+    pub fn apply_adjustment(
+        &mut self,
+        id: LayerId,
+        adjustment: crate::adjustments::Adjustment,
+        selection: &Selection,
+    ) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let offset = self.layers[index].offset;
+        let canvas = (self.width, self.height);
+        let mode = self.mode;
+        let Some(adjusted) = crate::adjustments::apply_pixels(
+            &self.layers[index].pixels,
+            adjustment,
+            |x, y| {
+                selection.coverage(
+                    i64::from(offset.0) + i64::from(x),
+                    i64::from(offset.1) + i64::from(y),
+                    canvas.0,
+                    canvas.1,
+                )
+            },
+            |pixel| mode.constrain(pixel),
+        ) else {
+            return Dirty::None;
+        };
+        self.layers[index].pixels = Arc::new(adjusted.pixels);
+        Dirty::Region(PixelRect::new(
+            i64::from(offset.0) + i64::from(adjusted.left),
+            i64::from(offset.1) + i64::from(adjusted.top),
+            adjusted.right - adjusted.left + 1,
+            adjusted.bottom - adjusted.top + 1,
         ))
     }
 
@@ -1064,6 +1182,19 @@ impl CropRect {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillMode {
+    Connected,
+    Selection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillRequest {
+    pub mode: FillMode,
+    pub sample_all: bool,
+    pub tolerance: u8,
+}
+
 pub struct ImageLayer {
     pub name: String,
     pub pixels: RgbaImage,
@@ -1102,16 +1233,92 @@ fn copy_name(name: &str) -> String {
     copy
 }
 
+fn paint_covered(
+    source: &RgbaImage,
+    color: Rgba<u8>,
+    coverage: impl Fn(u32, u32) -> u8,
+) -> Option<(RgbaImage, u32, u32, u32, u32)> {
+    let (width, height) = source.dimensions();
+    let mut image = None;
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..height {
+        for x in 0..width {
+            let amount = coverage(x, y);
+            if amount == 0 {
+                continue;
+            }
+            let before = *source.get_pixel(x, y);
+            let after = mix_fill(before, color, amount);
+            if before == after {
+                continue;
+            }
+            image
+                .get_or_insert_with(|| source.clone())
+                .put_pixel(x, y, after);
+            bounds = Some(match bounds {
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+                None => (x, y, x, y),
+            });
+        }
+    }
+    let (min_x, min_y, max_x, max_y) = bounds?;
+    Some((image?, min_x, min_y, max_x, max_y))
+}
+
+pub(crate) fn render_gradient(
+    source: &RgbaImage,
+    offset: (i32, i32),
+    gradient: crate::paint::Gradient,
+    selection: &Selection,
+    canvas: (u32, u32),
+) -> Option<(RgbaImage, u32, u32, u32, u32)> {
+    let (width, height) = source.dimensions();
+    let mut image = None;
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..height {
+        for x in 0..width {
+            let canvas_x = i64::from(offset.0) + i64::from(x);
+            let canvas_y = i64::from(offset.1) + i64::from(y);
+            let amount = selection.coverage(canvas_x, canvas_y, canvas.0, canvas.1);
+            if amount == 0 {
+                continue;
+            }
+            let color = crate::paint::gradient_color(
+                &gradient,
+                canvas_x as f64 + 0.5,
+                canvas_y as f64 + 0.5,
+            );
+            let before = *source.get_pixel(x, y);
+            let after = mix_fill(before, color, amount);
+            if before == after {
+                continue;
+            }
+            image
+                .get_or_insert_with(|| source.clone())
+                .put_pixel(x, y, after);
+            bounds = Some(match bounds {
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+                None => (x, y, x, y),
+            });
+        }
+    }
+    let (min_x, min_y, max_x, max_y) = bounds?;
+    Some((image?, min_x, min_y, max_x, max_y))
+}
+
 fn bucket_fill(
     source: &RgbaImage,
     x: u32,
     y: u32,
     color: Rgba<u8>,
-    tolerance: u8,
     coverage: impl Fn(u32, u32) -> u8,
+    included: impl Fn(u32, u32) -> bool,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
-    let target = *source.get_pixel(x, y);
-    if (tolerance == 0 && target == color) || coverage(x, y) == 0 {
+    if coverage(x, y) == 0 || !included(x, y) {
         return None;
     }
     let (width, height) = source.dimensions();
@@ -1120,11 +1327,8 @@ fn bucket_fill(
     let mut pending = vec![(x, y)];
     let mut image = None;
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
-    let paintable = |visited: &[bool], x, y| {
-        !visited[index(x, y)]
-            && within_tolerance(*source.get_pixel(x, y), target, tolerance)
-            && coverage(x, y) > 0
-    };
+    let paintable =
+        |visited: &[bool], x, y| !visited[index(x, y)] && included(x, y) && coverage(x, y) > 0;
 
     // Discover runs against the original pixels. A replacement can still match the target.
     while let Some((x, y)) = pending.pop() {
@@ -1453,8 +1657,15 @@ mod tests {
     fn fill_terminates_when_the_replacement_is_within_tolerance() {
         let source = RgbaImage::from_pixel(3, 3, Rgba([0, 0, 0, 255]));
         let color = Rgba([1, 0, 0, 255]);
-        let (filled, left, top, right, bottom) =
-            bucket_fill(&source, 1, 1, color, 1, |_, _| 255).unwrap();
+        let (filled, left, top, right, bottom) = bucket_fill(
+            &source,
+            1,
+            1,
+            color,
+            |_, _| 255,
+            |x, y| within_tolerance(*source.get_pixel(x, y), *source.get_pixel(1, 1), 1),
+        )
+        .unwrap();
         assert_eq!((left, top, right, bottom), (0, 0, 2, 2));
         assert!(filled.pixels().all(|pixel| *pixel == color));
     }
@@ -1521,8 +1732,15 @@ mod tests {
         let mut image = RgbaImage::from_pixel(2, 2, wall);
         image.put_pixel(0, 0, blank);
         image.put_pixel(1, 1, blank);
-        let (filled, left, top, right, bottom) =
-            bucket_fill(&image, 0, 0, ink, 0, |_, _| 255).unwrap();
+        let (filled, left, top, right, bottom) = bucket_fill(
+            &image,
+            0,
+            0,
+            ink,
+            |_, _| 255,
+            |x, y| *image.get_pixel(x, y) == blank,
+        )
+        .unwrap();
         assert_eq!((left, top, right, bottom), (0, 0, 0, 0));
         assert_eq!(filled.into_raw(), [ink.0, wall.0, wall.0, blank.0].concat());
     }
@@ -1747,5 +1965,193 @@ mod tests {
         ));
         assert_eq!(content.layers()[0].pixels.get_pixel(0, 0).0, filled);
         assert_eq!(content.mode(), crate::transform::ColorMode::Rgb);
+    }
+
+    fn red_blue_gradient(shape: crate::paint::GradientShape) -> crate::paint::Gradient {
+        crate::paint::Gradient {
+            shape,
+            blend: crate::paint::GradientBlend::ForegroundToBackground,
+            start: (0.5, 0.5),
+            end: (3.5, 0.5),
+            foreground: Rgba([255, 0, 0, 255]),
+            background: Rgba([0, 0, 255, 255]),
+        }
+    }
+
+    #[test]
+    fn a_gradient_honors_its_ends_a_zero_length_drag_and_an_offset_mask() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(4, 1));
+        let id = content.top_layer_id();
+        let open = Selection::Unrestricted;
+        assert!(matches!(
+            content.apply_gradient(
+                id,
+                red_blue_gradient(crate::paint::GradientShape::Linear),
+                &open
+            ),
+            Dirty::Region(_)
+        ));
+        let pixels = content.layers[0].pixels.clone();
+        assert_eq!(pixels.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(3, 0).0, [0, 0, 255, 255]);
+
+        let mut collapsed = red_blue_gradient(crate::paint::GradientShape::Radial);
+        collapsed.end = collapsed.start;
+        collapsed.blend = crate::paint::GradientBlend::ForegroundToTransparent;
+        content.layers[0].pixels = Arc::new(RgbaImage::from_pixel(4, 1, Rgba([0, 255, 0, 255])));
+        assert!(matches!(
+            content.apply_gradient(id, collapsed, &open),
+            Dirty::Region(_)
+        ));
+        assert!(
+            content.layers[0]
+                .pixels
+                .pixels()
+                .all(|pixel| pixel.0 == [255, 0, 0, 255])
+        );
+
+        content.layers[0].pixels = Arc::new(RgbaImage::new(4, 1));
+        content.layers[0].offset = (2, 0);
+        content.width = 8;
+        let selection = Selection::rectangle((3, 0), (3, 0), 8, 1).feather(1, 8, 1);
+        assert!(matches!(
+            content.apply_gradient(
+                id,
+                red_blue_gradient(crate::paint::GradientShape::Linear),
+                &selection
+            ),
+            Dirty::Region(_)
+        ));
+        let painted = content.layers[0].pixels.get_pixel(1, 0).0;
+        assert!(painted[3] > 0 && painted[3] < 255);
+        assert_eq!(content.layers[0].pixels.get_pixel(3, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sample_all_layers_changes_the_connected_region_without_editing_the_other_layer() {
+        let mut content = DocumentContent::single_layer(
+            "Bottom".into(),
+            RgbaImage::from_pixel(3, 1, Rgba([255, 0, 0, 255])),
+        );
+        let top = content
+            .add_layer(LayerId(0), "Top".into(), Rgba([255, 0, 0, 255]))
+            .unwrap();
+        content.layers[1].pixels = Arc::new(RgbaImage::from_fn(3, 1, |x, _| {
+            if x == 1 {
+                Rgba([0, 0, 0, 0])
+            } else {
+                Rgba([255, 0, 0, 255])
+            }
+        }));
+        let bottom = content.layers[0].pixels.clone();
+        let ink = Rgba([0, 0, 255, 255]);
+        let open = Selection::Unrestricted;
+        let connected = FillRequest {
+            mode: FillMode::Connected,
+            sample_all: false,
+            tolerance: 0,
+        };
+        assert_eq!(
+            content.fill_bucket(top, 0, 0, ink, &open, connected),
+            Some(PixelRect::new(0, 0, 1, 1))
+        );
+        assert_eq!(content.layers[1].pixels.get_pixel(2, 0).0, [255, 0, 0, 255]);
+
+        content.layers[1].pixels = Arc::new(RgbaImage::from_fn(3, 1, |x, _| {
+            if x == 1 {
+                Rgba([0, 0, 0, 0])
+            } else {
+                Rgba([255, 0, 0, 255])
+            }
+        }));
+        let sampled = FillRequest {
+            sample_all: true,
+            ..connected
+        };
+        assert_eq!(
+            content.fill_bucket(top, 0, 0, ink, &open, sampled),
+            Some(PixelRect::new(0, 0, 3, 1))
+        );
+        assert!(content.layers[1].pixels.pixels().all(|pixel| *pixel == ink));
+        assert!(Arc::ptr_eq(&bottom, &content.layers[0].pixels));
+
+        content.layers[1].pixels =
+            Arc::new(RgbaImage::from_fn(4, 1, |x, _| Rgba([x as u8, 0, 0, 255])));
+        content.width = 4;
+        content.layers[0].pixels = Arc::new(RgbaImage::from_pixel(4, 1, Rgba([255, 0, 0, 255])));
+        let bottom = content.layers[0].pixels.clone();
+        let selection = Selection::Rect(PixelRect::new(0, 0, 3, 1));
+        assert_eq!(
+            content.fill_bucket(
+                top,
+                0,
+                0,
+                ink,
+                &selection,
+                FillRequest {
+                    mode: FillMode::Selection,
+                    sample_all: true,
+                    tolerance: 0,
+                },
+            ),
+            Some(PixelRect::new(0, 0, 3, 1))
+        );
+        assert_eq!(content.layers[1].pixels.get_pixel(3, 0).0[0], 3);
+        assert!(Arc::ptr_eq(&bottom, &content.layers[0].pixels));
+    }
+
+    #[test]
+    fn an_adjustment_follows_an_offset_mask_and_leaves_an_identity_unrecorded() {
+        let mut content = DocumentContent::single_layer(
+            "Layer".into(),
+            RgbaImage::from_pixel(3, 1, Rgba([10, 20, 30, 255])),
+        );
+        content.layers[0].offset = (2, 1);
+        content.width = 6;
+        content.height = 3;
+        let id = content.top_layer_id();
+        let selection = Selection::Rect(PixelRect::new(3, 1, 1, 1));
+        assert!(matches!(
+            content.apply_adjustment(
+                id,
+                crate::adjustments::Adjustment::BrightnessContrast {
+                    brightness: 0,
+                    contrast: 0,
+                },
+                &selection,
+            ),
+            Dirty::None
+        ));
+        assert!(matches!(
+            content.apply_adjustment(id, crate::adjustments::Adjustment::Invert, &selection),
+            Dirty::Region(PixelRect {
+                x: 3,
+                y: 1,
+                width: 1,
+                height: 1
+            })
+        ));
+        let pixels = &content.layers[0].pixels;
+        assert_eq!(pixels.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        assert_eq!(pixels.get_pixel(1, 0).0, [245, 235, 225, 255]);
+        assert_eq!(pixels.get_pixel(2, 0).0, [10, 20, 30, 255]);
+        content.mode = crate::transform::ColorMode::Grayscale;
+        assert!(matches!(
+            content.apply_adjustment(id, crate::adjustments::Adjustment::Invert, &selection),
+            Dirty::Region(PixelRect {
+                x: 3,
+                y: 1,
+                width: 1,
+                height: 1
+            })
+        ));
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(1, 0).0,
+            [18, 18, 18, 255]
+        );
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(0, 0).0,
+            [10, 20, 30, 255]
+        );
     }
 }

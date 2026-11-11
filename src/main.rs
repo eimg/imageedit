@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod adjustments;
 mod commands;
 mod document;
 mod geometry;

@@ -1,12 +1,17 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
-    Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, Pixels, Point,
-    Window, div, prelude::*, px, rgb, rgba,
+    Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Window, canvas, div, fill, img,
+    point, prelude::*, px, rgb, rgba, size,
 };
 
 use super::Workspace;
+use super::adjust_ui::AdjustKind;
 use super::color::{ColorControl, Hsv, control};
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
+use crate::adjustments::Adjustment;
 use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
@@ -64,6 +69,14 @@ enum FormKind {
     Radius {
         edit: MaskEdit,
         radius: Field,
+    },
+    Adjustment {
+        operation: AdjustKind,
+        brightness: i16,
+        contrast: i16,
+        hue: i16,
+        saturation: i16,
+        lightness: i16,
     },
 }
 
@@ -423,9 +436,47 @@ impl Workspace {
     }
 
     fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_adjustment(window, cx);
         self.form = None;
         self.focus.focus(window);
         cx.notify();
+    }
+
+    pub(super) fn adjustment_form(
+        &mut self,
+        operation: AdjustKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog_open || self.form.is_some() || !self.begin_adjustment(window, cx) {
+            return;
+        }
+        let adjustment = match operation {
+            AdjustKind::BrightnessContrast => Adjustment::BrightnessContrast {
+                brightness: 0,
+                contrast: 0,
+            },
+            AdjustKind::HueSaturation => Adjustment::HueSaturation {
+                hue: 0,
+                saturation: 0,
+                lightness: 0,
+            },
+            AdjustKind::Desaturate => Adjustment::Desaturate,
+            AdjustKind::Invert => Adjustment::Invert,
+        };
+        self.show_form(
+            FormKind::Adjustment {
+                operation,
+                brightness: 0,
+                contrast: 0,
+                hue: 0,
+                saturation: 0,
+                lightness: 0,
+            },
+            window,
+            cx,
+        );
+        self.set_adjustment(adjustment, window, cx);
     }
 
     fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -462,6 +513,7 @@ impl Workspace {
                 };
                 let swatch = *swatch;
                 self.set_color(swatch, color);
+                self.refresh_gradient(window, cx);
                 self.dismiss_form(window, cx);
             }
             FormKind::JpegQuality { quality } => {
@@ -625,6 +677,10 @@ impl Workspace {
                     cx,
                 );
             }
+            FormKind::Adjustment { .. } => {
+                self.apply_adjustment(window, cx);
+                self.dismiss_form(window, cx);
+            }
         }
     }
 
@@ -678,6 +734,7 @@ impl Workspace {
                             height.handle_key(event, FieldMode::Digits { max: 5 }, cx);
                         }
                     }
+                    FormKind::Adjustment { .. } => {}
                     FormKind::Color { hex, hsv, .. } => {
                         let previous = hex.color();
                         hex.handle_key(event, FieldMode::Hex, cx);
@@ -736,7 +793,77 @@ impl Workspace {
         }
     }
 
+    fn drag_adjust_slider(
+        &mut self,
+        slider: AdjustSlider,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    operation,
+                    brightness,
+                    contrast,
+                    hue,
+                    saturation,
+                    lightness,
+                    ..
+                },
+            ..
+        }) = &self.form
+        else {
+            return;
+        };
+        let operation = *operation;
+        let mut values = (*brightness, *contrast, *hue, *saturation, *lightness);
+        let (min, max) = slider.range();
+        let value = slider_amount(bounds, position, min, max);
+        match slider {
+            AdjustSlider::Brightness => values.0 = value,
+            AdjustSlider::Contrast => values.1 = value,
+            AdjustSlider::Hue => values.2 = value,
+            AdjustSlider::Saturation => values.3 = value,
+            AdjustSlider::Lightness => values.4 = value,
+        }
+        let adjustment = match operation {
+            AdjustKind::BrightnessContrast => Adjustment::BrightnessContrast {
+                brightness: values.0,
+                contrast: values.1,
+            },
+            AdjustKind::HueSaturation => Adjustment::HueSaturation {
+                hue: values.2,
+                saturation: values.3,
+                lightness: values.4,
+            },
+            AdjustKind::Desaturate | AdjustKind::Invert => return,
+        };
+        if let Some(Form {
+            kind:
+                FormKind::Adjustment {
+                    brightness,
+                    contrast,
+                    hue,
+                    saturation,
+                    lightness,
+                    ..
+                },
+            ..
+        }) = &mut self.form
+        {
+            *brightness = values.0;
+            *contrast = values.1;
+            *hue = values.2;
+            *saturation = values.3;
+            *lightness = values.4;
+        }
+        self.set_adjustment(adjustment, window, cx);
+    }
+
     pub(super) fn form_overlay(&self, cx: &Context<Self>) -> Option<Div> {
+        let adjustment_preview = self.adjustment_preview.clone();
         let form = self.form.as_ref()?;
         let (title, accept, content) =
             match &form.kind {
@@ -1033,6 +1160,81 @@ impl Workspace {
                         .child(size_fields(width, height, *active, cx))
                         .child(anchor_choices(*anchor, cx)),
                 ),
+                FormKind::Adjustment {
+                    operation,
+                    brightness,
+                    contrast,
+                    hue,
+                    saturation,
+                    lightness,
+                } => {
+                    let title = match operation {
+                        AdjustKind::BrightnessContrast => "Brightness & Contrast",
+                        AdjustKind::HueSaturation => "Hue & Saturation",
+                        AdjustKind::Desaturate => "Desaturate",
+                        AdjustKind::Invert => "Invert",
+                    };
+                    let mut body = div().flex().flex_col().gap_3().child(match adjustment_preview {
+                        Some(image) => div()
+                            .h(px(180.))
+                            .w_full()
+                            .bg(rgb(CANVAS))
+                            .rounded_md()
+                            .child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                        None => div().h(px(180.)).w_full().child("Preview…"),
+                    });
+                    body = match operation {
+                        AdjustKind::BrightnessContrast => body
+                            .child(adjust_slider(
+                                "Brightness",
+                                *brightness,
+                                -100,
+                                100,
+                                AdjustSlider::Brightness,
+                                cx,
+                            ))
+                            .child(adjust_slider(
+                                "Contrast",
+                                *contrast,
+                                -100,
+                                100,
+                                AdjustSlider::Contrast,
+                                cx,
+                            )),
+                        AdjustKind::HueSaturation => body
+                            .child(adjust_slider(
+                                "Hue",
+                                *hue,
+                                -180,
+                                180,
+                                AdjustSlider::Hue,
+                                cx,
+                            ))
+                            .child(adjust_slider(
+                                "Saturation",
+                                *saturation,
+                                -100,
+                                100,
+                                AdjustSlider::Saturation,
+                                cx,
+                            ))
+                            .child(adjust_slider(
+                                "Lightness",
+                                *lightness,
+                                -100,
+                                100,
+                                AdjustSlider::Lightness,
+                                cx,
+                            )),
+                        AdjustKind::Desaturate => {
+                            body.child("Removes color from the active layer and keeps its alpha.")
+                        }
+                        AdjustKind::Invert => {
+                            body.child("Inverts the active layer's colors and keeps its alpha.")
+                        }
+                    };
+                    (title, "Apply", body)
+                }
             };
 
         Some(
@@ -1228,4 +1430,99 @@ fn anchor_choices(current: Anchor, cx: &Context<Workspace>) -> Div {
                 }
             }))
         }))
+}
+
+#[derive(Clone, Copy)]
+enum AdjustSlider {
+    Brightness,
+    Contrast,
+    Hue,
+    Saturation,
+    Lightness,
+}
+
+impl AdjustSlider {
+    fn range(self) -> (i16, i16) {
+        match self {
+            Self::Hue => (-180, 180),
+            Self::Brightness | Self::Contrast | Self::Saturation | Self::Lightness => (-100, 100),
+        }
+    }
+}
+
+fn adjust_slider(
+    label: &'static str,
+    value: i16,
+    min: i16,
+    max: i16,
+    slider: AdjustSlider,
+    cx: &Context<Workspace>,
+) -> Div {
+    let fraction = f32::from(value - min) / f32::from(max - min);
+    let bounds = Rc::new(Cell::new(Bounds::default()));
+    let (layout, down, moved) = (bounds.clone(), bounds.clone(), bounds);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(label)
+                .child(value.to_string()),
+        )
+        .child(
+            div()
+                .id(label)
+                .h(px(22.))
+                .w_full()
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.drag_adjust_slider(slider, down.get(), event.position, window, cx);
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                        if event.dragging() {
+                            this.drag_adjust_slider(
+                                slider,
+                                moved.get(),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }
+                    }),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _, _| layout.set(bounds),
+                        move |bounds, _, window, _| paint_adjust_slider(bounds, fraction, window),
+                    )
+                    .size_full(),
+                ),
+        )
+}
+
+fn paint_adjust_slider(bounds: Bounds<Pixels>, fraction: f32, window: &mut Window) {
+    let track = Bounds::centered_at(bounds.center(), size(bounds.size.width, px(6.)));
+    window.paint_quad(fill(track, rgb(CHROME)));
+    let knob = Bounds::centered_at(
+        point(
+            bounds.left() + bounds.size.width * fraction.clamp(0., 1.),
+            bounds.center().y,
+        ),
+        size(px(12.), px(12.)),
+    );
+    window.paint_quad(fill(knob, rgb(ACCENT)));
+}
+
+fn slider_amount(bounds: Bounds<Pixels>, position: Point<Pixels>, min: i16, max: i16) -> i16 {
+    let width = f32::from(bounds.size.width).max(1.);
+    let t = ((f32::from(position.x) - f32::from(bounds.left())) / width).clamp(0., 1.);
+    let value = f32::from(min) + t * f32::from(max - min);
+    value.round().clamp(f32::from(min), f32::from(max)) as i16
 }
