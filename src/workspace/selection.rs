@@ -153,7 +153,13 @@ impl Workspace {
                 if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3. {
                     None
                 } else {
-                    let shape = self.selection_shape;
+                    let shape = if self.tool == Tool::Select {
+                        SelectionShape::Rectangle
+                    } else if self.oval_circle {
+                        SelectionShape::Circle
+                    } else {
+                        SelectionShape::Ellipse
+                    };
                     let radius = self.selection_radius;
                     pointer.map(|end| {
                         drag_selection(
@@ -669,8 +675,28 @@ impl Workspace {
         );
     }
 
-    pub(super) fn set_selection_shape(&mut self, shape: SelectionShape, cx: &mut Context<Self>) {
-        self.selection_shape = shape;
+    pub(super) fn set_oval_circle(
+        &mut self,
+        circle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.oval_circle = circle;
+        if circle {
+            let state = self
+                .active_tab()
+                .filter(|tab| !tab.busy())
+                .map(|tab| (tab.document.content.size(), tab.selection.clone()));
+            if let Some(((width, height), selection)) = state {
+                if let Some(circle) = circle_selection(&selection, width, height) {
+                    if circle != selection {
+                        self.commit_selection(circle, window, cx);
+                    }
+                } else if !matches!(selection, Selection::Unrestricted | Selection::Empty) {
+                    self.select_none(window, cx);
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -726,6 +752,30 @@ fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
         Selection::RoundedRect(shape) => Some(shape.rect()),
         _ => None,
     }
+}
+
+fn circle_selection(selection: &Selection, width: u32, height: u32) -> Option<Selection> {
+    let rect = match selection {
+        Selection::Rect(rect) => *rect,
+        Selection::Ellipse(ellipse) => ellipse.rect(),
+        Selection::RoundedRect(shape) => shape.rect(),
+        _ => return None,
+    };
+    Some(Selection::ellipse_rect(
+        centered_square(rect),
+        width,
+        height,
+    ))
+}
+
+fn centered_square(rect: PixelRect) -> PixelRect {
+    let side = rect.width.min(rect.height);
+    PixelRect::new(
+        rect.x + i64::from((rect.width - side) / 2),
+        rect.y + i64::from((rect.height - side) / 2),
+        side,
+        side,
+    )
 }
 
 pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
@@ -1046,6 +1096,23 @@ mod tests {
             placed_selection(Selection::Rect(hole), PixelRect::new(0, 0, 8, 8), 8, 8),
             Selection::Full
         );
+    }
+
+    #[test]
+    fn circle_toggle_uses_the_inscribed_square() {
+        assert_eq!(
+            centered_square(PixelRect::new(0, 0, 10, 6)),
+            PixelRect::new(2, 0, 6, 6)
+        );
+        assert_eq!(
+            circle_selection(
+                &Selection::ellipse_rect(PixelRect::new(0, 0, 10, 6), 20, 20),
+                20,
+                20
+            ),
+            Some(Selection::ellipse_rect(PixelRect::new(2, 0, 6, 6), 20, 20))
+        );
+        assert_eq!(circle_selection(&Selection::Unrestricted, 20, 20), None);
     }
 
     #[test]

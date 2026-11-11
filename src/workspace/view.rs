@@ -24,7 +24,6 @@ use crate::commands::{
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
-use crate::selection::SelectionShape;
 use crate::transform::{Mirror, Resample};
 
 use super::canvas_tools::PreviewGeometry;
@@ -628,8 +627,18 @@ impl Workspace {
 
     fn selection_numeric_options(&self, cx: &Context<Self>) -> Div {
         let mut options = div().flex().flex_col().gap_2();
-        if self.selection_shape == SelectionShape::Rectangle {
+        if self.tool == Tool::Select {
             options = options.child(self.selection_radius_row(cx));
+        }
+        if self.tool == Tool::OvalSelect {
+            options = options.child(
+                form_button("Circle", self.oval_circle).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        let circle = !this.oval_circle;
+                        this.set_oval_circle(circle, window, cx);
+                    },
+                )),
+            );
         }
         if self.selection_shape_rect().is_some() {
             options = options.child(self.selection_size_row());
@@ -923,19 +932,22 @@ impl Workspace {
                             }),
                         )
                     })
-                    .when(self.tool == Tool::Select && !tab.busy(), |area| {
-                        area.cursor(self.selection_cursor(scale)).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_selection(
-                                    event.position,
-                                    window.scale_factor(),
-                                    super::selection::selection_op(&event.modifiers),
-                                    cx,
-                                );
-                            }),
-                        )
-                    })
+                    .when(
+                        matches!(self.tool, Tool::Select | Tool::OvalSelect) && !tab.busy(),
+                        |area| {
+                            area.cursor(self.selection_cursor(scale)).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_selection(
+                                        event.position,
+                                        window.scale_factor(),
+                                        super::selection::selection_op(&event.modifiers),
+                                        cx,
+                                    );
+                                }),
+                            )
+                        },
+                    )
                     .when(self.tool == Tool::Move && !tab.busy(), |area| {
                         area.on_mouse_down(
                             MouseButton::Left,
@@ -1128,7 +1140,7 @@ impl Workspace {
                                 .selection_preview
                                 .clone()
                                 .unwrap_or_else(|| tab.selection.clone()),
-                            show_handles: self.tool == Tool::Select,
+                            show_handles: matches!(self.tool, Tool::Select | Tool::OvalSelect),
                             move_layer: self.move_paint(),
                             warp: self.warp_frame(),
                             gradient: self.gradient_frame(),
@@ -1153,7 +1165,7 @@ impl Workspace {
                     .when(show_tool_cursor, |area| {
                         // The painted cursor hides the system pointer. A selection that can
                         // be moved or resized needs that pointer, so the hand and arrows show.
-                        let native_cursor = (self.tool == Tool::Select
+                        let native_cursor = (matches!(self.tool, Tool::Select | Tool::OvalSelect)
                             && self.selection_cursor(scale) != CursorStyle::Crosshair)
                             || (self.tool == Tool::Crop
                                 && self.crop_cursor(scale) != CursorStyle::Crosshair);
@@ -1290,35 +1302,15 @@ impl Workspace {
                                     .line_height(px(19.))
                                     .child(tool.description),
                             )
-                            .when(self.tool == Tool::Select, |panel| {
-                                let shape = self.selection_shape;
-                                panel
-                                    .child(div().flex().gap_2().children([
-                                        selection_shape_button(
-                                            "Rect",
-                                            shape == SelectionShape::Rectangle,
-                                            SelectionShape::Rectangle,
-                                            cx,
-                                        ),
-                                        selection_shape_button(
-                                            "Oval",
-                                            shape == SelectionShape::Ellipse,
-                                            SelectionShape::Ellipse,
-                                            cx,
-                                        ),
-                                        selection_shape_button(
-                                            "Circle",
-                                            shape == SelectionShape::Circle,
-                                            SelectionShape::Circle,
-                                            cx,
-                                        ),
-                                    ]))
-                                    .child(self.selection_numeric_options(cx))
-                            })
+                            .when(
+                                matches!(self.tool, Tool::Select | Tool::OvalSelect),
+                                |panel| panel.child(self.selection_numeric_options(cx)),
+                            )
                             .when(
                                 matches!(
                                     self.tool,
                                     Tool::Select
+                                        | Tool::OvalSelect
                                         | Tool::FreeSelect
                                         | Tool::Polygon
                                         | Tool::MagicWand
@@ -1711,6 +1703,7 @@ impl Workspace {
                                         | Tool::Crop
                                         | Tool::BucketFill
                                         | Tool::Select
+                                        | Tool::OvalSelect
                                         | Tool::FreeSelect
                                         | Tool::Polygon
                                         | Tool::MagicWand
@@ -2544,16 +2537,6 @@ fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
                 cx.notify();
             })),
         )
-}
-
-fn selection_shape_button(
-    label: &'static str,
-    selected: bool,
-    shape: SelectionShape,
-    cx: &Context<super::Workspace>,
-) -> gpui::Stateful<Div> {
-    form_button(label, selected)
-        .on_click(cx.listener(move |this, _, _, cx| this.set_selection_shape(shape, cx)))
 }
 
 fn selection_button(

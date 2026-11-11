@@ -51,15 +51,15 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   the crop or Escape to cancel. **Bucket Fill** (`B`) uses the foreground color
   on connected pixels within the shared tolerance. **Color Picker** (`K`)
   samples the image at full resolution.
-  **Select** (`R`) drags a rectangle, oval, or circle; choose the shape in the
-  Select tool options. The outline is a dashed box or ellipse with handles:
-  drag a handle to resize it, drag inside to move it, and click outside it to
-  deselect. Rectangle mode has a corner-radius control with minus and plus
-  buttons that rounds the selection. The Width and Height fields show the
-  current size while drawing; manual entry is temporarily disabled. The dashes
-  move along the outline. The pointer becomes a resize arrow on a handle and a
-  hand inside the box. Select All, Deselect, and Invert are in the Select menu
-  and in the Select tool options.
+  **Rectangle Select** (`R`) drags a rectangle, with a corner-radius control
+  that has minus and plus buttons. **Oval Select** (`O`) drags an oval; enable
+  **Circle** in its options to constrain it to an exact circle. Each outline is
+  a dashed box or ellipse with handles: drag a handle to resize it, drag inside
+  to move it, and click outside it to deselect. The Width and Height fields show
+  the current size while drawing; manual entry is temporarily disabled. The
+  dashes move along the outline. The pointer becomes a resize arrow on a handle
+  and a hand inside the box. Select All, Deselect, and Invert are in the Select
+  menu and in the tool options.
   **Free Select** (`F`) drags a freehand outline and closes it on release.
   **Polygon Select** (`L`) clicks vertices, then closes by clicking the start
   marker or pressing Return. Escape cancels either draft. **Magic Wand**
@@ -199,7 +199,7 @@ the full names used below.
 | Close Tab | ⌘W |
 | Next / Previous Tab | Control-Tab / Control-Shift-Tab |
 | Crop / Bucket / Color Picker | C / B / K |
-| Rectangle Select / Free Select / Polygon Select / Magic Wand / Move | R / F / L / W / M |
+| Rectangle Select / Oval Select / Free Select / Polygon Select / Magic Wand / Move | R / O / F / L / W / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Eraser | E |
 | Gradient / Path / Stroke / Text | G / P / S / T |

@@ -21,9 +21,10 @@ resize it from its handles, and read X, Y, Width, and Height in the Crop
 options. Inline numeric entry is temporarily disabled. Sample or set swatches,
 and fill connected regions on the active layer. Rectangle, oval, circle,
 freehand, polygon, and wand selections limit fill and Clear to Transparency, and
-Crop to Selection uses the selection bounds. The Select tool chooses rectangle,
-oval, or circle. Rectangle mode has a corner radius control with minus and plus
-buttons, and Width/Height fields show the current size.
+Crop to Selection uses the selection bounds. Rectangle Select and Oval Select
+are separate tools. Oval Select has a Circle option for an exact circle, and
+Rectangle Select has a corner radius control with minus and plus buttons.
+Width/Height fields show the current size.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and the Layer menu can center it,
@@ -115,11 +116,11 @@ document is a single plain layer without paths or editable text.
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
 a rectangle, an ellipse, a rounded rectangle, the inverse of a rectangle, or a
-canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle,
-oval, or circle, resizes it from its handles, moves it from inside, and clears
-it on a click outside. Rectangle mode has a corner radius control with minus
-and plus buttons, and the Width/Height fields show the current size. Inline
-numeric entry is paused. Free Select previews
+canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle
+or oval, resizes it from its handles, moves it from inside, and clears it on a
+click outside. Oval Select has a Circle option. Rectangle Select has a corner
+radius control with minus and plus buttons, and the Width/Height fields show
+the current size. Inline numeric entry is paused. Free Select previews
 the freehand path. Polygon
 Select previews the next edge. The Magic Wand shares the bucket tolerance.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control

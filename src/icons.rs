@@ -55,6 +55,7 @@ impl AssetSource for Icons {
             "select" => {
                 r#"<rect x="4" y="5" width="16" height="14" rx="1" stroke-dasharray="2.5 2.5"/>"#
             }
+            "oval" => r#"<ellipse cx="12" cy="12" rx="8" ry="6" stroke-dasharray="2.5 2.5"/>"#,
             "lasso" => {
                 r#"<path d="M8 16c-4 0-6-2-5-5 1-4 7-7 12-6 5 1 7 4 5 7-2 4-10 6-13 3-2-2 1-4 3-2 2 3-3 7-6 6"/>"#
             }

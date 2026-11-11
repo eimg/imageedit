@@ -226,3 +226,15 @@ committed edit. Keep the existing +/- buttons and read-only value displays until
 the editor is reliable.
 
 - Status: `open`
+
+## 17. Separate rectangle and oval select tools
+
+Split the single Select tool into Rectangle Select (`R`) and Oval Select
+(`O`). Oval Select has a Circle option for an exact circle. Rectangle Select
+keeps the corner radius control.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. Rectangle Select and Oval
+  Select are separate tools. Oval Select has a Circle toggle. Both keep handles,
+  move/resize, selection actions, and read-only Width/Height fields. Formatting,
+  Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
