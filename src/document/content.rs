@@ -53,6 +53,8 @@ pub struct DocumentContent {
     mode: crate::transform::ColorMode,
     // Bottom to top. Constructors and edits keep at least one layer.
     pub(super) layers: Vec<RasterLayer>,
+    paths: Vec<crate::paths::VectorPath>,
+    active_path: Option<crate::paths::PathId>,
 }
 
 impl DocumentContent {
@@ -71,6 +73,8 @@ impl DocumentContent {
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
             }],
+            paths: Vec::new(),
+            active_path: None,
         }
     }
 
@@ -91,7 +95,185 @@ impl DocumentContent {
             height,
             mode: crate::transform::ColorMode::Rgb,
             layers,
+            paths: Vec::new(),
+            active_path: None,
         })
+    }
+
+    pub fn paths(&self) -> &[crate::paths::VectorPath] {
+        &self.paths
+    }
+
+    pub fn active_path_id(&self) -> Option<crate::paths::PathId> {
+        self.active_path
+    }
+
+    pub fn active_path(&self) -> Option<&crate::paths::VectorPath> {
+        self.active_path
+            .and_then(|id| self.paths.iter().find(|path| path.id == id))
+    }
+
+    pub fn path_selection(&self) -> Selection {
+        crate::paths::selection(&self.paths, self.width, self.height)
+    }
+
+    pub fn set_paths(
+        &mut self,
+        paths: Vec<crate::paths::VectorPath>,
+        active: Option<crate::paths::PathId>,
+    ) -> Result<()> {
+        ensure!(
+            paths.len() <= crate::paths::MAX_PATHS,
+            "A project has too many paths"
+        );
+        let mut path_ids = HashSet::new();
+        let mut anchor_ids = HashSet::new();
+        for path in &paths {
+            ensure!(
+                path_ids.insert(path.id),
+                "Path ID {} is repeated",
+                path.id.0
+            );
+            ensure!(
+                (1..=crate::paths::MAX_ANCHORS).contains(&path.anchors.len()),
+                "Path {} has no anchors or too many",
+                path.id.0
+            );
+            for anchor in &path.anchors {
+                ensure!(
+                    anchor.finite(),
+                    "Path {} has a coordinate that is not finite",
+                    path.id.0
+                );
+                ensure!(
+                    anchor_ids.insert(anchor.id),
+                    "Anchor ID {} is repeated",
+                    anchor.id.0
+                );
+            }
+        }
+        if let Some(active) = active {
+            ensure!(
+                paths.iter().any(|path| path.id == active),
+                "The active path is missing"
+            );
+        }
+        self.paths = paths;
+        self.active_path = active;
+        Ok(())
+    }
+
+    pub fn upsert_path(&mut self, path: crate::paths::VectorPath) -> bool {
+        if path.anchors.is_empty()
+            || path.anchors.len() > crate::paths::MAX_ANCHORS
+            || !path.anchors.iter().all(|anchor| anchor.finite())
+        {
+            return false;
+        }
+        let mut anchors = HashSet::new();
+        for anchor in &path.anchors {
+            if !anchors.insert(anchor.id) {
+                return false;
+            }
+        }
+        if let Some(index) = self.paths.iter().position(|stored| stored.id == path.id) {
+            if self.paths[index] == path && self.active_path == Some(path.id) {
+                return false;
+            }
+            if self.paths.iter().enumerate().any(|(stored_index, stored)| {
+                stored_index != index
+                    && stored
+                        .anchors
+                        .iter()
+                        .any(|anchor| anchors.contains(&anchor.id))
+            }) {
+                return false;
+            }
+            self.paths[index] = path;
+            self.active_path = Some(self.paths[index].id);
+            return true;
+        }
+        if self.paths.len() >= crate::paths::MAX_PATHS {
+            return false;
+        }
+        if self.paths.iter().any(|stored| {
+            stored
+                .anchors
+                .iter()
+                .any(|anchor| anchors.contains(&anchor.id))
+        }) {
+            return false;
+        }
+        self.active_path = Some(path.id);
+        self.paths.push(path);
+        true
+    }
+
+    pub fn close_path(&mut self, id: crate::paths::PathId) -> bool {
+        let Some(path) = self.paths.iter_mut().find(|path| path.id == id) else {
+            return false;
+        };
+        if path.closed || path.anchors.len() < 3 {
+            return false;
+        }
+        path.closed = true;
+        self.active_path = Some(id);
+        true
+    }
+
+    pub fn delete_anchor(
+        &mut self,
+        path_id: crate::paths::PathId,
+        anchor_id: crate::paths::AnchorId,
+    ) -> bool {
+        let Some(index) = self.paths.iter().position(|path| path.id == path_id) else {
+            return false;
+        };
+        let Some(anchor_index) = self.paths[index]
+            .anchors
+            .iter()
+            .position(|anchor| anchor.id == anchor_id)
+        else {
+            return false;
+        };
+        if self.paths[index].anchors.len() == 1 {
+            self.paths.remove(index);
+            if self.active_path == Some(path_id) {
+                self.active_path = self.paths.last().map(|path| path.id);
+            }
+            return true;
+        }
+        self.paths[index].anchors.remove(anchor_index);
+        if self.paths[index].anchors.len() < 3 {
+            self.paths[index].closed = false;
+        }
+        self.active_path = Some(path_id);
+        true
+    }
+
+    pub fn next_path_id(&self) -> Option<crate::paths::PathId> {
+        let max = self.paths.iter().map(|path| path.id.0).max().unwrap_or(0);
+        max.checked_add(1).map(crate::paths::PathId)
+    }
+
+    pub fn next_anchor_id(&self) -> Option<crate::paths::AnchorId> {
+        let max = self
+            .paths
+            .iter()
+            .flat_map(|path| path.anchors.iter().map(|anchor| anchor.id.0))
+            .max()
+            .unwrap_or(0);
+        max.checked_add(1).map(crate::paths::AnchorId)
+    }
+
+    fn map_paths(&mut self, mut map: impl FnMut((f64, f64)) -> (f64, f64)) {
+        for path in &mut self.paths {
+            for anchor in &mut path.anchors {
+                anchor.point = map(anchor.point);
+                anchor.handle_in = map(anchor.handle_in);
+                anchor.handle_out = map(anchor.handle_out);
+            }
+        }
     }
 
     pub fn mode(&self) -> crate::transform::ColorMode {
@@ -230,6 +412,8 @@ impl DocumentContent {
             self.layers.push(fallback);
         }
         (self.width, self.height) = (crop.width, crop.height);
+        let origin = (f64::from(crop.x), f64::from(crop.y));
+        self.map_paths(|point| (point.0 - origin.0, point.1 - origin.1));
         true
     }
 
@@ -842,6 +1026,39 @@ impl DocumentContent {
         }
     }
 
+    // Paints canvas-space polylines onto one layer. Points move by the layer offset.
+    // The brush is not limited by a selection: the stroke is the contour itself.
+    pub fn stroke_lines(
+        &mut self,
+        id: LayerId,
+        lines: &[Vec<(f64, f64)>],
+        color: Rgba<u8>,
+        brush: crate::paint::Brush,
+    ) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let brush = brush.clamped();
+        if lines.is_empty() || brush.opacity == 0 {
+            return Dirty::None;
+        }
+        let offset = self.layers[index].offset;
+        let pixels = Arc::clone(&self.layers[index].pixels);
+        let mut stroke = crate::paint::Stroke::new(
+            crate::paint::StrokeKind::Paint,
+            self.mode.constrain(color),
+            brush,
+        );
+        for line in lines {
+            let local = line
+                .iter()
+                .map(|(x, y)| (*x - f64::from(offset.0), *y - f64::from(offset.1)))
+                .collect::<Vec<_>>();
+            stroke.trace(&local, &pixels);
+        }
+        self.apply_stroke(id, &stroke)
+    }
+
     // Sets covered pixels to transparent. Pixels that are already clear do not count as a change.
     pub fn clear(&mut self, id: LayerId, selection: &Selection) -> Option<PixelRect> {
         let canvas = (self.width, self.height);
@@ -1073,6 +1290,7 @@ impl DocumentContent {
             layer.pixels = Arc::new(pixels);
             layer.offset = offset;
         }
+        self.map_paths(|point| crate::paths::turn_point(point, canvas, turn));
         (self.width, self.height) = crate::transform::turned_size(canvas.0, canvas.1, turn);
         true
     }
@@ -1098,6 +1316,7 @@ impl DocumentContent {
             layer.pixels = Arc::new(pixels);
             layer.offset = offset;
         }
+        self.map_paths(|point| crate::paths::mirror_point(point, canvas, mirror));
         true
     }
 
@@ -1167,6 +1386,7 @@ impl DocumentContent {
             ));
             layer.offset = offset;
         }
+        self.map_paths(|point| crate::paths::scale_point(point, old, (width, height)));
         self.width = width;
         self.height = height;
         true
@@ -1226,6 +1446,8 @@ impl DocumentContent {
             layer.offset.0 += delta.0;
             layer.offset.1 += delta.1;
         }
+        let shift = (f64::from(delta.0), f64::from(delta.1));
+        self.map_paths(|point| crate::paths::translate_point(point, shift));
         self.width = width;
         self.height = height;
         Some(delta)
@@ -2553,6 +2775,207 @@ mod tests {
         assert_eq!(
             content.place_drop_shadow(id, spec),
             Err(FilterStop::TooLarge)
+        );
+    }
+
+    #[test]
+    fn canvas_transforms_move_path_points_with_the_image() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+        use crate::transform::{Anchor as CanvasAnchor, Mirror, Turn};
+
+        let mut content = DocumentContent::single_layer(
+            "Layer".into(),
+            RgbaImage::from_pixel(4, 6, Rgba([0, 0, 0, 255])),
+        );
+        let path = VectorPath {
+            id: PathId(1),
+            closed: false,
+            anchors: vec![Anchor {
+                id: AnchorId(1),
+                point: (1.0, 2.0),
+                handle_in: (0.0, 2.0),
+                handle_out: (1.0, 3.0),
+            }],
+        };
+        assert!(content.upsert_path(path));
+        assert!(content.turn_image(Turn::Left));
+        let turned = &content.paths()[0].anchors[0];
+        assert_eq!(turned.point, (2.0, 3.0));
+        assert_eq!(turned.handle_in, (2.0, 4.0));
+        assert_eq!(turned.handle_out, (3.0, 3.0));
+        assert_eq!(content.size(), (6, 4));
+
+        assert!(content.mirror_image(Mirror::Horizontal));
+        assert_eq!(content.paths()[0].anchors[0].point, (4.0, 3.0));
+
+        assert!(content.scale_image(12, 8, crate::transform::Resample::Nearest));
+        assert_eq!(content.paths()[0].anchors[0].point, (8.0, 6.0));
+
+        content
+            .resize_canvas(12, 10, CanvasAnchor::NorthWest)
+            .unwrap();
+        assert_eq!(content.paths()[0].anchors[0].point, (8.0, 6.0));
+        content
+            .resize_canvas(10, 10, CanvasAnchor::SouthEast)
+            .unwrap();
+        assert_eq!(content.paths()[0].anchors[0].point, (6.0, 6.0));
+
+        assert!(content.crop(CropRect {
+            x: 1,
+            y: 2,
+            width: 4,
+            height: 4,
+        }));
+        assert_eq!(content.paths()[0].anchors[0].point, (5.0, 4.0));
+    }
+
+    fn hairline() -> crate::paint::Brush {
+        crate::paint::Brush {
+            diameter: 1,
+            spacing: 100,
+            hardness: 100,
+            opacity: 100,
+        }
+    }
+
+    #[test]
+    fn an_open_path_omits_the_return_and_a_closed_path_paints_it() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+
+        let color = Rgba([255, 0, 0, 255]);
+        let open = VectorPath {
+            id: PathId(1),
+            closed: false,
+            anchors: vec![
+                Anchor::corner(AnchorId(1), (2.0, 2.0)),
+                Anchor::corner(AnchorId(2), (8.0, 2.0)),
+                Anchor::corner(AnchorId(3), (8.0, 8.0)),
+            ],
+        };
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(12, 12));
+        assert!(content.upsert_path(open));
+        let line = crate::paths::stroke(content.active_path().unwrap());
+        assert_ne!(
+            content.stroke_lines(LayerId(0), &[line], color, hairline()),
+            Dirty::None
+        );
+        let pixels = &content.layers[0].pixels;
+        assert_eq!(pixels.get_pixel(5, 2).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(8, 5).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(2, 5).0[3], 0);
+        assert_eq!(pixels.get_pixel(5, 8).0[3], 0);
+
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(12, 12));
+        assert!(content.upsert_path(VectorPath {
+            id: PathId(2),
+            closed: true,
+            anchors: vec![
+                Anchor::corner(AnchorId(4), (2.0, 2.0)),
+                Anchor::corner(AnchorId(5), (8.0, 2.0)),
+                Anchor::corner(AnchorId(6), (8.0, 8.0)),
+                Anchor::corner(AnchorId(7), (2.0, 8.0)),
+            ],
+        }));
+        let line = crate::paths::stroke(content.active_path().unwrap());
+        assert_ne!(
+            content.stroke_lines(LayerId(0), &[line], color, hairline()),
+            Dirty::None
+        );
+        let pixels = &content.layers[0].pixels;
+        assert_eq!(pixels.get_pixel(2, 5).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(5, 8).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_layer_offset_moves_the_stroke_into_layer_pixels() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(12, 12));
+        content.layers[0].offset = (3, 1);
+        let dirty = content.stroke_lines(
+            LayerId(0),
+            &[vec![(5.0, 2.0), (5.0, 8.0)]],
+            Rgba([255, 0, 0, 255]),
+            hairline(),
+        );
+        assert_ne!(dirty, Dirty::None);
+        let pixels = &content.layers[0].pixels;
+        assert_eq!(pixels.get_pixel(2, 4).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(5, 4).0[3], 0);
+    }
+
+    #[test]
+    fn a_hole_adds_a_second_contour_and_the_brush_paints_outside_the_selection() {
+        use crate::selection::Selection;
+
+        let outer = [(1.0, 1.0), (15.0, 1.0), (15.0, 15.0), (1.0, 15.0)];
+        let hole = [(5.0, 11.0), (11.0, 11.0), (11.0, 5.0), (5.0, 5.0)];
+        let donut = Selection::polygons(&[&outer, &hole], 16, 16);
+        assert!(donut.covers(3, 8, 16, 16));
+        assert!(!donut.covers(8, 8, 16, 16));
+        let lines = donut.stroke_polylines(16, 16);
+        assert_eq!(lines.len(), 2);
+        let color = Rgba([255, 0, 0, 255]);
+        let paint = |line: &[Vec<(f64, f64)>]| {
+            let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(16, 16));
+            assert_ne!(
+                content.stroke_lines(LayerId(0), line, color, hairline()),
+                Dirty::None
+            );
+            std::sync::Arc::clone(&content.layers[0].pixels)
+        };
+        let both = paint(&lines);
+        let first = paint(std::slice::from_ref(&lines[0]));
+        let second = paint(std::slice::from_ref(&lines[1]));
+        assert_eq!(both.get_pixel(8, 1).0, [255, 0, 0, 255]);
+        assert_eq!(both.get_pixel(8, 5).0, [255, 0, 0, 255]);
+        assert!(!donut.covers(8, 5, 16, 16));
+        assert_eq!(both.get_pixel(8, 8).0[3], 0);
+        assert_eq!(both.get_pixel(8, 3).0[3], 0);
+        assert_ne!(first.as_raw(), second.as_raw());
+
+        let selection = Selection::rectangle((4, 4), (10, 10), 16, 16);
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(16, 16));
+        let wide = crate::paint::Brush {
+            diameter: 3,
+            ..hairline()
+        };
+        assert_ne!(
+            content.stroke_lines(LayerId(0), &selection.stroke_polylines(16, 16), color, wide,),
+            Dirty::None
+        );
+        assert!(
+            (0..16).any(|x| content.layers[0].pixels.get_pixel(x, 3).0[3] > 0),
+            "the brush should cross the selection edge"
+        );
+        assert!(!selection.covers(0, 3, 16, 16));
+    }
+
+    #[test]
+    fn zero_opacity_does_not_paint_and_grayscale_constrains_the_stroke() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(8, 8));
+        let line = vec![(1.0, 1.0), (5.0, 1.0)];
+        let color = Rgba([255, 0, 0, 255]);
+        let clear = crate::paint::Brush {
+            opacity: 0,
+            ..hairline()
+        };
+        assert_eq!(
+            content.stroke_lines(LayerId(0), std::slice::from_ref(&line), color, clear),
+            Dirty::None
+        );
+        assert_eq!(
+            content.stroke_lines(LayerId(9), std::slice::from_ref(&line), color, hairline()),
+            Dirty::None
+        );
+        assert_eq!(content.layers[0].pixels.get_pixel(2, 1).0[3], 0);
+
+        content.mode = crate::transform::ColorMode::Grayscale;
+        assert_ne!(
+            content.stroke_lines(LayerId(0), &[line], color, hairline()),
+            Dirty::None
+        );
+        assert_eq!(
+            content.layers[0].pixels.get_pixel(2, 1).0,
+            [77, 77, 77, 255]
         );
     }
 }

@@ -97,6 +97,18 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   radial, and it fades from the foreground color to the background or to
   transparent. Return applies the preview and Escape cancels it. A click with
   no drag fills with the foreground color.
+  **Path** (`B`) clicks anchors onto the canvas and drags to pull cubic
+  handles. Click the first anchor, or press Return, to close a path. Escape
+  cancels the drag and Backspace removes the selected anchor. **Select → Path
+  to Selection** fills every closed path. Overlapping contours use nonzero
+  winding, so a reversed contour cancels the area it shares. Open paths do
+  not fill. Undo restores the previous anchors. Image transforms, scaling,
+  canvas size, and crop move the paths with the image.
+  **Stroke** (`S`) paints the active path, or the selection edge, with the
+  brush. Edit → Stroke Path and Stroke Selection do the same. Return commits
+  the stroke shown in the tool options. A repeated endpoint does not add a
+  dab, and a hole is stroked on both boundaries. The brush is not clipped by
+  the selection. Undo restores the previous pixels and leaves the path in place.
   **Bucket Fill** fills either the connected region or the whole selection.
   Sample All Layers uses the colors you see to choose that region and paints
   the active layer.
@@ -158,7 +170,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Pencil / Brush / Eraser | N / P / Shift+E |
-| Gradient | G |
+| Gradient / Path / Stroke | G / B / S |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |

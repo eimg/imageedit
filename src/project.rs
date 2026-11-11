@@ -15,7 +15,7 @@ use crate::document::{
 
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 
@@ -28,6 +28,28 @@ struct Manifest {
     height: u32,
     // Bottom to top, in payload order.
     layers: Vec<LayerEntry>,
+    paths: Vec<PathEntry>,
+    active_path: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PathEntry {
+    id: u64,
+    closed: bool,
+    anchors: Vec<AnchorEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AnchorEntry {
+    id: u64,
+    x: f64,
+    y: f64,
+    in_x: f64,
+    in_y: f64,
+    out_x: f64,
+    out_y: f64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -150,6 +172,25 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     );
     let mut content = DocumentContent::from_layers(manifest.width, manifest.height, layers)?;
     content.set_stored_mode(manifest.mode);
+    let paths = manifest
+        .paths
+        .into_iter()
+        .map(|path| crate::paths::VectorPath {
+            id: crate::paths::PathId(path.id),
+            closed: path.closed,
+            anchors: path
+                .anchors
+                .into_iter()
+                .map(|anchor| crate::paths::Anchor {
+                    id: crate::paths::AnchorId(anchor.id),
+                    point: (anchor.x, anchor.y),
+                    handle_in: (anchor.in_x, anchor.in_y),
+                    handle_out: (anchor.out_x, anchor.out_y),
+                })
+                .collect(),
+        })
+        .collect();
+    content.set_paths(paths, manifest.active_path.map(crate::paths::PathId))?;
     Ok(content)
 }
 
@@ -175,6 +216,28 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                 blend_mode: layer.blend_mode.into(),
             })
             .collect(),
+        paths: content
+            .paths()
+            .iter()
+            .map(|path| PathEntry {
+                id: path.id.0,
+                closed: path.closed,
+                anchors: path
+                    .anchors
+                    .iter()
+                    .map(|anchor| AnchorEntry {
+                        id: anchor.id.0,
+                        x: anchor.point.0,
+                        y: anchor.point.1,
+                        in_x: anchor.handle_in.0,
+                        in_y: anchor.handle_in.1,
+                        out_x: anchor.handle_out.0,
+                        out_y: anchor.handle_out.1,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        active_path: content.active_path_id().map(|id| id.0),
     };
     check_limits(&manifest)?;
     let manifest = serde_json::to_vec(&manifest)?;
@@ -228,6 +291,47 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
             .context("The project layers are too large")?;
         ensure!(ids.insert(layer.id), "Layer ID {} is repeated", layer.id);
     }
+    ensure!(
+        manifest.paths.len() <= crate::paths::MAX_PATHS,
+        "A project has too many paths"
+    );
+    let mut path_ids = HashSet::new();
+    let mut anchor_ids = HashSet::new();
+    for path in &manifest.paths {
+        ensure!(path_ids.insert(path.id), "Path ID {} is repeated", path.id);
+        ensure!(
+            (1..=crate::paths::MAX_ANCHORS).contains(&path.anchors.len()),
+            "Path {} has no anchors or too many",
+            path.id
+        );
+        for anchor in &path.anchors {
+            ensure!(
+                [
+                    anchor.x,
+                    anchor.y,
+                    anchor.in_x,
+                    anchor.in_y,
+                    anchor.out_x,
+                    anchor.out_y
+                ]
+                .into_iter()
+                .all(f64::is_finite),
+                "Path {} has a coordinate that is not finite",
+                path.id
+            );
+            ensure!(
+                anchor_ids.insert(anchor.id),
+                "Anchor ID {} is repeated",
+                anchor.id
+            );
+        }
+    }
+    if let Some(active) = manifest.active_path {
+        ensure!(
+            manifest.paths.iter().any(|path| path.id == active),
+            "The active path is missing"
+        );
+    }
     Ok(())
 }
 
@@ -246,7 +350,7 @@ mod tests {
 
     const V2_GOLDEN: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/projects/v3-two-layers.imageedit"
+        "/fixtures/projects/v4-two-layers.imageedit"
     ));
 
     fn read_bytes(bytes: &[u8]) -> Result<DocumentContent> {
@@ -300,6 +404,8 @@ mod tests {
             assert_eq!(actual.blend_mode, expected.blend_mode);
             assert_eq!(*actual.pixels, *expected.pixels);
         }
+        assert_eq!(actual.paths(), expected.paths());
+        assert_eq!(actual.active_path_id(), expected.active_path_id());
     }
 
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
@@ -339,6 +445,36 @@ mod tests {
         let bytes = write_bytes(&content).unwrap();
         assert_same(&read_bytes(&bytes).unwrap(), &content);
         assert_same(&read_bytes(V2_GOLDEN).unwrap(), &content);
+        let mut with_paths = two_layers();
+        let open = crate::paths::VectorPath {
+            id: crate::paths::PathId(4),
+            closed: false,
+            anchors: vec![crate::paths::Anchor {
+                id: crate::paths::AnchorId(8),
+                point: (0.5, 1.25),
+                handle_in: (0.5, 1.25),
+                handle_out: (1.5, 2.0),
+            }],
+        };
+        let closed = crate::paths::VectorPath {
+            id: crate::paths::PathId(9),
+            closed: true,
+            anchors: vec![
+                crate::paths::Anchor::corner(crate::paths::AnchorId(1), (1.0, 1.0)),
+                crate::paths::Anchor::corner(crate::paths::AnchorId(2), (3.0, 1.0)),
+                crate::paths::Anchor {
+                    id: crate::paths::AnchorId(3),
+                    point: (2.0, 2.5),
+                    handle_in: (2.5, 2.0),
+                    handle_out: (1.5, 2.0),
+                },
+            ],
+        };
+        assert!(with_paths.upsert_path(open));
+        assert!(with_paths.upsert_path(closed));
+        let stored = write_bytes(&with_paths).unwrap();
+        assert_same(&read_bytes(&stored).unwrap(), &with_paths);
+        assert_eq!(manifest_json(&stored)["active_path"], json!(9));
         assert_eq!(
             manifest_json(&bytes)["layers"][1],
             json!({
@@ -353,8 +489,19 @@ mod tests {
         let valid = write_bytes(&two_layers()).unwrap();
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
-        let edits: [Edit; 18] = [
-            ("unknown version", &|m| m["version"] = json!(4)),
+        let edits: [Edit; 21] = [
+            ("unknown version", &|m| m["version"] = json!(5)),
+            ("previous version", &|m| m["version"] = json!(3)),
+            ("repeated path", &|m| {
+                m["paths"] = json!([{
+                    "id": 1, "closed": false,
+                    "anchors": [{"id": 1, "x": 0.0, "y": 0.0, "in_x": 0.0, "in_y": 0.0, "out_x": 0.0, "out_y": 0.0}]
+                }, {
+                    "id": 1, "closed": true,
+                    "anchors": [{"id": 2, "x": 1.0, "y": 1.0, "in_x": 1.0, "in_y": 1.0, "out_x": 1.0, "out_y": 1.0}]
+                }]);
+            }),
+            ("missing active path", &|m| m["active_path"] = json!(9)),
             ("missing mode", &|m| {
                 m.as_object_mut().unwrap().remove("mode");
             }),

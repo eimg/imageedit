@@ -72,6 +72,12 @@ impl Plotter {
         }
     }
 
+    fn restart(&mut self) {
+        self.from = None;
+        self.along = 0.0;
+        self.last_stamp = None;
+    }
+
     fn push(&mut self, point: PlotPoint, clip: Option<(f64, f64)>) -> Vec<PlotPoint> {
         let Some(from) = self.from.replace(point) else {
             self.last_stamp = Some(point);
@@ -224,6 +230,26 @@ impl Stroke {
                 return;
             }
             self.dab(point, source, &coverage);
+        }
+    }
+
+    // Samples one polyline in layer pixels and starts fresh, so the next contour is not
+    // joined to this one. Coverage is full: a contour stroke is the boundary, so the
+    // selection must not hide half of the brush. A repeated point is skipped. A closed
+    // line meets its start and is not finished, or the join would be painted again.
+    pub fn trace(&mut self, points: &[(f64, f64)], source: &RgbaImage) {
+        self.plotter.restart();
+        let closed = points.len() >= 2 && same_point(points[0], points[points.len() - 1]);
+        let mut previous = None;
+        for &next in points {
+            if previous.is_some_and(|prior| same_point(prior, next)) {
+                continue;
+            }
+            self.sample(next.0, next.1, source, |_, _| 255);
+            previous = Some(next);
+        }
+        if !closed {
+            self.finish(source, |_, _| 255);
         }
     }
 
@@ -449,6 +475,10 @@ fn clear_if_empty(color: Rgba<u8>) -> Rgba<u8> {
     } else {
         color
     }
+}
+
+fn same_point(left: (f64, f64), right: (f64, f64)) -> bool {
+    (left.0 - right.0).hypot(left.1 - right.1) < 1e-6
 }
 
 fn erase(pixel: Rgba<u8>, amount: f64) -> Rgba<u8> {
@@ -820,5 +850,45 @@ mod tests {
         assert_eq!(gradient_color(&gradient, 0.0, 0.0).0, [255, 0, 0, 255]);
         assert_eq!(gradient_color(&gradient, 2.0, 0.0).0, [255, 0, 0, 128]);
         assert_eq!(gradient_color(&gradient, 4.0, 0.0).0, [0, 0, 0, 0]);
+    }
+
+    fn render_trace(points: &[(f64, f64)], brush: Brush) -> RgbaImage {
+        let source = RgbaImage::new(16, 16);
+        let mut stroke = Stroke::new(StrokeKind::Paint, Rgba([255, 0, 0, 255]), brush);
+        stroke.trace(points, &source);
+        apply_stroke(&source, &stroke)
+            .map(|(image, _)| image)
+            .unwrap_or(source)
+    }
+
+    #[test]
+    fn a_repeated_endpoint_matches_the_plain_line_and_a_closed_join_is_stamped_once() {
+        let brush = Brush {
+            diameter: 3,
+            spacing: 100,
+            hardness: 100,
+            opacity: 50,
+        };
+        let plain = render_trace(&[(2.0, 3.0), (12.0, 3.0)], brush);
+        let repeated = render_trace(&[(2.0, 3.0), (2.0, 3.0), (12.0, 3.0), (12.0, 3.0)], brush);
+        assert_eq!(plain.as_raw(), repeated.as_raw());
+        let once = render_trace(&[(2.0, 3.0)], brush);
+        let mut again = Stroke::new(StrokeKind::Paint, Rgba([255, 0, 0, 255]), brush);
+        again.trace(&[(2.0, 3.0)], &once);
+        let doubled = apply_stroke(&once, &again).unwrap().0;
+        assert!(doubled.get_pixel(2, 3).0[3] > plain.get_pixel(2, 3).0[3]);
+
+        let square = [(4.0, 4.0), (9.0, 4.0), (9.0, 9.0), (4.0, 9.0), (4.0, 4.0)];
+        let source = RgbaImage::new(16, 16);
+        let mut finished = Stroke::new(StrokeKind::Paint, Rgba([255, 0, 0, 255]), brush);
+        for &(x, y) in &square {
+            finished.sample(x, y, &source, |_, _| 255);
+        }
+        finished.finish(&source, |_, _| 255);
+        let finished = apply_stroke(&source, &finished).unwrap().0;
+        let traced = render_trace(&square, brush);
+        let join = render_trace(&[(4.0, 4.0)], brush);
+        assert!(finished.get_pixel(4, 4).0[3] > traced.get_pixel(4, 4).0[3]);
+        assert_eq!(traced.get_pixel(4, 4).0, join.get_pixel(4, 4).0);
     }
 }

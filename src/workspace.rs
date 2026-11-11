@@ -10,7 +10,9 @@ mod gradient_ui;
 mod history;
 mod layers;
 mod paint_ui;
+mod path_ui;
 mod selection;
+mod stroke_ui;
 mod transform_ui;
 mod view;
 
@@ -141,6 +143,10 @@ pub struct Workspace {
     filter_generation: crate::adjustments::PreviewGeneration,
     filter_busy: bool,
     filter_dirty: bool,
+    path_gesture: Option<path_ui::PathGesture>,
+    path_hold: Option<crate::paths::VectorPath>,
+    path_anchor: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
+    stroke_source: stroke_ui::StrokeSource,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     pencil: crate::paint::Brush,
@@ -261,6 +267,10 @@ impl Workspace {
             filter_generation: crate::adjustments::PreviewGeneration::default(),
             filter_busy: false,
             filter_dirty: false,
+            path_gesture: None,
+            path_hold: None,
+            path_anchor: None,
+            stroke_source: stroke_ui::StrokeSource::Path,
             stroke: None,
             stroke_commit_preview: None,
             pencil: crate::paint::Brush {
@@ -348,6 +358,7 @@ impl Workspace {
         let switched = self.active != Some(index);
         if switched {
             self.dismiss_effect_form(window, cx);
+            self.clear_path_edit();
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
@@ -380,6 +391,7 @@ impl Workspace {
         let closed_active = self.active == Some(index);
         if closed_active {
             self.dismiss_effect_form(window, cx);
+            self.clear_path_edit();
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
@@ -461,6 +473,7 @@ impl Workspace {
             return;
         }
         self.dismiss_effect_form(window, cx);
+        self.cancel_path_gesture(cx);
         self.cancel_warp(window, cx);
         self.cancel_stroke(window, cx);
         self.cancel_gradient(window, cx);

@@ -2,6 +2,26 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
+## Latest handoff · P20
+
+P20 strokes paths and selection edges on the uncommitted P19 tree.
+
+- Stroke (`S`) paints the active path or the selection contour with the current brush. Return, the tool's Stroke button, and Edit → Stroke Path or Stroke Selection commit one undo step. A hidden layer is refused. Opacity zero does nothing.
+- Contours are canvas polylines. A rectangle uses its edges, and a mask chains its outline so a hole is a second loop. Points are converted by the layer offset. Each loop starts fresh, a repeated endpoint adds no dab, and a closed join is not finished twice. The selection stays in place and does not clip the brush.
+- Formatting, Clippy, and locked tests passed: 155, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+- **Next is P21**, editable text layers.
+
+## Feature handoff · P19
+
+P19 adds editable paths on `main`, starting from the P15–P18 follow-up (`149253a`).
+
+- Path (`B`) stores cubic anchors and handles in canvas coordinates. A click adds an anchor, a drag pulls symmetric handles, and clicking the first anchor closes the path. Return closes it as well. Escape cancels the drag, and Backspace removes an anchor. Each change is one undo step.
+- Path to Selection flattens closed paths and fills them together with nonzero winding. A reversed contour cancels the overlap. An open path does not fill. Image rotation, flips, scale, canvas size, and crop move the control points with the image.
+- Projects are version 4. The manifest stores path and anchor IDs, and older project versions no longer open. The golden fixture is `fixtures/projects/v4-two-layers.imageedit`.
+- Formatting, Clippy, and locked tests passed. The follow-up ended with 143 tests and P19 ends with 148, plus the ignored preview and stroke benchmarks.
+- The gestures were not driven in the app.
+
 ## P15–P18 follow-up
 
 Reviewed the four passes from the P18 checkout (`4f6651d`).
@@ -221,7 +241,7 @@ P03 added per-tab undo/redo history and save identity on branch `p03-history`, w
 
 P02 replaced the project format with the v2 layer-stack format on branch `p02-project-v2`. ImageEdit has no released users, so v1 support was dropped by product decision: v1 files and any other version are rejected. No menu, shortcut or tab behavior changed.
 
-- `fixtures/projects/v3-two-layers.imageedit` is the golden stack with non-sequential IDs, a non-ASCII name, a negative offset, a hidden layer, opacity 77, translucent pixels, and RGB mode. Tests read it to catch accidental format drift. Regenerate it only when the format intentionally changes.
+- `fixtures/projects/v4-two-layers.imageedit` is the golden stack with non-sequential IDs, a non-ASCII name, a negative offset, a hidden layer, opacity 77, translucent pixels, and RGB mode. Tests read it to catch accidental format drift. Regenerate it only when the format intentionally changes.
 - `src/project.rs` reads and writes only v2, as specified under *Project v2 wire format*, and rejects any other `version`. The manifest and layer entries reject unknown fields. One `check_limits` function enforces the canvas, layer count, per-layer and total decoded size caps, and unique IDs for both reads and writes before any pixel buffer is allocated. The reader rejects a payload length that is zero or exceeds the remaining file, enforces the 768 MiB encoded total, checks PNG dimensions against the manifest, and rejects trailing bytes. The writer encodes one layer at a time into a reused buffer.
 - `src/document/content.rs` adds `DocumentContent::from_layers`, which requires a non-empty canvas, at least one layer, non-empty layer pixels and unique IDs. It also adds the read-only `size()` and `layers()` accessors. `src/document.rs` exports `BlendMode`, `RasterLayer` and `MAX_IMAGE_BYTES`, and its save adapter writes every project through `project::write`. The v1 full-canvas restriction is gone. Atomic same-directory replacement and recent-document handling are unchanged.
 - Formatting, Clippy and locked tests passed before and after the change. The baseline had 12 tests and the final run had 18. New tests cover v2 round-trips against the writer and the golden file, 17 malformed manifests, 12 malformed payload or framing cases, writer limits, a failed save that leaves the original file reopenable with no leftover temporary file, a truncated project failing `Document::open`, and the constructor's validation. A malformed file fails in `Document::open` before a tab exists, so no tab can be mutated.

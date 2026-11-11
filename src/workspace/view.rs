@@ -13,12 +13,13 @@ use gpui::{
 
 use crate::commands::{
     AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, CancelCrop,
-    CancelFreeSelect, CancelGradient, CancelMove, CancelStroke, CancelTransform, CloseFreeSelect,
-    CloseTab, CropLayerToContent, ExportJpeg, ExportPng, ExportWebp, FeatherSelection,
-    ForegroundColor, GrowSelection, InvertSelection, LayerToImageSize, MinimizeWindow, NewImage,
-    NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs,
-    SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid,
-    ToggleGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    CancelFreeSelect, CancelGradient, CancelMove, CancelPath, CancelStroke, CancelTransform,
+    CloseFreeSelect, ClosePath, CloseTab, CommitStroke, CropLayerToContent, DeletePathAnchor,
+    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
+    InvertSelection, LayerToImageSize, MinimizeWindow, NewImage, NextTab, OPEN_HINT, OpenImage,
+    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
+    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, Tool, Undo, Zoom, ZoomIn,
+    ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -67,6 +68,8 @@ impl Render for Workspace {
                 let root = self.bind_transform_actions(root, cx);
                 let root = self.bind_adjustment_actions(root, cx);
                 let root = self.bind_filter_actions(root, cx);
+                let root = self.bind_path_actions(root, cx);
+                let root = self.bind_stroke_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     let tool = action.0;
                     let changed = this.tool != tool;
@@ -80,6 +83,7 @@ impl Render for Workspace {
                     if changed {
                         this.cancel_stroke(window, cx);
                         this.cancel_gradient(window, cx);
+                        this.cancel_path_gesture(cx);
                     }
                     if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
                         this.cancel_warp(window, cx);
@@ -214,6 +218,26 @@ impl Render for Workspace {
                                     ))
                                 },
                             )
+                    })
+                    .when(self.tool == Tool::Stroke, |root| {
+                        root.key_context("Stroke").on_action(cx.listener(
+                            |this, _: &CommitStroke, window, cx| {
+                                let source = this.stroke_source;
+                                this.stroke_outline(source, window, cx);
+                            },
+                        ))
+                    })
+                    .when(self.tool == Tool::Path, |root| {
+                        root.key_context("Path")
+                            .on_action(cx.listener(|this, _: &CancelPath, _, cx| {
+                                this.cancel_path_gesture(cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &ClosePath, window, cx| {
+                                this.close_active_path(window, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &DeletePathAnchor, window, cx| {
+                                this.delete_path_anchor(window, cx);
+                            }))
                     })
                 },
             )
@@ -553,6 +577,7 @@ impl Workspace {
                                         window,
                                         cx,
                                     );
+                                    this.extend_path(event.position, window.scale_factor(), cx);
                                     this.extend_stroke(
                                         event.position,
                                         window.scale_factor(),
@@ -708,6 +733,14 @@ impl Workspace {
                             },
                         ))
                     })
+                    .when(self.tool == Tool::Path && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_path(event.position, window.scale_factor(), cx);
+                            }),
+                        )
+                    })
                     .when(self.tool == Tool::Gradient && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
                             MouseButton::Left,
@@ -749,6 +782,9 @@ impl Workspace {
                             stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
                             polygon: self.free_mode == super::selection::FreeMode::Polygon,
+                            paths: self.displayed_paths(),
+                            active_path: self.displayed_active_path(),
+                            path_handles: self.tool == Tool::Path,
                         },
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
@@ -925,6 +961,19 @@ impl Workspace {
                                         form_button("Sample All Layers", sample_all).on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.set_sample_all(!sample_all, cx);
+                                            }),
+                                        ),
+                                    )
+                            })
+                            .when(self.tool == Tool::Path, |panel| {
+                                panel
+                                    .child(
+                                        "Click to add an anchor. Drag to pull its handles. Click the first anchor to close.",
+                                    )
+                                    .child(
+                                        form_button("Path to Selection", false).on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.path_to_selection(window, cx);
                                             }),
                                         ),
                                     )
@@ -1185,9 +1234,43 @@ impl Workspace {
                                     )
                             })
                             .when(
-                                matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser),
+                                matches!(
+                                    self.tool,
+                                    Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Stroke
+                                ),
                                 |panel| {
                                     panel
+                                        .when(self.tool == Tool::Stroke, |panel| {
+                                            let source = self.stroke_source;
+                                            panel
+                                                .child(
+                                                    "Stroke the active path or the selection edge. Return commits.",
+                                                )
+                                                .child(div().flex().gap_2().children([
+                                                    stroke_source_button(
+                                                        "Path",
+                                                        source
+                                                            == super::stroke_ui::StrokeSource::Path,
+                                                        super::stroke_ui::StrokeSource::Path,
+                                                        cx,
+                                                    ),
+                                                    stroke_source_button(
+                                                        "Selection",
+                                                        source
+                                                            == super::stroke_ui::StrokeSource::Selection,
+                                                        super::stroke_ui::StrokeSource::Selection,
+                                                        cx,
+                                                    ),
+                                                ]))
+                                                .child(
+                                                    form_button("Stroke", true).on_click(
+                                                        cx.listener(|this, _, window, cx| {
+                                                            let source = this.stroke_source;
+                                                            this.stroke_outline(source, window, cx);
+                                                        }),
+                                                    ),
+                                                )
+                                        })
                                         .child(brush_row(
                                             "Size",
                                             self.brush_value(super::paint_ui::BrushField::Size),
@@ -1237,6 +1320,8 @@ impl Workspace {
                                         | Tool::Brush
                                         | Tool::Eraser
                                         | Tool::Gradient
+                                        | Tool::Path
+                                        | Tool::Stroke
                                 ),
                                 |panel| {
                                     panel.child(
@@ -1603,6 +1688,9 @@ struct CanvasDecorations {
     stroke: Vec<super::paint_ui::StrokePaint>,
     free_path: Vec<Point<f32>>,
     polygon: bool,
+    paths: Vec<crate::paths::VectorPath>,
+    active_path: Option<crate::paths::PathId>,
+    path_handles: bool,
 }
 
 fn image_preview(
@@ -1622,6 +1710,9 @@ fn image_preview(
         stroke,
         free_path,
         polygon,
+        paths,
+        active_path,
+        path_handles,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
@@ -1722,6 +1813,15 @@ fn image_preview(
                 selection.outline_edges(),
             );
             paint_free_outline(window, &geometry, viewport, &free_path, polygon);
+            paint_paths(
+                window,
+                &geometry,
+                viewport,
+                (width, height),
+                &paths,
+                active_path,
+                path_handles,
+            );
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
             }
@@ -1884,6 +1984,17 @@ fn free_mode_button(
     }))
 }
 
+fn stroke_source_button(
+    label: &'static str,
+    selected: bool,
+    source: super::stroke_ui::StrokeSource,
+    cx: &Context<super::Workspace>,
+) -> gpui::Stateful<Div> {
+    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
+        this.set_stroke_source(source, cx);
+    }))
+}
+
 fn fill_mode_button(
     label: &'static str,
     selected: bool,
@@ -2015,6 +2126,80 @@ fn selection_button(
         .when(!enabled, |button| {
             button.opacity(0.45).cursor(CursorStyle::Arrow)
         })
+}
+
+fn paint_paths(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    viewport: Bounds<Pixels>,
+    canvas: (u32, u32),
+    paths: &[crate::paths::VectorPath],
+    active: Option<crate::paths::PathId>,
+    handles: bool,
+) {
+    let (width, height) = canvas;
+    if paths.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    let project = |at: (f64, f64)| {
+        geometry.project(point(
+            (at.0 / f64::from(width)) as f32,
+            (at.1 / f64::from(height)) as f32,
+        ))
+    };
+    window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+        for path in paths {
+            let points = crate::paths::stroke(path);
+            let Some(first) = points.first().copied() else {
+                continue;
+            };
+            let current = Some(path.id) == active;
+            for (weight, color) in [
+                (3., rgb(0x12151c)),
+                (1., rgb(if current { ACCENT } else { 0xffffff })),
+            ] {
+                let mut outline = PathBuilder::stroke(px(weight));
+                outline.move_to(project(first));
+                for point in &points[1..] {
+                    outline.line_to(project(*point));
+                }
+                if let Ok(outline) = outline.build() {
+                    window.paint_path(outline, color);
+                }
+            }
+            if !handles {
+                continue;
+            }
+            for anchor in &path.anchors {
+                let center = project(anchor.point);
+                if anchor.handle_in != anchor.point {
+                    paint_handle_line(window, center, project(anchor.handle_in));
+                }
+                if anchor.handle_out != anchor.point {
+                    paint_handle_line(window, center, project(anchor.handle_out));
+                }
+                window.paint_quad(fill(
+                    Bounds::centered_at(center, size(px(7.), px(7.))),
+                    rgb(if current { ACCENT } else { 0xffffff }),
+                ));
+            }
+        }
+    });
+}
+
+fn paint_handle_line(window: &mut Window, from: Point<Pixels>, to: Point<Pixels>) {
+    for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
+        let mut line = PathBuilder::stroke(px(weight));
+        line.move_to(from);
+        line.line_to(to);
+        if let Ok(line) = line.build() {
+            window.paint_path(line, color);
+        }
+    }
+    window.paint_quad(fill(
+        Bounds::centered_at(to, size(px(5.), px(5.))),
+        rgb(0xffffff),
+    ));
 }
 
 fn paint_free_outline(

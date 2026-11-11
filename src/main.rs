@@ -12,6 +12,7 @@ mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
 mod paint;
+mod paths;
 mod preview;
 mod project;
 mod selection;

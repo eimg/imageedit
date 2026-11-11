@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use image::{Rgba, RgbaImage};
@@ -197,6 +198,19 @@ impl Selection {
         }
     }
 
+    // Closed canvas polylines for stroking. Rectangles use their edges. A mask chains
+    // its outline, so a hole is a second loop and spacing continues around each corner.
+    pub fn stroke_polylines(&self, width: u32, height: u32) -> Vec<Vec<(f64, f64)>> {
+        match self {
+            Self::Mask(_) => chain_edges(self.outline_edges()),
+            _ => self
+                .contours(width, height)
+                .into_iter()
+                .filter_map(rect_loop)
+                .collect(),
+        }
+    }
+
     fn from_rect(rect: PixelRect, width: u32, height: u32) -> Self {
         match clip(rect, width, height) {
             Some(rect) if covers_canvas(rect, width, height) => Self::Full,
@@ -248,7 +262,12 @@ impl Selection {
     }
 
     pub fn polygon(points: &[(f64, f64)], width: u32, height: u32) -> Self {
-        polygon_selection(points, width, height)
+        polygons_selection(&[points], width, height)
+    }
+
+    // Nonzero winding across every ring. Opposite contours cancel where they overlap.
+    pub fn polygons(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Self {
+        polygons_selection(rings, width, height)
     }
 
     pub fn flood(
@@ -427,6 +446,79 @@ impl Mask {
     }
 }
 
+fn rect_loop(rect: PixelRect) -> Option<Vec<(f64, f64)>> {
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let left = rect.x as f64;
+    let top = rect.y as f64;
+    let right = rect.right() as f64;
+    let bottom = rect.bottom() as f64;
+    Some(vec![
+        (left, top),
+        (right, top),
+        (right, bottom),
+        (left, bottom),
+        (left, top),
+    ])
+}
+
+type GridPoint = (i32, i32);
+
+fn chain_edges(edges: &[MaskEdge]) -> Vec<Vec<(f64, f64)>> {
+    let mut links: HashMap<GridPoint, Vec<GridPoint>> = HashMap::new();
+    for &(x0, y0, x1, y1) in edges {
+        if (x0, y0) == (x1, y1) {
+            continue;
+        }
+        links.entry((x0, y0)).or_default().push((x1, y1));
+        links.entry((x1, y1)).or_default().push((x0, y0));
+    }
+    let seeds: Vec<GridPoint> = links.keys().copied().collect();
+    let mut lines = Vec::new();
+    for seed in seeds {
+        while let Some(next) = take_link(&mut links, seed, None) {
+            let mut line = vec![grid_point(seed), grid_point(next)];
+            let mut previous = seed;
+            let mut current = next;
+            while current != seed {
+                let Some(step) = take_link(&mut links, current, Some(previous)) else {
+                    break;
+                };
+                line.push(grid_point(step));
+                previous = current;
+                current = step;
+            }
+            if line.len() >= 2 {
+                lines.push(line);
+            }
+        }
+    }
+    lines
+}
+
+fn take_link(
+    links: &mut HashMap<GridPoint, Vec<GridPoint>>,
+    from: GridPoint,
+    avoid: Option<GridPoint>,
+) -> Option<GridPoint> {
+    let next = {
+        let list = links.get_mut(&from)?;
+        let index = list.iter().position(|next| Some(*next) != avoid)?;
+        list.swap_remove(index)
+    };
+    if let Some(back) = links.get_mut(&next)
+        && let Some(index) = back.iter().position(|end| *end == from)
+    {
+        back.swap_remove(index);
+    }
+    Some(next)
+}
+
+fn grid_point((x, y): GridPoint) -> (f64, f64) {
+    (f64::from(x), f64::from(y))
+}
+
 fn coalesce(origin: i32, length: u32, mut on: impl FnMut(i32) -> bool) -> Vec<(i32, i32)> {
     let mut runs = Vec::new();
     let mut index = 0i32;
@@ -593,22 +685,27 @@ fn union_rect(left: PixelRect, right: PixelRect) -> PixelRect {
     PixelRect::new(x, y, (right_edge - x) as u32, (bottom - y) as u32)
 }
 
-fn polygon_selection(points: &[(f64, f64)], width: u32, height: u32) -> Selection {
-    if points.len() < 3 || width == 0 || height == 0 {
+fn polygons_selection(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Selection {
+    if width == 0 || height == 0 || rings.iter().all(|points| points.len() < 3) {
         return Selection::Empty;
     }
     let scan_edge =
         |value: f64, limit: u32| (value - 0.5).ceil().clamp(0., f64::from(limit)) as i32;
     let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
     let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for &(x, y) in points {
-        if !x.is_finite() || !y.is_finite() {
-            return Selection::Empty;
+    for points in rings {
+        if points.len() < 3 {
+            continue;
         }
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
+        for &(x, y) in *points {
+            if !x.is_finite() || !y.is_finite() {
+                return Selection::Empty;
+            }
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
     }
     let (min_x, max_x) = (scan_edge(min_x, width), scan_edge(max_x, width));
     let (min_y, max_y) = (scan_edge(min_y, height), scan_edge(max_y, height));
@@ -619,17 +716,22 @@ fn polygon_selection(points: &[(f64, f64)], width: u32, height: u32) -> Selectio
     let buf_h = (max_y - min_y) as u32;
     let mut pixels = vec![0u8; buf_w as usize * buf_h as usize];
     let mut edges = Vec::new();
-    for index in 0..points.len() {
-        let (x0, y0) = points[index];
-        let (x1, y1) = points[(index + 1) % points.len()];
-        if (y1 - y0).abs() < 1e-9 {
+    for points in rings {
+        if points.len() < 3 {
             continue;
         }
-        let dir = if y1 > y0 { 1 } else { -1 };
-        if y0 < y1 {
-            edges.push((y0, y1, x0, x1, dir));
-        } else {
-            edges.push((y1, y0, x1, x0, dir));
+        for index in 0..points.len() {
+            let (x0, y0) = points[index];
+            let (x1, y1) = points[(index + 1) % points.len()];
+            if (y1 - y0).abs() < 1e-9 {
+                continue;
+            }
+            let dir = if y1 > y0 { 1 } else { -1 };
+            if y0 < y1 {
+                edges.push((y0, y1, x0, x1, dir));
+            } else {
+                edges.push((y1, y0, x1, x0, dir));
+            }
         }
     }
     let mut hits = Vec::new();
@@ -1173,5 +1275,42 @@ mod tests {
         assert!(feathered.coverage(0, 0, 3, 3) < 255);
         assert!(feathered.coverage(0, 0, 3, 3) > 0);
         assert_eq!(feathered.coverage(2, 2, 3, 3), 0);
+    }
+
+    #[test]
+    fn stroke_polylines_follow_rectangles_holes_and_mask_contours() {
+        assert!(Selection::Empty.stroke_polylines(8, 8).is_empty());
+        assert!(Selection::Unrestricted.stroke_polylines(8, 8).is_empty());
+        let rect = Selection::rectangle((2, 3), (5, 6), 12, 12);
+        let rect_line = vec![(2.0, 3.0), (6.0, 3.0), (6.0, 7.0), (2.0, 7.0), (2.0, 3.0)];
+        assert_eq!(rect.stroke_polylines(12, 12), vec![rect_line.clone()]);
+        let inverse = rect.invert(12, 12).stroke_polylines(12, 12);
+        assert_eq!(inverse.len(), 2);
+        assert_eq!(inverse[0].first(), inverse[0].last());
+        assert_eq!(inverse[1], rect_line);
+        assert_eq!(
+            Selection::Full.stroke_polylines(4, 3),
+            vec![vec![
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 3.0),
+                (0.0, 3.0),
+                (0.0, 0.0)
+            ]]
+        );
+
+        let outer = [(1.0, 1.0), (15.0, 1.0), (15.0, 15.0), (1.0, 15.0)];
+        let hole = [(5.0, 11.0), (11.0, 11.0), (11.0, 5.0), (5.0, 5.0)];
+        let donut = Selection::polygons(&[&outer, &hole], 16, 16);
+        assert!(matches!(donut, Selection::Mask(_)));
+        assert!(donut.covers(3, 8, 16, 16));
+        assert!(!donut.covers(8, 8, 16, 16));
+        let contours = donut.stroke_polylines(16, 16);
+        assert_eq!(contours.len(), 2);
+        assert!(contours.iter().all(|line| {
+            line.len() >= 4
+                && line.first() == line.last()
+                && line[line.len() - 2] != *line.last().unwrap()
+        }));
     }
 }

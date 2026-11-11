@@ -122,6 +122,9 @@ impl Workspace {
         if event.button == MouseButton::Left && self.stroke.is_some() {
             self.finish_stroke(event.position, window, cx);
         }
+        if event.button == MouseButton::Left && self.path_gesture.is_some() {
+            self.finish_path(event.position, window.scale_factor(), window, cx);
+        }
     }
 
     pub(super) fn pan_preview(&mut self, delta: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {

@@ -958,4 +958,112 @@ mod tests {
         assert!(!clean.history.is_dirty());
         assert_eq!(clean.current.active_layer, source);
     }
+
+    #[test]
+    fn moving_a_handle_undoes_and_reopening_keeps_the_ids() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+
+        let mut session = Session::new(true, 8);
+        let open = VectorPath {
+            id: PathId(2),
+            closed: false,
+            anchors: vec![
+                Anchor::corner(AnchorId(5), (1.0, 1.0)),
+                Anchor::corner(AnchorId(6), (4.0, 1.0)),
+            ],
+        };
+        session.edit(|content| content.upsert_path(open), &LIMITS);
+        assert!(session.history.is_dirty());
+        let mut moved = session.current.content.paths()[0].clone();
+        moved.anchors[1].handle_in = (3.0, 2.5);
+        session.edit(|content| content.upsert_path(moved), &LIMITS);
+        assert_eq!(
+            session.current.content.paths()[0].anchors[1].handle_in,
+            (3.0, 2.5)
+        );
+        assert!(session.undo());
+        assert_eq!(
+            session.current.content.paths()[0].anchors[1].handle_in,
+            (4.0, 1.0)
+        );
+        assert_eq!(session.current.content.paths()[0].id, PathId(2));
+        assert_eq!(
+            session.current.content.paths()[0].anchors[0].id,
+            AnchorId(5)
+        );
+        session.edit(
+            |content| content.close_path(PathId(2)) || content.paths()[0].anchors.len() < 3,
+            &LIMITS,
+        );
+        let mut closed = session.current.content.paths()[0].clone();
+        closed.anchors.push(Anchor::corner(AnchorId(7), (2.0, 4.0)));
+        closed.closed = true;
+        session.edit(|content| content.upsert_path(closed), &LIMITS);
+        assert!(session.current.content.paths()[0].closed);
+        assert!(session.undo());
+        assert!(!session.current.content.paths()[0].closed);
+    }
+
+    #[test]
+    fn undoing_a_path_stroke_restores_pixels_and_keeps_the_path() {
+        use crate::paint::Brush;
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+        use crate::preview::{Dirty, PixelRect};
+
+        let mut session = Session::new(true, 12);
+        let id = session.current.active_layer;
+        let selection = Selection::Rect(PixelRect::new(1, 1, 3, 3));
+        session.current.selection = selection.clone();
+        let path = VectorPath {
+            id: PathId(4),
+            closed: false,
+            anchors: vec![
+                Anchor::corner(AnchorId(1), (2.0, 2.0)),
+                Anchor::corner(AnchorId(2), (2.0, 2.0)),
+                Anchor::corner(AnchorId(3), (8.0, 2.0)),
+            ],
+        };
+        session.edit(|content| content.upsert_path(path), &LIMITS);
+        let brush = Brush {
+            diameter: 1,
+            spacing: 100,
+            hardness: 100,
+            opacity: 100,
+        };
+        session.edit(
+            |content| {
+                let line = crate::paths::stroke(content.active_path().unwrap());
+                content.stroke_lines(id, std::slice::from_ref(&line), Rgba([0, 0, 0, 255]), brush)
+                    != Dirty::None
+            },
+            &LIMITS,
+        );
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(id)
+                .unwrap()
+                .pixels
+                .get_pixel(4, 2)
+                .0[3],
+            255
+        );
+        assert_eq!(session.current.selection, selection);
+        assert!(session.undo());
+        assert_eq!(
+            session
+                .current
+                .content
+                .layer(id)
+                .unwrap()
+                .pixels
+                .get_pixel(4, 2)
+                .0[3],
+            0
+        );
+        assert_eq!(session.current.content.paths().len(), 1);
+        assert_eq!(session.current.content.paths()[0].anchors.len(), 3);
+        assert_eq!(session.current.selection, selection);
+    }
 }

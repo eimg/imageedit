@@ -32,18 +32,25 @@ share a per-channel lookup table, and their histogram skips transparent pixels.
 Blur, Sharpen, and Drop Shadow preview the active layer in a dialog. Blur and
 Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
 beneath the source from its blurred silhouette. A zero radius or amount does
-not create a history entry. The Image menu
+not create a history entry. Path (`B`) edits cubic anchors in canvas
+coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
+first anchor closes the path. Path to Selection fills every closed path with
+nonzero winding. Image transforms, scale, canvas size, and crop move those
+paths with the image. Stroke (`S`) paints the active path or the selection
+contour with the brush. The contour stays in canvas coordinates and lands on
+the active layer. Return commits one undo step. The selection stays put, and
+the brush is not clipped to it. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. Each tab can undo and redo crops, fills, selections and
-layer changes. Selection changes preserve the saved revision, and undoing
+layer changes, path edits, and strokes. Selection changes preserve the saved revision, and undoing
 back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. It also supports a grid and center guides. Save and Save As handle
 ImageEdit projects,
-PNG, JPEG, and WebP. A project stores the layer stack with lossless pixels.
+PNG, JPEG, and WebP. A project stores the layer stack and paths with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
 and preserves the tab’s saved state. Raster Save is offered only while a
 document is a single plain layer.
@@ -58,7 +65,8 @@ document is a single plain layer.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
 - `src/paint.rs` spaces pencil, brush, and eraser dabs along the pointer path
-  and stores touched 64 px tiles. It also samples linear and radial gradients.
+  and stores touched 64 px tiles. It also samples linear and radial gradients
+  and strokes a polyline in one pass, skipping a repeated endpoint.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
   preview. Release commits their dirty regions in one undo step.
   `src/workspace/gradient_ui.rs` previews a gradient until Apply.
@@ -72,6 +80,10 @@ document is a single plain layer.
   premultiplied color. `src/workspace/filter_ui.rs` shows the reduced preview for
   the latest slider position. Apply writes the layer, or inserts the shadow
   beneath it, in the background.
+- `src/paths.rs` stores cubic paths in canvas coordinates, flattens them, and
+  fills closed paths with nonzero winding. `src/workspace/path_ui.rs` edits
+  anchors and handles. A drag commits when the pointer is released.
+  `src/workspace/stroke_ui.rs` strokes the active path or the selection contour.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
 - `src/selection.rs` is the canvas-space selection: unrestricted, empty, full,
@@ -82,21 +94,21 @@ the freehand path or the polygon's next edge. The Magic Wand shares the
 bucket tolerance. Fill, Clear, and the clipboard honor feathered coverage.
 Shift adds, Control subtracts, and Shift-Control intersects. Over the box the
 painted crosshair gives way to a hand or resize cursor. The outline is a
-dashed contour.
+dashed contour. Stroke polylines follow that contour, including a hole.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
-  is stored in the version 3 project.
+  is stored in the version 4 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
-- `src/document/content.rs` owns the canvas dimensions and raster layer stack.
-  It handles crop, layer-local bucket fill, layer offsets, and content crops.
+- `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
+  It handles crop, layer-local bucket fill, layer offsets, content crops, and outline strokes.
   `src/document/composite.rs` blends visible layers for display, sampling, and
   raster output.
-- `src/project.rs` reads and writes the version 3 project format and applies
- the same size limits in both directions. ImageEdit has not shipped, so older
- project versions are not supported. `fixtures/projects/` holds a golden
- project that the reader must keep opening. Regenerate it only when the
- format intentionally changes. The current fixture is version 3.
+- `src/project.rs` reads and writes the version 4 project format and applies
+  the same size limits in both directions. ImageEdit has not shipped, so older
+  project versions are not supported. `fixtures/projects/` holds a golden
+  project that the reader must keep opening. Regenerate it only when the
+  format intentionally changes. The current fixture is version 4.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it
