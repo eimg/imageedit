@@ -109,6 +109,15 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   the stroke shown in the tool options. A repeated endpoint does not add a
   dab, and a hole is stroked on both boundaries. The brush is not clipped by
   the selection. Undo restores the previous pixels and leaves the path in place.
+  **Text** (`T`) clicks an origin, or loads the active text layer. Type into
+  the draft. Return starts a new line, and the copy, cut, paste, and select-all
+  shortcuts edit the text instead of the image. Apply commits one undo step
+  and Escape discards the draft. Sans, serif, and monospace are the font
+  choices, with a pixel size from 1 to 256 and the foreground color. A missing
+  named font shows which face was used instead. The layer keeps the words and
+  a raster copy, so export matches the canvas. **Layer → Rasterize Text
+  Layer** keeps those pixels and lets the pixel tools edit them. Until then,
+  painting, fills, filters, and transforms ask you to rasterize first.
   **Bucket Fill** fills either the connected region or the whole selection.
   Sample All Layers uses the colors you see to choose that region and paints
   the active layer.
@@ -170,7 +179,7 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Rectangle Select / Free Select / Magic Wand / Move | R / F / U / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Pencil / Brush / Eraser | N / P / Shift+E |
-| Gradient / Path / Stroke | G / B / S |
+| Gradient / Path / Stroke / Text | G / B / S / T |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |
 | Foreground / Background color dialog | ⌥O / ⌥⇧O |
@@ -178,7 +187,6 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Menus and the toolbox still show planned features such as text.
 Commands without handlers appear disabled. Windows is a future target.
 
 ## Development

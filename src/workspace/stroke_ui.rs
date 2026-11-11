@@ -45,6 +45,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let changed = self.stroke_source != source;
         self.stroke_source = source;
         match self.outline_request(source) {

@@ -1,4 +1,4 @@
-use gpui::{Action, App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
+use gpui::{Action, App, KeyBinding, Menu, MenuItem, NoAction, SystemMenuType, actions};
 
 actions!(
     imageedit,
@@ -77,6 +77,13 @@ actions!(
         StrokePath,
         StrokeSelection,
         CommitStroke,
+        ApplyText,
+        CancelText,
+        RasterizeText,
+        TextCopy,
+        TextCut,
+        TextPaste,
+        TextSelectAll,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -203,7 +210,7 @@ impl Tool {
             Self::Text => (
                 "Text",
                 "text",
-                "Add and style editable text on its own layer.",
+                "Click to place text, then type. Apply commits one undo step and Escape discards it.",
             ),
             Self::Path => (
                 "Path",
@@ -338,6 +345,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("enter", ApplyTransform, Some("Transform")),
         KeyBinding::new("escape", CancelTransform, Some("Transform")),
         KeyBinding::new("s", SelectTool(Tool::Stroke), None),
+        KeyBinding::new("t", SelectTool(Tool::Text), None),
         KeyBinding::new("enter", CommitStroke, Some("Stroke")),
         KeyBinding::new("b", SelectTool(Tool::Path), None),
         KeyBinding::new("escape", CancelPath, Some("Path")),
@@ -375,6 +383,41 @@ pub fn register(cx: &mut App) {
             KeyBinding::new("ctrl-y", Redo, None),
         ]);
     }
+    // A NoAction here is higher than the global tool letters, so key_down can type them.
+    cx.bind_keys([
+        KeyBinding::new("n", NoAction, Some("Text")),
+        KeyBinding::new("p", NoAction, Some("Text")),
+        KeyBinding::new("r", NoAction, Some("Text")),
+        KeyBinding::new("f", NoAction, Some("Text")),
+        KeyBinding::new("u", NoAction, Some("Text")),
+        KeyBinding::new("m", NoAction, Some("Text")),
+        KeyBinding::new("o", NoAction, Some("Text")),
+        KeyBinding::new("z", NoAction, Some("Text")),
+        KeyBinding::new("x", NoAction, Some("Text")),
+        KeyBinding::new("d", NoAction, Some("Text")),
+        KeyBinding::new("t", NoAction, Some("Text")),
+        KeyBinding::new("s", NoAction, Some("Text")),
+        KeyBinding::new("b", NoAction, Some("Text")),
+        KeyBinding::new("g", NoAction, Some("Text")),
+        KeyBinding::new("shift-e", NoAction, Some("Text")),
+        KeyBinding::new("shift-r", NoAction, Some("Text")),
+        KeyBinding::new("shift-f", NoAction, Some("Text")),
+        KeyBinding::new("shift-p", NoAction, Some("Text")),
+        KeyBinding::new("shift-c", NoAction, Some("Text")),
+        KeyBinding::new("shift-b", NoAction, Some("Text")),
+        KeyBinding::new("1", NoAction, Some("Text")),
+        KeyBinding::new("+", NoAction, Some("Text")),
+        KeyBinding::new("-", NoAction, Some("Text")),
+        KeyBinding::new("=", NoAction, Some("Text")),
+        KeyBinding::new("shift-=", NoAction, Some("Text")),
+        KeyBinding::new(&format!("{primary}-c"), TextCopy, Some("Text")),
+        KeyBinding::new(&format!("{primary}-x"), TextCut, Some("Text")),
+        KeyBinding::new(&format!("{primary}-v"), TextPaste, Some("Text")),
+        KeyBinding::new(&format!("{primary}-a"), TextSelectAll, Some("Text")),
+        KeyBinding::new(&format!("{primary}-shift-v"), NoAction, Some("Text")),
+        KeyBinding::new(&format!("{primary}-enter"), ApplyText, Some("Text")),
+        KeyBinding::new("escape", CancelText, Some("Text")),
+    ]);
 
     // Window actions run while GPUI has the active window borrowed.
     cx.on_action(|_: &OpenImage, cx| cx.defer(crate::open_dialog));
@@ -503,6 +546,7 @@ pub fn register(cx: &mut App) {
                 MenuItem::action("Scale Layer…", ScaleLayer),
                 MenuItem::action("Layer to Image Size", LayerToImageSize),
                 MenuItem::action("Crop to Content", CropLayerToContent),
+                MenuItem::action("Rasterize Text Layer", RasterizeText),
             ],
         ),
         menu(

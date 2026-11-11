@@ -182,6 +182,9 @@ impl Workspace {
     }
 
     pub(super) fn apply_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(true, cx) {
+            return;
+        }
         let Some(crop) = self.crop.take() else {
             return;
         };
@@ -212,6 +215,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some((x, y)) = self.canvas_pixel(position, window.scale_factor(), false) else {
             return;
         };

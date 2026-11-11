@@ -13,6 +13,7 @@ mod paint_ui;
 mod path_ui;
 mod selection;
 mod stroke_ui;
+mod text_ui;
 mod transform_ui;
 mod view;
 
@@ -149,6 +150,8 @@ pub struct Workspace {
     stroke_source: stroke_ui::StrokeSource,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
+    text_draft: Option<text_ui::TextDraft>,
+    text_overlay: Option<layers::MovePaint>,
     pencil: crate::paint::Brush,
     copy_token: u64,
     paste_token: u64,
@@ -273,6 +276,8 @@ impl Workspace {
             stroke_source: stroke_ui::StrokeSource::Path,
             stroke: None,
             stroke_commit_preview: None,
+            text_draft: None,
+            text_overlay: None,
             pencil: crate::paint::Brush {
                 diameter: 1,
                 ..Default::default()
@@ -365,6 +370,7 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_text(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
@@ -398,6 +404,7 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_text(window, cx);
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -452,6 +459,7 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_text(window, cx);
             self.start_change(change, |_, _, _| Dirty::Canvas, window, cx);
         }
     }

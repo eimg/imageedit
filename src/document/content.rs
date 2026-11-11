@@ -31,6 +31,7 @@ pub struct RasterLayer {
     pub visible: bool,
     pub opacity: u8,
     pub blend_mode: BlendMode,
+    pub text: Option<crate::text::TextStyle>,
 }
 
 impl RasterLayer {
@@ -72,6 +73,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                text: None,
             }],
             paths: Vec::new(),
             active_path: None,
@@ -292,6 +294,9 @@ impl DocumentContent {
         if mode == crate::transform::ColorMode::Grayscale {
             for layer in &mut self.layers {
                 layer.pixels = Arc::new(crate::transform::grayscale((*layer.pixels).clone()));
+                if let Some(style) = layer.text.as_mut() {
+                    style.color = mode.constrain(style.color);
+                }
             }
             Dirty::Canvas
         } else {
@@ -321,6 +326,93 @@ impl DocumentContent {
 
     pub fn layer(&self, id: LayerId) -> Option<&RasterLayer> {
         self.layers.iter().find(|layer| layer.id == id)
+    }
+
+    pub fn layer_is_text(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|layer| layer.text.is_some())
+    }
+
+    pub fn has_text_layer(&self) -> bool {
+        self.layers.iter().any(|layer| layer.text.is_some())
+    }
+
+    // Replaces a layer's pixels with a new rasterization and keeps the layout anchor.
+    pub fn set_text(
+        &mut self,
+        id: LayerId,
+        anchor: (i32, i32),
+        rendered: crate::text::RenderedText,
+    ) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let pixels = self.mode.constrain_image(rendered.image);
+        let mut style = rendered.style;
+        style.color = self.mode.constrain(style.color);
+        let offset = style.offset_for(anchor);
+        if self.layers[index].text.as_ref() == Some(&style)
+            && self.layers[index].offset == offset
+            && self.layers[index].pixels.as_ref() == &pixels
+        {
+            return Dirty::None;
+        }
+        if !self.accepts_replacement(id, pixels.dimensions()) {
+            return Dirty::None;
+        }
+        self.layers[index].pixels = Arc::new(pixels);
+        self.layers[index].offset = offset;
+        self.layers[index].text = Some(style);
+        Dirty::Canvas
+    }
+
+    // Drops the text source and keeps the cached pixels. Callers record history
+    // without rebuilding tiles, because the bitmap did not change.
+    pub fn rasterize_text(&mut self, id: LayerId) -> bool {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return false;
+        };
+        if layer.text.is_none() {
+            return false;
+        }
+        layer.text = None;
+        true
+    }
+
+    pub fn insert_text_layer(
+        &mut self,
+        above: LayerId,
+        anchor: (i32, i32),
+        rendered: crate::text::RenderedText,
+    ) -> Option<LayerId> {
+        if !self.can_add_layer() {
+            return None;
+        }
+        let pixels = self.mode.constrain_image(rendered.image);
+        let bytes = image_bytes(&pixels)?;
+        if !self.fits_stack(0, bytes) {
+            return None;
+        }
+        let id = self.next_layer_id()?;
+        let mut style = rendered.style;
+        style.color = self.mode.constrain(style.color);
+        let offset = style.offset_for(anchor);
+        let index = self
+            .layer_index(above)
+            .map_or(self.layers.len(), |index| index + 1);
+        self.layers.insert(
+            index,
+            RasterLayer {
+                id,
+                name: "Text".into(),
+                pixels: Arc::new(pixels),
+                offset,
+                visible: true,
+                opacity: 255,
+                blend_mode: BlendMode::Normal,
+                text: Some(style),
+            },
+        );
+        Some(id)
     }
 
     pub fn top_layer_id(&self) -> LayerId {
@@ -377,6 +469,9 @@ impl DocumentContent {
     }
 
     pub fn crop(&mut self, crop: CropRect) -> bool {
+        if self.has_text_layer() {
+            return false;
+        }
         let Some(bounds) = crop.bounds() else {
             return false;
         };
@@ -461,6 +556,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                text: None,
             },
         );
         Some(id)
@@ -549,6 +645,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                text: None,
             },
         );
         Some(id)
@@ -662,6 +759,9 @@ impl DocumentContent {
     // Replaces a layer and the one below it with their composite, keeping the lower ID and name.
     pub fn merge_down(&mut self, id: LayerId) -> Option<LayerId> {
         let (index, union) = self.merge_bounds(id)?;
+        if self.layers[index].text.is_some() || self.layers[index + 1].text.is_some() {
+            return None;
+        }
         let pixels = composite::flatten_region(&self.layers[index..=index + 1], union);
         self.layers.remove(index + 1);
         let merged = &mut self.layers[index];
@@ -711,7 +811,7 @@ impl DocumentContent {
         selection: &Selection,
         request: FillRequest,
     ) -> Option<PixelRect> {
-        if x >= self.width || y >= self.height {
+        if self.layer_is_text(id) || x >= self.width || y >= self.height {
             return None;
         }
         let canvas = (self.width, self.height);
@@ -787,6 +887,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].text.is_some() {
+            return Dirty::None;
+        }
         gradient.foreground = self.mode.constrain(gradient.foreground);
         gradient.background = self.mode.constrain(gradient.background);
         let offset = self.layers[index].offset;
@@ -817,6 +920,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].text.is_some() {
+            return Dirty::None;
+        }
         let offset = self.layers[index].offset;
         let canvas = (self.width, self.height);
         let mode = self.mode;
@@ -850,7 +956,7 @@ impl DocumentContent {
         spec: crate::filters::FilterSpec,
         selection: &Selection,
     ) -> Dirty {
-        if selection == &Selection::Empty {
+        if self.layer_is_text(id) || selection == &Selection::Empty {
             return Dirty::None;
         }
         let (radius, filtered) = match spec {
@@ -906,6 +1012,9 @@ impl DocumentContent {
         id: LayerId,
         spec: crate::filters::FilterSpec,
     ) -> Result<PixelRect, crate::filters::FilterStop> {
+        if self.layer_is_text(id) {
+            return Err(crate::filters::FilterStop::Unchanged);
+        }
         let crate::filters::FilterSpec::Shadow {
             radius,
             offset,
@@ -951,6 +1060,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                text: None,
             },
         );
         Ok(rect)
@@ -1009,6 +1119,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].text.is_some() {
+            return Dirty::None;
+        }
         let Some((pixels, mut regions)) =
             crate::paint::apply_stroke(&self.layers[index].pixels, stroke)
         else {
@@ -1038,6 +1151,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].text.is_some() {
+            return Dirty::None;
+        }
         let brush = brush.clamped();
         if lines.is_empty() || brush.opacity == 0 {
             return Dirty::None;
@@ -1061,6 +1177,9 @@ impl DocumentContent {
 
     // Sets covered pixels to transparent. Pixels that are already clear do not count as a change.
     pub fn clear(&mut self, id: LayerId, selection: &Selection) -> Option<PixelRect> {
+        if self.layer_is_text(id) {
+            return None;
+        }
         let canvas = (self.width, self.height);
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
         if !layer.visible {
@@ -1137,6 +1256,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].text.is_some() {
+            return Dirty::None;
+        }
         let pixels = self.mode.constrain_image(pixels);
         if self.layers[index].offset == offset && self.layers[index].pixels.as_ref() == &pixels {
             return Dirty::None;
@@ -1172,7 +1294,7 @@ impl DocumentContent {
 
     // Resizes the layer to the canvas. Pixels keep their canvas position; the rest is transparent.
     pub fn layer_to_image_size(&mut self, id: LayerId) -> Dirty {
-        if !self.can_fit_layer(id) {
+        if self.layer_is_text(id) || !self.can_fit_layer(id) {
             return Dirty::None;
         }
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
@@ -1192,6 +1314,9 @@ impl DocumentContent {
     }
 
     pub fn crop_layer_to_content(&mut self, id: LayerId) -> LayerGeometry {
+        if self.layer_is_text(id) {
+            return LayerGeometry::Unchanged;
+        }
         let Some(index) = self.layer_index(id) else {
             return LayerGeometry::Unchanged;
         };
@@ -1273,6 +1398,9 @@ impl DocumentContent {
     }
 
     pub fn turn_image(&mut self, turn: crate::transform::Turn) -> bool {
+        if self.has_text_layer() {
+            return false;
+        }
         let canvas = self.size();
         let mut planned = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
@@ -1296,6 +1424,9 @@ impl DocumentContent {
     }
 
     pub fn mirror_image(&mut self, mirror: crate::transform::Mirror) -> bool {
+        if self.has_text_layer() {
+            return false;
+        }
         let canvas = self.size();
         let mut planned = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
@@ -1321,6 +1452,9 @@ impl DocumentContent {
     }
 
     pub fn turn_layer(&mut self, id: LayerId, turn: crate::transform::Turn) -> bool {
+        if self.layer_is_text(id) {
+            return false;
+        }
         let Some(index) = self.layer_index(id) else {
             return false;
         };
@@ -1334,6 +1468,9 @@ impl DocumentContent {
     }
 
     pub fn mirror_layer(&mut self, id: LayerId, mirror: crate::transform::Mirror) -> bool {
+        if self.layer_is_text(id) {
+            return false;
+        }
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
             return false;
         };
@@ -1347,6 +1484,9 @@ impl DocumentContent {
         height: u32,
         resample: crate::transform::Resample,
     ) -> bool {
+        if self.has_text_layer() {
+            return false;
+        }
         let old = self.size();
         if (width, height) == old || !crate::transform::canvas_allowed(width, height) {
             return false;
@@ -1399,7 +1539,7 @@ impl DocumentContent {
         height: u32,
         resample: crate::transform::Resample,
     ) -> bool {
-        if width == 0 || height == 0 {
+        if self.layer_is_text(id) || width == 0 || height == 0 {
             return false;
         }
         let Some(index) = self.layer_index(id) else {
@@ -1807,6 +1947,7 @@ mod tests {
             visible: true,
             opacity: 128,
             blend_mode: BlendMode::Normal,
+            text: None,
         };
         content.layers.push(top.clone());
         top.id = LayerId(2);
@@ -1909,6 +2050,7 @@ mod tests {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                text: None,
             })
             .collect();
         let mut content = DocumentContent::from_layers(1536, 1024, layers).unwrap();
@@ -2975,6 +3117,41 @@ mod tests {
         );
         assert_eq!(
             content.layers[0].pixels.get_pixel(2, 1).0,
+            [77, 77, 77, 255]
+        );
+    }
+
+    #[test]
+    fn text_pixels_match_the_composite_and_pixel_tools_leave_them_alone() {
+        let rendered =
+            crate::text::render("Hi", "sans-serif", 28.0, Rgba([255, 0, 0, 255])).unwrap();
+        let (width, height) = rendered.image.dimensions();
+        let mut content =
+            DocumentContent::single_layer("Text".into(), RgbaImage::new(width, height));
+        let id = content.top_layer_id();
+        let anchor = rendered.style.origin;
+        assert_ne!(content.set_text(id, anchor, rendered.clone()), Dirty::None);
+        assert_eq!(content.layer(id).unwrap().offset, (0, 0));
+        assert_eq!(content.composite().as_ref(), &rendered.image);
+        let before = content.layer(id).unwrap().pixels.clone();
+        assert!(
+            content
+                .fill(
+                    id,
+                    0,
+                    0,
+                    Rgba([0, 255, 0, 255]),
+                    &Selection::Unrestricted,
+                    0
+                )
+                .is_none()
+        );
+        assert!(!content.turn_image(crate::transform::Turn::Right));
+        assert_eq!(content.layer(id).unwrap().pixels.as_ref(), before.as_ref());
+        assert!(content.layer_is_text(id));
+        content.set_color_mode(crate::transform::ColorMode::Grayscale);
+        assert_eq!(
+            content.layer(id).unwrap().text.as_ref().unwrap().color.0,
             [77, 77, 77, 255]
         );
     }

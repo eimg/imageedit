@@ -322,6 +322,9 @@ impl Workspace {
     }
 
     pub(super) fn clear_to_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
             return;
         };
@@ -354,6 +357,9 @@ impl Workspace {
     }
 
     pub(super) fn crop_to_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(true, cx) {
+            return;
+        }
         let Some(bounds) = self.selection_crop() else {
             return;
         };

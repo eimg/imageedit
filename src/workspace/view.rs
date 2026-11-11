@@ -70,6 +70,7 @@ impl Render for Workspace {
                 let root = self.bind_filter_actions(root, cx);
                 let root = self.bind_path_actions(root, cx);
                 let root = self.bind_stroke_actions(root, cx);
+                let root = self.bind_text_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     let tool = action.0;
                     let changed = this.tool != tool;
@@ -83,6 +84,7 @@ impl Render for Workspace {
                     if changed {
                         this.cancel_stroke(window, cx);
                         this.cancel_gradient(window, cx);
+                        this.cancel_text(window, cx);
                         this.cancel_path_gesture(cx);
                     }
                     if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
@@ -227,6 +229,16 @@ impl Render for Workspace {
                             },
                         ))
                     })
+                    .when(
+                        self.tool == Tool::Text && self.text_draft.is_some(),
+                        |root| {
+                            root.key_context("Text").on_key_down(cx.listener(
+                                |this, event: &gpui::KeyDownEvent, window, cx| {
+                                    this.type_text(event, window, cx);
+                                },
+                            ))
+                        },
+                    )
                     .when(self.tool == Tool::Path, |root| {
                         root.key_context("Path")
                             .on_action(cx.listener(|this, _: &CancelPath, _, cx| {
@@ -733,6 +745,18 @@ impl Workspace {
                             },
                         ))
                     })
+                    .when(self.tool == Tool::Text && !tab.busy(), |area| {
+                        area.cursor(CursorStyle::IBeam).on_click(cx.listener(
+                            |this, event: &gpui::ClickEvent, window, cx| {
+                                this.place_text(
+                                    event.position(),
+                                    window.scale_factor(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
                     .when(self.tool == Tool::Path && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
                             MouseButton::Left,
@@ -965,6 +989,7 @@ impl Workspace {
                                         ),
                                     )
                             })
+                            .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
                             .when(self.tool == Tool::Path, |panel| {
                                 panel
                                     .child(
@@ -1322,6 +1347,7 @@ impl Workspace {
                                         | Tool::Gradient
                                         | Tool::Path
                                         | Tool::Stroke
+                                        | Tool::Text
                                 ),
                                 |panel| {
                                     panel.child(

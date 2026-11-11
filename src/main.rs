@@ -16,6 +16,7 @@ mod paths;
 mod preview;
 mod project;
 mod selection;
+mod text;
 mod transform;
 mod workspace;
 

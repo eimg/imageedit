@@ -39,18 +39,24 @@ nonzero winding. Image transforms, scale, canvas size, and crop move those
 paths with the image. Stroke (`S`) paints the active path or the selection
 contour with the brush. The contour stays in canvas coordinates and lands on
 the active layer. Return commits one undo step. The selection stays put, and
-the brush is not clipped to it. The Image menu
+the brush is not clipped to it. Text (`T`) adds an editable layer.
+Click sets its origin, or loads the active text layer. Typing, Return, and the
+text clipboard stay in that draft until Apply commits one undo step. Escape
+discards it. The layer stores the source, one font, a pixel size, and a color,
+plus the raster used for display and export. A missing named font is substituted
+and the panel says which face was used. Rasterize Text Layer drops the source
+and keeps the pixels. Pixel tools stay disabled until then. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. Each tab can undo and redo crops, fills, selections and
-layer changes, path edits, and strokes. Selection changes preserve the saved revision, and undoing
+layer changes, path edits, strokes, text edits, and rasterizing text. Selection changes preserve the saved revision, and undoing
 back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. It also supports a grid and center guides. Save and Save As handle
 ImageEdit projects,
-PNG, JPEG, and WebP. A project stores the layer stack and paths with lossless pixels.
+PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
 and preserves the tab’s saved state. Raster Save is offered only while a
 document is a single plain layer.
@@ -97,18 +103,22 @@ painted crosshair gives way to a hand or resize cursor. The outline is a
 dashed contour. Stroke polylines follow that contour, including a hole.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
-  is stored in the version 4 project.
+  is stored in the version 5 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
   It handles crop, layer-local bucket fill, layer offsets, content crops, and outline strokes.
   `src/document/composite.rs` blends visible layers for display, sampling, and
   raster output.
-- `src/project.rs` reads and writes the version 4 project format and applies
+- `src/text.rs` rasterizes a layer's text with cosmic-text. One style covers
+  the whole layer. The cached bitmap is what the canvas and export paint, and
+  the project also stores the source so a machine with different fonts can
+  still open the pixels. `src/workspace/text_ui.rs` edits that draft.
+- `src/project.rs` reads and writes the version 5 project format and applies
   the same size limits in both directions. ImageEdit has not shipped, so older
   project versions are not supported. `fixtures/projects/` holds a golden
   project that the reader must keep opening. Regenerate it only when the
-  format intentionally changes. The current fixture is version 4.
+  format intentionally changes. The current fixture is version 5.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it

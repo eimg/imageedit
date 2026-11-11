@@ -64,7 +64,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab().is_none_or(|tab| tab.busy()) {
+        if self.active_tab().is_none_or(|tab| tab.busy()) || self.refuse_text_pixels(false, cx) {
             return;
         }
         let Some(point) = self.canvas_point(position, scale) else {
@@ -175,7 +175,7 @@ impl Workspace {
     }
 
     pub(super) fn apply_gradient(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_apply_gradient() {
+        if self.refuse_text_pixels(false, cx) || !self.can_apply_gradient() {
             return;
         }
         let Some(gradient) = self.gradient_spec() else {

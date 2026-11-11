@@ -501,6 +501,7 @@ mod tests {
             visible: true,
             opacity: 255,
             blend_mode: BlendMode::Normal,
+            text: None,
         };
         let glaze = RasterLayer {
             id: LayerId(1),
@@ -510,6 +511,7 @@ mod tests {
             visible: true,
             opacity: 200,
             blend_mode: BlendMode::Normal,
+            text: None,
         };
         let content = DocumentContent::from_layers(300, 80, vec![base, glaze]).unwrap();
         let mut cache = TileCache::new(300, 80, TILE_FINE, FILTER_APRON);

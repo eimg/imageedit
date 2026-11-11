@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use image::{ExtendedColorType, ImageDecoder, ImageEncoder, codecs::png};
+use image::{ExtendedColorType, ImageDecoder, ImageEncoder, Rgba, codecs::png};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
@@ -15,7 +15,7 @@ use crate::document::{
 
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const MAX_MANIFEST_BYTES: u32 = 64 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 
@@ -64,6 +64,19 @@ struct LayerEntry {
     visible: bool,
     opacity: u8,
     blend_mode: WireBlendMode,
+    text: Option<TextEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TextEntry {
+    source: String,
+    family: String,
+    size: f32,
+    color: [u8; 4],
+    resolved_family: String,
+    origin_x: i32,
+    origin_y: i32,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -164,6 +177,14 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
             opacity: entry.opacity,
             blend_mode: entry.blend_mode.into(),
             name: entry.name,
+            text: entry.text.map(|text| crate::text::TextStyle {
+                source: text.source,
+                family: text.family,
+                size: text.size,
+                color: Rgba(text.color),
+                resolved_family: text.resolved_family,
+                origin: (text.origin_x, text.origin_y),
+            }),
         });
     }
     ensure!(
@@ -214,6 +235,15 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                 visible: layer.visible,
                 opacity: layer.opacity,
                 blend_mode: layer.blend_mode.into(),
+                text: layer.text.as_ref().map(|text| TextEntry {
+                    source: text.source.clone(),
+                    family: text.family.clone(),
+                    size: text.size,
+                    color: text.color.0,
+                    resolved_family: text.resolved_family.clone(),
+                    origin_x: text.origin.0,
+                    origin_y: text.origin.1,
+                }),
             })
             .collect(),
         paths: content
@@ -290,6 +320,18 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
             .filter(|&total| total <= MAX_STACK_BYTES)
             .context("The project layers are too large")?;
         ensure!(ids.insert(layer.id), "Layer ID {} is repeated", layer.id);
+        if let Some(text) = &layer.text {
+            ensure!(
+                crate::text::fields_allowed(
+                    &text.source,
+                    &text.family,
+                    &text.resolved_family,
+                    text.size
+                ),
+                "Layer \"{}\" has text that cannot be stored",
+                layer.name
+            );
+        }
     }
     ensure!(
         manifest.paths.len() <= crate::paths::MAX_PATHS,
@@ -350,7 +392,7 @@ mod tests {
 
     const V2_GOLDEN: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/projects/v4-two-layers.imageedit"
+        "/fixtures/projects/v5-two-layers.imageedit"
     ));
 
     fn read_bytes(bytes: &[u8]) -> Result<DocumentContent> {
@@ -374,6 +416,7 @@ mod tests {
             visible: true,
             opacity: 255,
             blend_mode: BlendMode::Normal,
+            text: None,
         };
         let top = RasterLayer {
             id: LayerId(3),
@@ -387,6 +430,7 @@ mod tests {
             visible: false,
             opacity: 77,
             blend_mode: BlendMode::Normal,
+            text: None,
         };
         DocumentContent::from_layers(4, 3, vec![bottom, top]).unwrap()
     }
@@ -402,6 +446,7 @@ mod tests {
             assert_eq!(actual.visible, expected.visible);
             assert_eq!(actual.opacity, expected.opacity);
             assert_eq!(actual.blend_mode, expected.blend_mode);
+            assert_eq!(actual.text, expected.text);
             assert_eq!(*actual.pixels, *expected.pixels);
         }
         assert_eq!(actual.paths(), expected.paths());
@@ -479,7 +524,7 @@ mod tests {
             manifest_json(&bytes)["layers"][1],
             json!({
                 "id": 3, "name": "Glaze ✦ 上", "x": -1, "y": 2, "width": 3, "height": 2,
-                "visible": false, "opacity": 77, "blend_mode": "normal",
+                "visible": false, "opacity": 77, "blend_mode": "normal", "text": null,
             })
         );
     }
@@ -489,9 +534,9 @@ mod tests {
         let valid = write_bytes(&two_layers()).unwrap();
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
-        let edits: [Edit; 21] = [
-            ("unknown version", &|m| m["version"] = json!(5)),
-            ("previous version", &|m| m["version"] = json!(3)),
+        let edits: [Edit; 24] = [
+            ("unknown version", &|m| m["version"] = json!(6)),
+            ("previous version", &|m| m["version"] = json!(4)),
             ("repeated path", &|m| {
                 m["paths"] = json!([{
                     "id": 1, "closed": false,
@@ -540,6 +585,28 @@ mod tests {
             ("canvas too large", &|m| {
                 m["width"] = json!(100_000);
                 m["height"] = json!(100_000);
+            }),
+            ("text size", &|m| {
+                m["layers"][0]["text"] = json!({
+                    "source": "A", "family": "sans-serif", "size": 0.0,
+                    "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "origin_x": 0, "origin_y": 0
+                });
+            }),
+            ("text too long", &|m| {
+                m["layers"][0]["text"] = json!({
+                    "source": "A".repeat(crate::text::MAX_TEXT_CHARS + 1),
+                    "family": "sans-serif", "size": 16.0,
+                    "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "origin_x": 0, "origin_y": 0
+                });
+            }),
+            ("unknown text field", &|m| {
+                m["layers"][0]["text"] = json!({
+                    "source": "A", "family": "sans-serif", "size": 16.0,
+                    "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "origin_x": 0, "origin_y": 0, "weight": 700
+                });
             }),
             ("empty layer", &|m| m["layers"][0]["height"] = json!(0)),
             ("layers too large", &|m| {
@@ -608,6 +675,49 @@ mod tests {
         for (label, bytes) in cases {
             assert!(read_bytes(&bytes).is_err(), "{label} was accepted");
         }
+    }
+
+    #[test]
+    fn styled_multiline_text_round_trips_and_can_be_edited() {
+        let rendered =
+            crate::text::render("Hello\ncafé", "serif", 28.0, Rgba([10, 20, 30, 255])).unwrap();
+        let mut content = DocumentContent::single_layer("Base".into(), RgbaImage::new(8, 8));
+        let id = content.top_layer_id();
+        assert!(!matches!(
+            content.set_text(id, (1, 2), rendered.clone()),
+            crate::preview::Dirty::None
+        ));
+        let opened = read_bytes(&write_bytes(&content).unwrap()).unwrap();
+        let text = opened.layers()[0].text.as_ref().unwrap();
+        assert_eq!(text.source, "Hello\ncafé");
+        assert_eq!(text.family, "serif");
+        assert_eq!(text.size, 28.0);
+        assert_eq!(text.color.0, [10, 20, 30, 255]);
+        assert!(!text.substituted());
+        assert_eq!(*opened.layers()[0].pixels, rendered.image);
+
+        let edited =
+            crate::text::render("Hello\ncafé!", "serif", 28.0, Rgba([10, 20, 30, 255])).unwrap();
+        let mut again = opened;
+        again.set_text(id, (1, 2), edited);
+        let reopened = read_bytes(&write_bytes(&again).unwrap()).unwrap();
+        assert_eq!(
+            reopened.layers()[0].text.as_ref().unwrap().source,
+            "Hello\ncafé!"
+        );
+        assert_ne!(*reopened.layers()[0].pixels, rendered.image);
+
+        let missing =
+            crate::text::render("Ag", "ImageEdit Missing Font", 24.0, Rgba([0, 0, 0, 255]))
+                .unwrap();
+        let mut missing_doc = DocumentContent::single_layer("Base".into(), RgbaImage::new(4, 4));
+        let missing_id = missing_doc.top_layer_id();
+        missing_doc.set_text(missing_id, (0, 0), missing.clone());
+        let loaded = read_bytes(&write_bytes(&missing_doc).unwrap()).unwrap();
+        let style = loaded.layers()[0].text.as_ref().unwrap();
+        assert!(style.substituted());
+        assert_eq!(style.resolved_family, missing.style.resolved_family);
+        assert_eq!(*loaded.layers()[0].pixels, missing.image);
     }
 
     #[test]

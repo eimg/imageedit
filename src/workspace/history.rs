@@ -1066,4 +1066,31 @@ mod tests {
         assert_eq!(session.current.content.paths()[0].anchors.len(), 3);
         assert_eq!(session.current.selection, selection);
     }
+
+    #[test]
+    fn undoing_rasterize_restores_the_text_source_and_pixels() {
+        use crate::preview::Dirty;
+
+        let rendered = crate::text::render("Hi", "sans-serif", 24.0, Rgba([0, 0, 0, 255])).unwrap();
+        let pixels = rendered.image.clone();
+        let mut session = Session::new(true, 48);
+        let id = session.current.active_layer;
+        session.edit(
+            |content| content.set_text(id, (4, 4), rendered) != Dirty::None,
+            &LIMITS,
+        );
+        assert!(session.current.content.layer_is_text(id));
+        session.edit(|content| content.rasterize_text(id), &LIMITS);
+        assert!(session.current.content.layer(id).unwrap().text.is_none());
+        assert_eq!(*session.current.content.layer(id).unwrap().pixels, pixels);
+        assert!(session.undo());
+        let restored = session.current.content.layer(id).unwrap();
+        assert_eq!(restored.text.as_ref().unwrap().source, "Hi");
+        assert_eq!(*restored.pixels, pixels);
+
+        let mut plain = Session::new(true, 4);
+        let plain_id = plain.current.active_layer;
+        plain.edit(|content| content.rasterize_text(plain_id), &LIMITS);
+        assert!(!plain.history.is_dirty());
+    }
 }

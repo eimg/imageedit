@@ -188,18 +188,34 @@ impl Workspace {
                 window,
                 cx,
             ),
-            LayerCommand::MergeDown => self.edit_content(
-                move |content, active, _| {
-                    if let Some(merged) = content.merge_down(id) {
-                        *active = merged;
-                        Dirty::Canvas
-                    } else {
-                        Dirty::None
-                    }
-                },
-                window,
-                cx,
-            ),
+            LayerCommand::MergeDown => {
+                let blocked = self.active_tab().is_some_and(|tab| {
+                    let layers = tab.document.content.layers();
+                    let Some(index) = layers.iter().position(|layer| layer.id == id) else {
+                        return false;
+                    };
+                    layers[index].text.is_some()
+                        || index
+                            .checked_sub(1)
+                            .is_some_and(|lower| layers[lower].text.is_some())
+                });
+                if blocked {
+                    self.notice("Rasterize the text layer before using pixel tools.", cx);
+                    return;
+                }
+                self.edit_content(
+                    move |content, active, _| {
+                        if let Some(merged) = content.merge_down(id) {
+                            *active = merged;
+                            Dirty::Canvas
+                        } else {
+                            Dirty::None
+                        }
+                    },
+                    window,
+                    cx,
+                );
+            }
             LayerCommand::ToggleVisibility => self.edit_content(
                 move |content, _, _| {
                     if content.set_visible(id, !visible) {
@@ -246,6 +262,7 @@ impl Workspace {
             tab.active_layer = id;
             tab.notice = None;
             self.opacity_drag = None;
+            self.cancel_text(window, cx);
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
@@ -335,6 +352,11 @@ impl Workspace {
             let id = layer.id;
             let active = id == tab.active_layer;
             let name: SharedString = layer.name.clone().into();
+            let title: SharedString = if layer.text.is_some() {
+                format!("{name} · Text").into()
+            } else {
+                name.clone()
+            };
             let thumbnail = tab.document.canvas.thumbnail(id).cloned();
             div()
                 .id(("layer", id.0 as usize))
@@ -383,7 +405,7 @@ impl Workspace {
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(rgb(if layer.visible { TEXT } else { MUTED }))
-                        .child(name),
+                        .child(title),
                 )
                 .child(
                     div()
@@ -552,6 +574,9 @@ impl Workspace {
     }
 
     fn layer_to_image_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
@@ -573,6 +598,9 @@ impl Workspace {
     }
 
     fn crop_layer_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -595,6 +623,9 @@ impl Workspace {
     }
 
     fn crop_image_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(true, cx) {
+            return;
+        }
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -790,6 +821,7 @@ impl Workspace {
             .clone()
             .or_else(|| self.warp_overlay.clone())
             .or_else(|| self.gradient_overlay.clone())
+            .or_else(|| self.text_overlay.clone())
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {

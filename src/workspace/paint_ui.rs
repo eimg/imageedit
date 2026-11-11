@@ -82,6 +82,9 @@ impl Workspace {
         if self.stroke.is_some() || self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some(kind) = stroke_kind(self.tool) else {
             return;
         };

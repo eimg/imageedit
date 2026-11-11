@@ -47,7 +47,7 @@ impl Workspace {
     }
 
     fn adjust_image(&mut self, action: ImageAdjust, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.transform_enabled() {
+        if !self.transform_enabled() || self.refuse_text_pixels(true, cx) {
             return;
         }
         self.edit_content(
@@ -78,7 +78,7 @@ impl Workspace {
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
-        if !self.transform_enabled() {
+        if !self.transform_enabled() || self.refuse_text_pixels(false, cx) {
             return;
         }
         self.edit_content(
@@ -110,7 +110,7 @@ impl Workspace {
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
-        if !self.transform_enabled() {
+        if !self.transform_enabled() || self.refuse_text_pixels(!layer, cx) {
             return;
         }
         self.edit_content(
@@ -332,6 +332,10 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
             return;
         };
+        if layer.text.is_some() {
+            self.notice("Rasterize the text layer before using pixel tools.", cx);
+            return;
+        }
         if !layer.visible {
             self.notice(
                 "The active layer is hidden. Show it before transforming.",

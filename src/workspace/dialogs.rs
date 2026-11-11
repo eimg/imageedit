@@ -384,6 +384,9 @@ impl Workspace {
     }
 
     pub(super) fn scale_image_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(true, cx) {
+            return;
+        }
         let Some((width, height)) = self.active_tab().map(|tab| tab.document.content.size()) else {
             return;
         };
@@ -391,6 +394,9 @@ impl Workspace {
     }
 
     pub(super) fn scale_layer_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_text_pixels(false, cx) {
+            return;
+        }
         let Some((width, height)) = self.active_tab().and_then(|tab| {
             tab.document
                 .content
