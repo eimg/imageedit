@@ -49,11 +49,7 @@ pub struct ShadowImage {
 }
 
 pub fn kernel_support(radius: u32) -> u32 {
-    if radius == 0 {
-        0
-    } else {
-        (f64::from(radius) * 3.0).ceil() as u32
-    }
+    radius.min(MAX_RADIUS) * 3
 }
 
 pub fn shadow_dimensions(width: u32, height: u32, radius: u32) -> Option<(u32, u32)> {
@@ -68,20 +64,39 @@ pub fn gaussian_blur(source: &RgbaImage, radius: u32) -> RgbaImage {
     if radius == 0 {
         return source.clone();
     }
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return source.clone();
+    }
     let kernel = kernel(radius);
     let support = (kernel.len() / 2) as i32;
-    let (width, height) = source.dimensions();
-    let mut horizontal = vec![[0.0; 4]; (width * height) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            horizontal[(y * width + x) as usize] = convolve_row(source, &kernel, support, x, y);
-        }
-    }
+    let rows = height.min(kernel.len() as u32);
+    let band_width = width.min(128);
+    let mut horizontal = vec![[0.0; 4]; (band_width * rows) as usize];
     let mut output = RgbaImage::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let sample = convolve_buffer(&horizontal, width, height, &kernel, support, x, y);
-            output.put_pixel(x, y, unpremultiply(sample));
+    for left in (0..width).step_by(band_width as usize) {
+        let columns = band_width.min(width - left);
+        let mut next_row = 0;
+        for y in 0..height {
+            let needed = (y + support as u32).min(height - 1);
+            while next_row <= needed {
+                for x in 0..columns {
+                    horizontal[((next_row % rows) * band_width + x) as usize] =
+                        convolve_row(source, &kernel, support, left + x, next_row);
+                }
+                next_row += 1;
+            }
+            for x in 0..columns {
+                let mut sample = [0.0; 4];
+                for (index, weight) in kernel.iter().enumerate() {
+                    let sy = (y as i32 + index as i32 - support).clamp(0, height as i32 - 1) as u32;
+                    let pixel = horizontal[((sy % rows) * band_width + x) as usize];
+                    for channel in 0..4 {
+                        sample[channel] += pixel[channel] * weight;
+                    }
+                }
+                output.put_pixel(left + x, y, unpremultiply(sample));
+            }
         }
     }
     output
@@ -125,16 +140,21 @@ pub fn render_shadow(
     let (shadow_width, shadow_height) = shadow_dimensions(width, height, radius)?;
     let pad = kernel_support(radius);
     let mut image = RgbaImage::new(shadow_width, shadow_height);
+    let mut visible = false;
     for (x, y, pixel) in source.enumerate_pixels() {
         let alpha = (u32::from(pixel.0[3]) * u32::from(opacity) + 50) / 100;
         if alpha == 0 {
             continue;
         }
+        visible = true;
         image.put_pixel(
             x + pad,
             y + pad,
             Rgba([color.0[0], color.0[1], color.0[2], alpha as u8]),
         );
+    }
+    if !visible {
+        return None;
     }
     Some(ShadowImage {
         pixels: gaussian_blur(&image, radius),
@@ -233,6 +253,7 @@ pub fn preview(
                 ),
                 opacity,
                 constrain(color),
+                max_edge,
             );
             RgbaImage::from_fn(image.width(), image.height(), |x, y| {
                 constrain(*image.get_pixel(x, y))
@@ -271,68 +292,44 @@ fn composite_shadow(
     offset: (i32, i32),
     opacity: u8,
     color: Rgba<u8>,
+    max_edge: u32,
 ) -> RgbaImage {
     let Some(shadow) = render_shadow(source, radius, opacity, color) else {
         return source.clone();
     };
-    let origin = (-shadow.pad + offset.0, -shadow.pad + offset.1);
+    let origin = (
+        i64::from(offset.0) - i64::from(shadow.pad),
+        i64::from(offset.1) - i64::from(shadow.pad),
+    );
     let left = origin.0.min(0);
     let top = origin.1.min(0);
-    let right = (origin.0 + shadow.pixels.width() as i32).max(source.width() as i32);
-    let bottom = (origin.1 + shadow.pixels.height() as i32).max(source.height() as i32);
-    let mut image = RgbaImage::new((right - left) as u32, (bottom - top) as u32);
-    blit(
-        &mut image,
-        &shadow.pixels,
-        origin.0 - left,
-        origin.1 - top,
-        false,
+    let right = (origin.0 + i64::from(shadow.pixels.width())).max(i64::from(source.width()));
+    let bottom = (origin.1 + i64::from(shadow.pixels.height())).max(i64::from(source.height()));
+    let width = (right - left) as f64;
+    let height = (bottom - top) as f64;
+    let scale = f64::from(max_edge.max(1)) / width.max(height);
+    let scale = scale.min(1.0);
+    let size = (
+        (width * scale).round().max(1.0) as u32,
+        (height * scale).round().max(1.0) as u32,
     );
-    blit(&mut image, source, -left, -top, true);
-    image
-}
-
-fn blit(destination: &mut RgbaImage, source: &RgbaImage, origin_x: i32, origin_y: i32, over: bool) {
-    for (x, y, pixel) in source.enumerate_pixels() {
-        let dx = origin_x + x as i32;
-        let dy = origin_y + y as i32;
-        if dx < 0 || dy < 0 {
-            continue;
-        }
-        let (dx, dy) = (dx as u32, dy as u32);
-        if dx >= destination.width() || dy >= destination.height() {
-            continue;
-        }
-        let pixel = if over {
-            source_over(*destination.get_pixel(dx, dy), *pixel)
+    let at = |image: &RgbaImage, x: i64, y: i64| {
+        if (0..i64::from(image.width())).contains(&x) && (0..i64::from(image.height())).contains(&y)
+        {
+            *image.get_pixel(x as u32, y as u32)
         } else {
-            *pixel
-        };
-        destination.put_pixel(dx, dy, pixel);
-    }
-}
-
-fn source_over(destination: Rgba<u8>, source: Rgba<u8>) -> Rgba<u8> {
-    let source_alpha = u32::from(source.0[3]);
-    let destination_alpha = u32::from(destination.0[3]);
-    if source_alpha == 0 {
-        return destination;
-    }
-    let out_alpha = source_alpha + destination_alpha * (255 - source_alpha) / 255;
-    if out_alpha == 0 {
-        return Rgba([0, 0, 0, 0]);
-    }
-    let channel = |src: u8, dst: u8| {
-        ((u32::from(src) * source_alpha
-            + u32::from(dst) * destination_alpha * (255 - source_alpha) / 255)
-            / out_alpha) as u8
+            Rgba([0; 4])
+        }
     };
-    Rgba([
-        channel(source.0[0], destination.0[0]),
-        channel(source.0[1], destination.0[1]),
-        channel(source.0[2], destination.0[2]),
-        out_alpha as u8,
-    ])
+    RgbaImage::from_fn(size.0, size.1, |x, y| {
+        let cx = left + ((f64::from(x) + 0.5) * width / f64::from(size.0)).floor() as i64;
+        let cy = top + ((f64::from(y) + 0.5) * height / f64::from(size.1)).floor() as i64;
+        crate::document::source_over(
+            at(&shadow.pixels, cx - origin.0, cy - origin.1),
+            at(source, cx, cy),
+            255,
+        )
+    })
 }
 
 fn kernel(radius: u32) -> Vec<f64> {
@@ -365,26 +362,6 @@ fn convolve_row(source: &RgbaImage, kernel: &[f64], support: i32, x: u32, y: u32
     sample
 }
 
-fn convolve_buffer(
-    buffer: &[[f64; 4]],
-    width: u32,
-    height: u32,
-    kernel: &[f64],
-    support: i32,
-    x: u32,
-    y: u32,
-) -> [f64; 4] {
-    let mut sample = [0.0; 4];
-    for (index, weight) in kernel.iter().enumerate() {
-        let sy = (y as i32 + index as i32 - support).clamp(0, height as i32 - 1) as u32;
-        let pixel = buffer[(sy * width + x) as usize];
-        for channel in 0..4 {
-            sample[channel] += pixel[channel] * weight;
-        }
-    }
-    sample
-}
-
 fn premultiply(pixel: Rgba<u8>) -> [f64; 4] {
     let [red, green, blue, alpha] = pixel.0;
     let scale = f64::from(alpha) / 255.0;
@@ -397,7 +374,7 @@ fn premultiply(pixel: Rgba<u8>) -> [f64; 4] {
 }
 
 fn unpremultiply(sample: [f64; 4]) -> Rgba<u8> {
-    if sample[3] <= 0.5 {
+    if sample[3].round() <= 0.0 {
         return Rgba([0, 0, 0, 0]);
     }
     let scale = 255.0 / sample[3];
@@ -417,16 +394,12 @@ fn blend(before: Rgba<u8>, after: Rgba<u8>, coverage: u8) -> Rgba<u8> {
     if coverage == 255 {
         return after;
     }
-    let mix = |from: u8, to: u8| {
-        ((u32::from(from) * u32::from(255 - coverage) + u32::from(to) * u32::from(coverage) + 127)
-            / 255) as u8
-    };
-    Rgba([
-        mix(before.0[0], after.0[0]),
-        mix(before.0[1], after.0[1]),
-        mix(before.0[2], after.0[2]),
-        mix(before.0[3], after.0[3]),
-    ])
+    let before = premultiply(before);
+    let after = premultiply(after);
+    let fraction = f64::from(coverage) / 255.0;
+    unpremultiply(std::array::from_fn(|i| {
+        before[i] * (1.0 - fraction) + after[i] * fraction
+    }))
 }
 
 fn sample_coord(index: u32, preview: u32, source: u32) -> u32 {
@@ -516,6 +489,54 @@ mod tests {
         .unwrap();
         assert_eq!(mixed.pixels.get_pixel(3, 2).0, field.get_pixel(3, 2).0);
         assert_eq!(mixed.pixels.get_pixel(2, 2).0, [149, 149, 149, 255]);
+    }
+
+    #[test]
+    fn soft_filter_edges_ignore_hidden_rgb_and_shadow_previews_are_bounded() {
+        let mixed = blend(Rgba([0, 255, 0, 0]), Rgba([255, 0, 0, 200]), 128);
+        assert_eq!(mixed.0, [255, 0, 0, 100]);
+        let source = RgbaImage::from_pixel(8, 8, Rgba([255; 4]));
+        let preview = preview(
+            &source,
+            FilterSpec::Shadow {
+                radius: 1,
+                offset: (10000, -10000),
+                opacity: 75,
+                color: Rgba([0, 0, 0, 255]),
+            },
+            64,
+            |_, _| 255,
+            plain,
+        );
+        assert!(preview.width() <= 64 && preview.height() <= 64);
+        assert!(render_shadow(&RgbaImage::new(8, 8), 1, 75, Rgba([0, 0, 0, 255])).is_none());
+    }
+
+    #[test]
+    fn banded_blur_matches_a_direct_gaussian_across_band_and_ring_boundaries() {
+        let source = RgbaImage::from_fn(133, 29, |x, y| {
+            Rgba([
+                (x * 7 % 256) as u8,
+                (y * 19) as u8,
+                17,
+                ((x + y) * 23 % 256) as u8,
+            ])
+        });
+        let weights = kernel(2);
+        let support = weights.len() as i32 / 2;
+        let actual = gaussian_blur(&source, 2);
+        for (x, y) in [(0, 0), (127, 13), (128, 20), (132, 28)] {
+            let mut expected = [0.0; 4];
+            for (i, &weight) in weights.iter().enumerate() {
+                let sy =
+                    (y as i32 + i as i32 - support).clamp(0, source.height() as i32 - 1) as u32;
+                let horizontal = convolve_row(&source, &weights, support, x, sy);
+                for channel in 0..4 {
+                    expected[channel] += horizontal[channel] * weight;
+                }
+            }
+            assert_eq!(*actual.get_pixel(x, y), unpremultiply(expected));
+        }
     }
 
     #[test]

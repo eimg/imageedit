@@ -24,6 +24,8 @@ pub(super) enum AdjustKind {
 }
 
 pub(super) struct AdjustmentSession {
+    tab: usize,
+    generation: u64,
     layer: LayerId,
     source: Arc<RgbaImage>,
     offset: (i32, i32),
@@ -35,6 +37,16 @@ pub(super) struct AdjustmentSession {
 
 impl Workspace {
     pub(super) fn bind_adjustment_actions(&self, root: Div, cx: &Context<Self>) -> Div {
+        if self.active_tab().is_none_or(|tab| {
+            tab.busy()
+                || tab
+                    .document
+                    .content
+                    .layer(tab.active_layer)
+                    .is_none_or(|layer| !layer.visible)
+        }) {
+            return root;
+        }
         root.on_action(cx.listener(|this, _: &BrightnessContrast, window, cx| {
             this.adjustment_form(AdjustKind::BrightnessContrast, window, cx);
         }))
@@ -73,6 +85,8 @@ impl Workspace {
             return false;
         }
         self.adjustment = Some(AdjustmentSession {
+            tab: tab.id,
+            generation: tab.history.generation(),
             layer: layer.id,
             source: layer.pixels.clone(),
             offset: layer.offset,
@@ -149,6 +163,14 @@ impl Workspace {
         let Some(session) = self.adjustment.as_ref() else {
             return;
         };
+        if self.active_tab().is_none_or(|tab| {
+            tab.id != session.tab || tab.history.generation() != session.generation || tab.busy()
+        }) {
+            self.clear_adjustment(window, cx);
+            self.notice("The image changed while the dialog was open.", cx);
+            return;
+        }
+        let selection = session.selection.clone();
         let layer = session.layer;
         let adjustment = session.adjustment;
         self.clear_adjustment(window, cx);
@@ -156,7 +178,7 @@ impl Workspace {
             return;
         }
         self.edit_content(
-            move |content, _, selection| content.apply_adjustment(layer, adjustment, selection),
+            move |content, _, _| content.apply_adjustment(layer, adjustment, &selection),
             window,
             cx,
         );

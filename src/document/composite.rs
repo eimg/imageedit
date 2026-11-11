@@ -53,7 +53,7 @@ pub(super) fn flatten_with<'a>(
     canvas
 }
 
-fn source_over(destination: Rgba<u8>, source: Rgba<u8>, opacity: u8) -> Rgba<u8> {
+pub(crate) fn source_over(destination: Rgba<u8>, source: Rgba<u8>, opacity: u8) -> Rgba<u8> {
     let source_alpha = u64::from(source[3]) * u64::from(opacity);
     if source_alpha == 0 {
         return destination;

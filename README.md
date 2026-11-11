@@ -115,8 +115,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   **Filters** opens Blur, Sharpen, or Drop Shadow for the active layer. The
   dialog shows a reduced preview. Return applies the change and Escape cancels
   it. Blur and Sharpen follow the selection. Drop Shadow adds a layer
-  underneath, offset from the source and colored with the foreground color. A
-  radius or amount of zero does not change the image. Undo restores the
+  underneath, offset from the source and colored with the foreground color.
+  Zero blur radius gives a sharp shadow. Blur and Sharpen use zero radius to
+  preserve the source pixels. Undo restores the
   previous pixels, and undoing a shadow removes its layer.
   **Canvas Size** grows or shrinks the canvas from one of nine anchors and
   keeps pixels that fall outside it. **Image → Mode** can make the document

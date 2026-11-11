@@ -535,8 +535,9 @@ impl DocumentContent {
             return None;
         }
         let color = self.mode.constrain(color);
-        let sampled =
-            (request.sample_all && request.mode == FillMode::Connected).then(|| self.composite());
+        let connected = (request.sample_all && request.mode == FillMode::Connected).then(|| {
+            Selection::flood_within(&self.composite(), x, y, request.tolerance, selection)
+        });
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
         let origin_x = i64::from(layer.offset.0);
         let origin_y = i64::from(layer.offset.1);
@@ -552,37 +553,35 @@ impl DocumentContent {
         let painted = match request.mode {
             FillMode::Selection => paint_covered(&pixels, color, coverage)?,
             FillMode::Connected => {
-                let local_x = i64::from(x) - origin_x;
-                let local_y = i64::from(y) - origin_y;
-                if !(0..i64::from(pixels.width())).contains(&local_x)
-                    || !(0..i64::from(pixels.height())).contains(&local_y)
-                {
-                    return None;
-                }
-                let local_x = local_x as u32;
-                let local_y = local_y as u32;
-                let target = sampled.as_ref().map_or_else(
-                    || *pixels.get_pixel(local_x, local_y),
-                    |image| *image.get_pixel(x, y),
-                );
-                if !request.sample_all && request.tolerance == 0 && target == color {
-                    return None;
-                }
-                let included = |px: u32, py: u32| {
-                    let Some(sample) = (|| {
-                        let Some(image) = sampled.as_ref() else {
-                            return Some(*pixels.get_pixel(px, py));
-                        };
+                if let Some(connected) = &connected {
+                    paint_covered(&pixels, color, |px, py| {
                         let cx = origin_x + i64::from(px);
                         let cy = origin_y + i64::from(py);
-                        (cx >= 0 && cy >= 0 && cx < i64::from(canvas.0) && cy < i64::from(canvas.1))
-                            .then(|| *image.get_pixel(cx as u32, cy as u32))
-                    })() else {
-                        return false;
+                        if connected.covers(cx, cy, canvas.0, canvas.1) {
+                            coverage(px, py)
+                        } else {
+                            0
+                        }
+                    })?
+                } else {
+                    let local_x = i64::from(x) - origin_x;
+                    let local_y = i64::from(y) - origin_y;
+                    if !(0..i64::from(pixels.width())).contains(&local_x)
+                        || !(0..i64::from(pixels.height())).contains(&local_y)
+                    {
+                        return None;
+                    }
+                    let local_x = local_x as u32;
+                    let local_y = local_y as u32;
+                    let target = *pixels.get_pixel(local_x, local_y);
+                    if request.tolerance == 0 && target == color {
+                        return None;
+                    }
+                    let included = |px, py| {
+                        within_tolerance(*pixels.get_pixel(px, py), target, request.tolerance)
                     };
-                    within_tolerance(sample, target, request.tolerance)
-                };
-                bucket_fill(&pixels, local_x, local_y, color, coverage, included)?
+                    bucket_fill(&pixels, local_x, local_y, color, coverage, included)?
+                }
             }
         };
         let (pixels, left, top, right, bottom) = painted;
@@ -667,6 +666,9 @@ impl DocumentContent {
         spec: crate::filters::FilterSpec,
         selection: &Selection,
     ) -> Dirty {
+        if selection == &Selection::Empty {
+            return Dirty::None;
+        }
         let (radius, filtered) = match spec {
             crate::filters::FilterSpec::Blur { radius } => (radius, None),
             crate::filters::FilterSpec::Sharpen { radius, amount } => {
@@ -735,21 +737,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Err(crate::filters::FilterStop::Unchanged);
         };
-        let source_offset = self.layers[index].offset;
-        let Some((width, height)) = crate::filters::shadow_dimensions(
-            self.layers[index].pixels.width(),
-            self.layers[index].pixels.height(),
-            radius,
-        ) else {
-            return Err(crate::filters::FilterStop::TooLarge);
-        };
-        let bytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
+        let rect = self
+            .drop_shadow_bounds(id, radius, offset)
             .ok_or(crate::filters::FilterStop::TooLarge)?;
-        if !self.can_add_layer() || !self.fits_stack(0, bytes) {
-            return Err(crate::filters::FilterStop::TooLarge);
-        }
         let color = self.mode.constrain(color);
         let Some(shadow) =
             crate::filters::render_shadow(&self.layers[index].pixels, radius, opacity, color)
@@ -757,10 +747,7 @@ impl DocumentContent {
             return Err(crate::filters::FilterStop::Unchanged);
         };
         let pixels = self.mode.constrain_image(shadow.pixels);
-        let layer_offset = (
-            source_offset.0 - shadow.pad + offset.0,
-            source_offset.1 - shadow.pad + offset.1,
-        );
+        let layer_offset = (rect.x as i32, rect.y as i32);
         let Some(shadow_id) = self.next_layer_id() else {
             return Err(crate::filters::FilterStop::TooLarge);
         };
@@ -785,22 +772,31 @@ impl DocumentContent {
         Ok(rect)
     }
 
-    pub fn drop_shadow_fits(&self, id: LayerId, radius: u32) -> bool {
-        let Some(layer) = self.layer(id) else {
-            return false;
-        };
-        let Some((width, height)) =
-            crate::filters::shadow_dimensions(layer.pixels.width(), layer.pixels.height(), radius)
-        else {
-            return false;
-        };
-        let Some(bytes) = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
-        else {
-            return false;
-        };
-        self.can_add_layer() && self.fits_stack(0, bytes)
+    pub fn drop_shadow_fits(&self, id: LayerId, radius: u32, offset: (i32, i32)) -> bool {
+        self.drop_shadow_bounds(id, radius, offset).is_some()
+    }
+
+    fn drop_shadow_bounds(
+        &self,
+        id: LayerId,
+        radius: u32,
+        offset: (i32, i32),
+    ) -> Option<PixelRect> {
+        let layer = self.layer(id)?;
+        let (width, height) =
+            crate::filters::shadow_dimensions(layer.pixels.width(), layer.pixels.height(), radius)?;
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))?
+            .checked_mul(4)?;
+        if !self.can_add_layer() || !self.fits_stack(0, bytes) {
+            return None;
+        }
+        let pad = i64::from(crate::filters::kernel_support(radius));
+        let x = i64::from(layer.offset.0) - pad + i64::from(offset.0);
+        let y = i64::from(layer.offset.1) - pad + i64::from(offset.1);
+        i32::try_from(x).ok()?;
+        i32::try_from(y).ok()?;
+        Some(PixelRect::new(x, y, width, height))
     }
 
     pub fn composite_stroke_tile(
@@ -1407,6 +1403,31 @@ fn paint_covered(
     }
     let (min_x, min_y, max_x, max_y) = bounds?;
     Some((image?, min_x, min_y, max_x, max_y))
+}
+
+pub(crate) fn gradient_preview(
+    source: &RgbaImage,
+    offset: (i32, i32),
+    gradient: crate::paint::Gradient,
+    selection: &Selection,
+    canvas: (u32, u32),
+    max_edge: u32,
+) -> RgbaImage {
+    let (width, height) = source.dimensions();
+    let (preview_width, preview_height) = crate::adjustments::preview_size(width, height, max_edge);
+    RgbaImage::from_fn(preview_width, preview_height, |x, y| {
+        let sx = ((u64::from(x) * u64::from(width)) / u64::from(preview_width)) as u32;
+        let sy = ((u64::from(y) * u64::from(height)) / u64::from(preview_height)) as u32;
+        let cx = i64::from(offset.0) + i64::from(sx);
+        let cy = i64::from(offset.1) + i64::from(sy);
+        let before = *source.get_pixel(sx, sy);
+        let amount = selection.coverage(cx, cy, canvas.0, canvas.1);
+        if amount == 0 {
+            return before;
+        }
+        let color = crate::paint::gradient_color(&gradient, cx as f64 + 0.5, cy as f64 + 0.5);
+        mix_fill(before, color, amount)
+    })
 }
 
 pub(crate) fn render_gradient(
@@ -2167,6 +2188,75 @@ mod tests {
         let painted = content.layers[0].pixels.get_pixel(1, 0).0;
         assert!(painted[3] > 0 && painted[3] < 255);
         assert_eq!(content.layers[0].pixels.get_pixel(3, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sample_all_connects_through_canvas_pixels_outside_the_active_layer() {
+        let red = Rgba([255, 0, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut content =
+            DocumentContent::single_layer("Base".into(), RgbaImage::from_pixel(3, 3, red));
+        let active = content.add_layer(LayerId(0), "Strip".into(), red).unwrap();
+        content.layers[1].pixels =
+            Arc::new(RgbaImage::from_fn(
+                3,
+                1,
+                |x, _| {
+                    if x == 1 { blue } else { red }
+                },
+            ));
+        let original = content.clone();
+        let base = content.layers[0].pixels.clone();
+        let request = FillRequest {
+            mode: FillMode::Connected,
+            sample_all: true,
+            tolerance: 0,
+        };
+        content
+            .fill_bucket(active, 0, 2, blue, &Selection::Unrestricted, request)
+            .unwrap();
+        assert_eq!(*content.layers[1].pixels.get_pixel(2, 0), blue);
+        assert!(Arc::ptr_eq(&base, &content.layers[0].pixels));
+        let mut content = original;
+        let selection = Selection::Rect(PixelRect::new(0, 0, 3, 1));
+        content
+            .fill_bucket(active, 0, 0, blue, &selection, request)
+            .unwrap();
+        assert_eq!(*content.layers[1].pixels.get_pixel(2, 0), red);
+    }
+
+    #[test]
+    fn shadow_offsets_are_checked_and_clear_sources_create_no_layer() {
+        let mut content = DocumentContent::single_layer("Clear".into(), RgbaImage::new(2, 2));
+        let id = content.top_layer_id();
+        let spec = crate::filters::FilterSpec::Shadow {
+            radius: 1,
+            offset: (20, 0),
+            opacity: 75,
+            color: Rgba([0, 0, 0, 255]),
+        };
+        assert!(content.place_drop_shadow(id, spec).is_err());
+        assert_eq!(content.layers.len(), 1);
+        content.layers[0].offset = (i32::MAX, 0);
+        assert!(!content.drop_shadow_fits(id, 1, (20, 0)));
+        assert!(content.place_drop_shadow(id, spec).is_err());
+        assert_eq!(content.layers.len(), 1);
+    }
+
+    #[test]
+    fn gradient_previews_are_bounded_and_match_full_resolution_sample_positions() {
+        let source = RgbaImage::from_pixel(1024, 4, Rgba([20, 30, 40, 255]));
+        let mut gradient = red_blue_gradient(crate::paint::GradientShape::Linear);
+        gradient.end = (1023.5, 0.5);
+        let selection = Selection::Rect(PixelRect::new(256, 0, 256, 4));
+        let preview = gradient_preview(&source, (0, 0), gradient, &selection, (1024, 4), 64);
+        let rendered = render_gradient(&source, (0, 0), gradient, &selection, (1024, 4))
+            .unwrap()
+            .0;
+        assert_eq!(preview.dimensions(), (64, 1));
+        for x in 0..64 {
+            assert_eq!(preview.get_pixel(x, 0), rendered.get_pixel(x * 16, 0));
+        }
     }
 
     #[test]

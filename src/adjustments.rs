@@ -817,13 +817,19 @@ fn transfer(value: f64, lightness: f64, amount: [f64; 3]) -> f64 {
 }
 
 fn preserve_luminosity(original: [f64; 3], adjusted: [f64; 3]) -> [f64; 3] {
-    let luma = |color: [f64; 3]| color[0] * 77.0 + color[1] * 150.0 + color[2] * 29.0;
+    let luma = |color: [f64; 3]| (color[0] * 77.0 + color[1] * 150.0 + color[2] * 29.0) / 256.0;
+    let target = luma(original);
     let after = luma(adjusted);
     if after <= 1e-8 {
-        return adjusted;
+        return [target; 3];
     }
-    let scale = luma(original) / after;
-    adjusted.map(|channel| (channel * scale).clamp(0.0, 1.0))
+    let mut color = adjusted.map(|channel| channel * target / after);
+    let high = color.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    if high > 1.0 {
+        // Compress around the target luminance instead of clipping individual channels.
+        color = color.map(|channel| target + (channel - target) * (1.0 - target) / (high - target));
+    }
+    color
 }
 
 fn brightness_contrast(channel: u8, brightness: i16, contrast: i16) -> u8 {
@@ -1151,6 +1157,18 @@ mod tests {
         assert_eq!(LevelStops::IDENTITY.set_input_white(0).input_white, 1);
         assert_eq!(LevelStops::IDENTITY.set_gamma(1).gamma, GAMMA_MIN);
         assert_eq!(LevelStops::IDENTITY.set_gamma(5000).gamma, GAMMA_MAX);
+    }
+
+    #[test]
+    fn preserved_luminosity_survives_a_channel_clipping_at_white() {
+        let before = Rgba([250, 250, 250, 99]);
+        let balance = ColorBalance::default().set_shift(BalanceRange::Highlights, 0, -100);
+        let after = adjust_pixel(before, Adjustment::ColorBalance(balance));
+        let luminance = |p: Rgba<u8>| {
+            (f64::from(p[0]) * 77.0 + f64::from(p[1]) * 150.0 + f64::from(p[2]) * 29.0) / 256.0
+        };
+        assert!((luminance(before) - luminance(after)).abs() <= 1.0);
+        assert_eq!(after[3], before[3]);
     }
 
     #[test]

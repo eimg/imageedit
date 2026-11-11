@@ -259,7 +259,20 @@ impl Selection {
         offset: (i32, i32),
         canvas: (u32, u32),
     ) -> Self {
-        flood_selection(image, x, y, tolerance, offset, canvas)
+        flood_selection(image, x, y, tolerance, offset, canvas, |_, _| true)
+    }
+
+    pub fn flood_within(
+        image: &RgbaImage,
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        selection: &Selection,
+    ) -> Self {
+        let canvas = image.dimensions();
+        flood_selection(image, x, y, tolerance, (0, 0), canvas, |px, py| {
+            selection.covers(i64::from(px), i64::from(py), canvas.0, canvas.1)
+        })
     }
 
     pub fn grow(self, radius: u32, width: u32, height: u32) -> Self {
@@ -676,6 +689,7 @@ fn flood_selection(
     tolerance: u8,
     offset: (i32, i32),
     canvas: (u32, u32),
+    included: impl Fn(u32, u32) -> bool,
 ) -> Selection {
     if x >= image.width() || y >= image.height() {
         return Selection::Empty;
@@ -696,7 +710,7 @@ fn flood_selection(
     let mut stack = vec![(x, y)];
     seen[(y * width + x) as usize] = true;
     while let Some((px, py)) = stack.pop() {
-        if !within_tolerance(*image.get_pixel(px, py), target, tolerance) {
+        if !included(px, py) || !within_tolerance(*image.get_pixel(px, py), target, tolerance) {
             continue;
         }
         if (local_x..local_x + bounds.width).contains(&px)

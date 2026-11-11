@@ -2,7 +2,16 @@
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document specifies the proposed behavior and acceptance criteria for future work.
 
-## Latest handoff · P18
+## P15–P18 follow-up
+
+Reviewed the four passes from the P18 checkout (`4f6651d`).
+
+- Gradient previews render a bounded image and discard superseded results. Handles retain their grab offset, and overlapping handles let a zero-length gradient extend. Sample All Layers follows composite connectivity across the canvas while selection edges still block the region. Writes stay on the active layer.
+- Adjustment and filter dialogs capture their document identity and selection. Switching documents or starting another edit dismisses an effect draft. Curves keeps the point's grab offset, applies the release position, and clears a drag when changing channels. Color Balance preserves luminosity when its channel values reach the gamut limit.
+- Gaussian Blur uses a bounded row buffer instead of a full-image floating-point allocation. Feathered filter edges blend premultiplied color. Shadow offsets use checked arithmetic, clear sources create no shadow layer, and large offsets keep the dialog preview bounded. An invalid shadow keeps the dialog open with an error.
+- Formatting, Clippy, and 143 locked tests passed. The macOS bundle passed strict signature verification. Native dialog, slider, and gradient gesture checks remain for the interactive pass.
+
+## Feature handoff · P18
 
 P18 adds Blur, Sharpen, and Drop Shadow on branch `p18-filters`, which starts from P17.
 

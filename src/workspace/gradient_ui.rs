@@ -33,7 +33,7 @@ impl GradientSession {
 
 enum GradientDrag {
     New,
-    Handle(usize),
+    Handle { index: usize, grab: (f64, f64) },
 }
 
 struct PreparedGradient {
@@ -72,7 +72,15 @@ impl Workspace {
         };
         if let Some(index) = self.gradient_handle_at(position, scale) {
             if let Some(session) = self.gradient.as_mut() {
-                session.drag = Some(GradientDrag::Handle(index));
+                let anchor = if index == 0 {
+                    session.start
+                } else {
+                    session.end
+                };
+                session.drag = Some(GradientDrag::Handle {
+                    index,
+                    grab: (anchor.0 - point.0, anchor.1 - point.1),
+                });
             }
             cx.notify();
             return;
@@ -120,11 +128,17 @@ impl Workspace {
         let mut changed = false;
         if let Some(session) = self.gradient.as_mut() {
             match session.drag {
-                Some(GradientDrag::Handle(0)) => {
-                    changed = session.start != point;
-                    session.start = point;
+                Some(GradientDrag::Handle { index, grab }) => {
+                    let point = (point.0 + grab.0, point.1 + grab.1);
+                    let anchor = if index == 0 {
+                        &mut session.start
+                    } else {
+                        &mut session.end
+                    };
+                    changed = *anchor != point;
+                    *anchor = point;
                 }
-                Some(GradientDrag::New | GradientDrag::Handle(_)) => {
+                Some(GradientDrag::New) => {
                     changed = session.end != point;
                     session.end = point;
                 }
@@ -275,6 +289,7 @@ impl Workspace {
         if self.gradient.is_none() {
             return;
         }
+        self.gradient_token = self.gradient_token.wrapping_add(1);
         self.gradient_dirty = true;
         self.pump_gradient_preview(window, cx);
         cx.notify();
@@ -289,7 +304,6 @@ impl Workspace {
         };
         self.gradient_dirty = false;
         self.gradient_busy = true;
-        self.gradient_token = self.gradient_token.wrapping_add(1);
         let token = self.gradient_token;
         let job = cx
             .background_executor()
@@ -359,16 +373,27 @@ impl Workspace {
         if width <= 0.0 || height <= 0.0 {
             return None;
         }
-        [frame.start, frame.end].into_iter().position(|grip| {
-            let projected = geometry.project(gpui::point(
+        let project = |grip: (f64, f64)| {
+            geometry.project(gpui::point(
                 (grip.0 / width) as f32,
                 (grip.1 / height) as f32,
-            ));
-            let dx = f32::from(projected.x - position.x);
-            let dy = f32::from(projected.y - position.y);
-            dx * dx + dy * dy <= 64.0
-        })
+            ))
+        };
+        nearest_gradient_handle([project(frame.start), project(frame.end)], position)
     }
+}
+
+fn nearest_gradient_handle(grips: [Point<Pixels>; 2], position: Point<Pixels>) -> Option<usize> {
+    grips
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, grip)| {
+            let delta = grip - position;
+            let distance = f32::from(delta.x).powi(2) + f32::from(delta.y).powi(2);
+            (distance <= 64.0).then_some((index, distance))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(index, _)| index)
 }
 
 fn constrain(mut gradient: Gradient, mode: ColorMode) -> Gradient {
@@ -390,9 +415,14 @@ fn preview_gradient(prepared: PreparedGradient) -> GradientPreview {
         mode,
     } = prepared;
     let gradient = constrain(gradient, mode);
-    let rendered = document::render_gradient(&source, offset, gradient, &selection, canvas)
-        .map(|(pixels, _, _, _, _)| pixels)
-        .unwrap_or_else(|| (*source).clone());
+    let rendered = document::gradient_preview(
+        &source,
+        offset,
+        gradient,
+        &selection,
+        canvas,
+        crate::adjustments::PREVIEW_EDGE,
+    );
     let shown = with_layer_opacity(&rendered, opacity);
     let (below, above) = base
         .as_ref()
@@ -421,4 +451,18 @@ fn drop_gradient_preview(
         window,
         cx,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_gradient_handles_can_extend_a_zero_length_gradient() {
+        let start = gpui::point(gpui::px(10.), gpui::px(10.));
+        assert_eq!(nearest_gradient_handle([start, start], start), Some(1));
+        let end = gpui::point(gpui::px(20.), gpui::px(10.));
+        assert_eq!(nearest_gradient_handle([start, end], start), Some(0));
+        assert_eq!(nearest_gradient_handle([start, end], end), Some(1));
+    }
 }

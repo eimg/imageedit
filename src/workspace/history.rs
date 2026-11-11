@@ -930,6 +930,10 @@ mod tests {
         );
 
         let mut clean = Session::new(true, 2);
+        clean.current.content = DocumentContent::single_layer(
+            "Source".into(),
+            image::RgbaImage::from_pixel(2, 2, Rgba([100, 100, 100, 255])),
+        );
         let source = clean.current.active_layer;
         clean.edit(
             |content| {

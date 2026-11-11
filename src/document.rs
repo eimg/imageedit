@@ -20,7 +20,8 @@ use tempfile::NamedTempFile;
 use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
-pub(crate) use content::render_gradient;
+pub(crate) use composite::source_over;
+pub(crate) use content::gradient_preview;
 pub use content::{
     BlendMode, CropRect, DocumentContent, FillMode, FillRequest, IMPORTED_LAYER_NAME, ImageLayer,
     InsertStop, LayerGeometry, LayerId, MAX_LAYER_NAME_CHARS, MAX_LAYERS, MAX_STACK_BYTES,

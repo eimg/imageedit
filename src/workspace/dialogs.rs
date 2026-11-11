@@ -26,7 +26,7 @@ use super::selection::MaskEdit;
 pub(super) struct Form {
     focus: FocusHandle,
     kind: FormKind,
-    error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 enum FormKind {
@@ -87,7 +87,7 @@ enum FormKind {
         map_channel: MapChannel,
         levels: Levels,
         curves: Curves,
-        curve_drag: Option<u8>,
+        curve_drag: Option<(u8, (i16, i16))>,
     },
     Filter {
         kind: FilterKind,
@@ -463,6 +463,17 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn dismiss_effect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.as_ref().is_some_and(|form| {
+            matches!(
+                form.kind,
+                FormKind::Adjustment { .. } | FormKind::Filter { .. }
+            )
+        }) {
+            self.dismiss_form(window, cx);
+        }
+    }
+
     pub(super) fn adjustment_form(
         &mut self,
         operation: AdjustKind,
@@ -752,8 +763,9 @@ impl Workspace {
                 self.dismiss_form(window, cx);
             }
             FormKind::Filter { .. } => {
-                self.apply_filter(window, cx);
-                self.dismiss_form(window, cx);
+                if self.apply_filter(window, cx) {
+                    self.dismiss_form(window, cx);
+                }
             }
         }
     }
@@ -1122,11 +1134,17 @@ impl Workspace {
 
     fn set_map_channel(&mut self, channel: MapChannel, cx: &mut Context<Self>) {
         if let Some(Form {
-            kind: FormKind::Adjustment { map_channel, .. },
+            kind:
+                FormKind::Adjustment {
+                    map_channel,
+                    curve_drag,
+                    ..
+                },
             ..
         }) = &mut self.form
         {
             *map_channel = channel;
+            *curve_drag = None;
         }
         cx.notify();
     }
@@ -1158,7 +1176,12 @@ impl Workspace {
             if button == MouseButton::Right {
                 self.store_curve(channel, curve.remove_point(index), None, window, cx);
             } else {
-                self.store_curve(channel, curve, Some(index as u8), window, cx);
+                let at = curve.points()[index];
+                let grab = (
+                    i16::from(at.0) - i16::from(x),
+                    i16::from(at.1) - i16::from(y),
+                );
+                self.store_curve(channel, curve, Some((index as u8, grab)), window, cx);
             }
             return;
         }
@@ -1173,7 +1196,7 @@ impl Workspace {
             .iter()
             .position(|point| point.0 == x)
             .unwrap_or(0);
-        self.store_curve(channel, curve, Some(index as u8), window, cx);
+        self.store_curve(channel, curve, Some((index as u8, (0, 0))), window, cx);
     }
 
     fn drag_curve_point(
@@ -1188,7 +1211,7 @@ impl Workspace {
                 FormKind::Adjustment {
                     map_channel,
                     curves,
-                    curve_drag: Some(index),
+                    curve_drag: Some((index, grab)),
                     ..
                 },
             ..
@@ -1198,9 +1221,12 @@ impl Workspace {
         };
         let channel = *map_channel;
         let index = usize::from(*index);
+        let grab = *grab;
         let (x, y) = curve_coords(bounds, position);
+        let x = (i16::from(x) + grab.0).clamp(0, 255) as u8;
+        let y = (i16::from(y) + grab.1).clamp(0, 255) as u8;
         let curve = curves.curve(channel).move_point(index, x, y);
-        self.store_curve(channel, curve, Some(index as u8), window, cx);
+        self.store_curve(channel, curve, Some((index as u8, grab)), window, cx);
     }
 
     fn end_curve_drag(&mut self, cx: &mut Context<Self>) {
@@ -1218,7 +1244,7 @@ impl Workspace {
         &mut self,
         channel: MapChannel,
         curve: Curve,
-        drag: Option<u8>,
+        drag: Option<(u8, (i16, i16))>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2322,7 +2348,14 @@ fn curve_plot(
 ) -> impl IntoElement {
     let bins = histogram.map(|histogram| histogram.bins(channel));
     let bounds = Rc::new(Cell::new(Bounds::default()));
-    let (layout, down, right, moved) = (bounds.clone(), bounds.clone(), bounds.clone(), bounds);
+    let (layout, down, right, moved, released, released_out) = (
+        bounds.clone(),
+        bounds.clone(),
+        bounds.clone(),
+        bounds.clone(),
+        bounds.clone(),
+        bounds,
+    );
     div()
         .id("curve")
         .h(px(180.))
@@ -2343,18 +2376,24 @@ fn curve_plot(
         )
         .on_mouse_move(
             cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
-                if event.dragging() {
+                if event.pressed_button == Some(MouseButton::Left) {
                     this.drag_curve_point(moved.get(), event.position, window, cx);
                 }
             }),
         )
         .on_mouse_up(
             MouseButton::Left,
-            cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_curve_drag(cx)),
+            cx.listener(move |this, event: &MouseUpEvent, window, cx| {
+                this.drag_curve_point(released.get(), event.position, window, cx);
+                this.end_curve_drag(cx);
+            }),
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_curve_drag(cx)),
+            cx.listener(move |this, event: &MouseUpEvent, window, cx| {
+                this.drag_curve_point(released_out.get(), event.position, window, cx);
+                this.end_curve_drag(cx);
+            }),
         )
         .child(
             canvas(

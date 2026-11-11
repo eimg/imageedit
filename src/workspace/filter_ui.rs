@@ -20,6 +20,8 @@ pub(super) enum FilterKind {
 }
 
 pub(super) struct FilterSession {
+    tab: usize,
+    generation: u64,
     layer: LayerId,
     source: Arc<RgbaImage>,
     offset: (i32, i32),
@@ -31,6 +33,16 @@ pub(super) struct FilterSession {
 
 impl Workspace {
     pub(super) fn bind_filter_actions(&self, root: Div, cx: &Context<Self>) -> Div {
+        if self.active_tab().is_none_or(|tab| {
+            tab.busy()
+                || tab
+                    .document
+                    .content
+                    .layer(tab.active_layer)
+                    .is_none_or(|layer| !layer.visible)
+        }) {
+            return root;
+        }
         root.on_action(cx.listener(|this, _: &GaussianBlur, window, cx| {
             this.filter_form(FilterKind::Blur, window, cx);
         }))
@@ -62,6 +74,8 @@ impl Workspace {
             return false;
         }
         self.filter = Some(FilterSession {
+            tab: tab.id,
+            generation: tab.history.generation(),
             layer: layer.id,
             source: layer.pixels.clone(),
             offset: layer.offset,
@@ -94,38 +108,55 @@ impl Workspace {
         self.pump_filter_preview(window, cx);
     }
 
-    pub(super) fn apply_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn apply_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(session) = self.filter.as_ref() else {
-            return;
+            return true;
         };
+        if self.active_tab().is_none_or(|tab| {
+            tab.id != session.tab || tab.history.generation() != session.generation || tab.busy()
+        }) {
+            self.clear_filter(window, cx);
+            self.notice("The image changed while the dialog was open.", cx);
+            return true;
+        }
+        let selection = session.selection.clone();
         let layer = session.layer;
         let spec = session.spec;
         if let FilterSpec::Shadow {
-            radius, opacity, ..
+            radius,
+            opacity,
+            offset,
+            ..
         } = spec
             && opacity != 0
             && !self
                 .active_tab()
-                .is_some_and(|tab| tab.document.content.drop_shadow_fits(layer, radius))
+                .is_some_and(|tab| tab.document.content.drop_shadow_fits(layer, radius, offset))
         {
-            self.clear_filter(window, cx);
-            self.notice("The drop shadow does not fit in the layer stack.", cx);
-            return;
+            if let Some(form) = self.form.as_mut() {
+                form.error = Some(
+                    "The drop shadow does not fit in the layer stack or its offset is too large."
+                        .into(),
+                );
+            }
+            cx.notify();
+            return false;
         }
         self.clear_filter(window, cx);
         if spec.is_identity() {
-            return;
+            return true;
         }
         self.edit_content(
-            move |content, _, selection| match spec {
+            move |content, _, _| match spec {
                 FilterSpec::Shadow { .. } => content
                     .place_drop_shadow(layer, spec)
                     .map_or(Dirty::None, Dirty::Region),
-                _ => content.apply_filter(layer, spec, selection),
+                _ => content.apply_filter(layer, spec, &selection),
             },
             window,
             cx,
         );
+        true
     }
 
     pub(super) fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {

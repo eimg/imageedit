@@ -347,6 +347,7 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
         if switched {
+            self.dismiss_effect_form(window, cx);
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
@@ -378,6 +379,7 @@ impl Workspace {
         self.pan_drag = None;
         let closed_active = self.active == Some(index);
         if closed_active {
+            self.dismiss_effect_form(window, cx);
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);
@@ -458,6 +460,7 @@ impl Workspace {
         if self.tabs[index].busy() {
             return;
         }
+        self.dismiss_effect_form(window, cx);
         self.cancel_warp(window, cx);
         self.cancel_stroke(window, cx);
         self.cancel_gradient(window, cx);

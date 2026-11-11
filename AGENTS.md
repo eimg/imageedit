@@ -68,7 +68,8 @@ document is a single plain layer.
   `src/workspace/adjust_ui.rs` shows the reduced preview for the latest slider
   position. Apply writes the active layer in the background.
 - `src/filters.rs` blurs and sharpens the active layer and builds a drop shadow
-  from its alpha. `src/workspace/filter_ui.rs` shows the reduced preview for
+  from its alpha. Blur uses a bounded row buffer, and soft selection edges blend
+  premultiplied color. `src/workspace/filter_ui.rs` shows the reduced preview for
   the latest slider position. Apply writes the layer, or inserts the shadow
   beneath it, in the background.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
