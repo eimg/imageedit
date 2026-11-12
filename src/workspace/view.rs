@@ -13,13 +13,14 @@ use gpui::{
 };
 
 use crate::commands::{
-    AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, CancelCrop,
-    CancelFreeSelect, CancelGradient, CancelMove, CancelPath, CancelStroke, CancelTransform,
-    CloseFreeSelect, ClosePath, CloseTab, CommitStroke, DeletePathAnchor, ExportJpeg, ExportPng,
-    ExportWebp, FeatherSelection, ForegroundColor, GrowSelection, InvertSelection, MinimizeWindow,
-    NEW_HINT, NewImage, NextTab, OPEN_HINT, OpenImage, PreviousTab, Redo, ResetColors, SaveImage,
-    SaveImageAs, SaveProjectAs, SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS,
-    ToggleGrid, ToggleGuides, ToggleLayerBoundary, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, BrushSizeDown,
+    BrushSizeUp, CancelCrop, CancelFreeSelect, CancelGradient, CancelMove, CancelPath,
+    CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, CommitStroke,
+    DeletePathAnchor, ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor,
+    GrowSelection, InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT,
+    OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone,
+    SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
+    ToggleLayerBoundary, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -289,6 +290,29 @@ impl Render for Workspace {
                     this.step_history(Change::Redo, window, cx)
                 }))
             })
+            .when(
+                interactive
+                    && matches!(
+                        self.tool,
+                        Tool::Pencil
+                            | Tool::Brush
+                            | Tool::Eraser
+                            | Tool::Blur
+                            | Tool::Sharpen
+                            | Tool::CloneStamp
+                            | Tool::Stroke
+                    ),
+                |root| {
+                    root.on_action(cx.listener(|this, _: &BrushSizeDown, _, cx| {
+                        this.adjust_brush_size(-1, cx);
+                    }))
+                    .on_action(cx.listener(
+                        |this, _: &BrushSizeUp, _, cx| {
+                            this.adjust_brush_size(1, cx);
+                        },
+                    ))
+                },
+            )
             .when(interactive && active.is_some(), |root| {
                 root.on_action(cx.listener(|this, zoom: &Zoom, window, cx| {
                     if let Some(index) = this.active {
@@ -377,6 +401,7 @@ impl Workspace {
         let scale = f32::from(geometry.bounds.size.width) / canvas_width;
         let (diameter, hardness) = self.active_brush_settings();
         Some(BrushCursor {
+            tool: self.tool,
             diameter: diameter as f32 * scale,
             hardness,
             soft: self.tool != Tool::Pencil,
@@ -1222,6 +1247,12 @@ impl Workspace {
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
+                        },
+                    ))
+                    .on_modifiers_changed(cx.listener(
+                        |_this, _: &gpui::ModifiersChangedEvent, window, cx| {
+                            window.refresh();
+                            cx.notify();
                         },
                     ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
@@ -2115,6 +2146,7 @@ pub(super) fn icon(path: &'static str, edge: f32) -> Icon {
 
 #[derive(Clone, Copy)]
 struct BrushCursor {
+    tool: Tool,
     diameter: f32,
     hardness: u8,
     soft: bool,
@@ -2213,6 +2245,21 @@ fn paint_brush_cursor(window: &mut Window, center: Point<Pixels>, brush: BrushCu
             window.paint_path(path, color);
         }
     };
+    if brush.tool == Tool::CloneStamp && window.modifiers().alt {
+        ring(window, radius, 2., rgb(0x12151c), true);
+        ring(window, radius, 1., rgba(0xacc6ffff), true);
+        for (length, weight, color) in [(7., 2., rgb(0x12151c)), (5., 1., rgba(0xacc6ffff))] {
+            window.paint_quad(fill(
+                Bounds::centered_at(center, size(px(length), px(weight))),
+                color,
+            ));
+            window.paint_quad(fill(
+                Bounds::centered_at(center, size(px(weight), px(length))),
+                color,
+            ));
+        }
+        return;
+    }
     ring(window, radius, 2., rgb(0x12151c), false);
     ring(window, radius, 1., rgb(0xffffff), false);
     if brush.soft && brush.hardness < 100 {

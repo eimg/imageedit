@@ -71,6 +71,10 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn adjust_brush_size(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.nudge_brush(BrushField::Size, delta, cx);
+    }
+
     pub(super) fn set_clone_source(
         &mut self,
         position: Point<Pixels>,

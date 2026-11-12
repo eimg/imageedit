@@ -77,6 +77,8 @@ actions!(
         StrokePath,
         StrokeSelection,
         CommitStroke,
+        BrushSizeDown,
+        BrushSizeUp,
         ApplyText,
         CancelText,
         RasterizeText,
@@ -277,6 +279,8 @@ impl Tool {
             "shift-r" => "⇧R",
             "shift-f" => "⇧F",
             "shift-p" => "⇧P",
+            "shift-s" => "⇧S",
+            "shift-c" => "⇧C",
             "r" => "R",
             "o" => "O",
             "f" => "F",
@@ -295,19 +299,15 @@ impl Tool {
     pub fn shortcut(self) -> Option<&'static str> {
         Some(match self {
             Self::Move => "m",
-            Self::Pan
-            | Self::Pencil
-            | Self::Brush
-            | Self::Blur
-            | Self::Sharpen
-            | Self::CloneStamp
-            | Self::ScaleLayer => return None,
+            Self::Pan | Self::Pencil | Self::Brush | Self::Blur | Self::Sharpen => return None,
             Self::Zoom => "z",
             Self::Eyedropper => "k",
             Self::Crop => "c",
             Self::Rotate => "shift-r",
             Self::Flip => "shift-f",
             Self::Perspective => "shift-p",
+            Self::ScaleLayer => "shift-s",
+            Self::CloneStamp => "shift-c",
             Self::Select => "r",
             Self::OvalSelect => "o",
             Self::FreeSelect => "f",
@@ -448,6 +448,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("enter", ApplyTransform, Some("Transform")),
         KeyBinding::new("escape", CancelTransform, Some("Transform")),
         KeyBinding::new("enter", CommitStroke, Some("Stroke")),
+        KeyBinding::new("[", BrushSizeDown, None),
+        KeyBinding::new("]", BrushSizeUp, None),
         KeyBinding::new("escape", CancelPath, Some("Path")),
         KeyBinding::new("enter", ClosePath, Some("Path")),
         KeyBinding::new("backspace", DeletePathAnchor, Some("Path")),
@@ -502,6 +504,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("shift-r", NoAction, Some("Text")),
         KeyBinding::new("shift-f", NoAction, Some("Text")),
         KeyBinding::new("shift-p", NoAction, Some("Text")),
+        KeyBinding::new("shift-s", NoAction, Some("Text")),
+        KeyBinding::new("shift-c", NoAction, Some("Text")),
         KeyBinding::new("1", NoAction, Some("Text")),
         KeyBinding::new("+", NoAction, Some("Text")),
         KeyBinding::new("-", NoAction, Some("Text")),
@@ -824,12 +828,7 @@ mod tests {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), Some("␣"));
                 }
-                Tool::Pencil
-                | Tool::Brush
-                | Tool::Blur
-                | Tool::Sharpen
-                | Tool::CloneStamp
-                | Tool::ScaleLayer => {
+                Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen => {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), None);
                 }
@@ -840,6 +839,8 @@ mod tests {
                 Tool::Rotate => assert_eq!(tool.shortcut(), Some("shift-r")),
                 Tool::Flip => assert_eq!(tool.shortcut(), Some("shift-f")),
                 Tool::Perspective => assert_eq!(tool.shortcut(), Some("shift-p")),
+                Tool::ScaleLayer => assert_eq!(tool.shortcut(), Some("shift-s")),
+                Tool::CloneStamp => assert_eq!(tool.shortcut(), Some("shift-c")),
                 Tool::Select => assert_eq!(tool.shortcut(), Some("r")),
                 Tool::OvalSelect => assert_eq!(tool.shortcut(), Some("o")),
                 Tool::FreeSelect => assert_eq!(tool.shortcut(), Some("f")),
@@ -857,12 +858,7 @@ mod tests {
             match (tool.shortcut(), tool.shortcut_label()) {
                 (None, None) => assert!(matches!(
                     tool,
-                    Tool::Pencil
-                        | Tool::Brush
-                        | Tool::Blur
-                        | Tool::Sharpen
-                        | Tool::CloneStamp
-                        | Tool::ScaleLayer
+                    Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen
                 )),
                 (None, Some("␣")) => assert_eq!(tool, Tool::Pan),
                 (Some(shortcut), Some(label)) => {

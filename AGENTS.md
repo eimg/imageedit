@@ -38,12 +38,13 @@ commit on Apply, leaving the selection in canvas coordinates. Perspective
 corner grips keep a dark rim so they stay visible on a white image. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
 border or corner; release commits one undo step, and its Width/Height options
-are read-only for now. Clone Stamp sets its source with Alt-click and copies
-from that offset while painting. Pencil,
+are read-only for now, and the tool uses Shift+S. Clone Stamp uses Shift+C,
+sets its source with Alt-click, and copies from that offset while painting. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
-pixels under the brush. Blur, Sharpen, and Clone Stamp have no shortcut. Gradient fills the active layer between two colors, and
+pixels under the brush. Blur and Sharpen have no shortcut.
+The bracket keys adjust the brush size for the paint tools. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
 dialog and apply inside the selection. The layer's alpha stays in place. Cancel

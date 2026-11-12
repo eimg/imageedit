@@ -136,8 +136,10 @@ stroke a selection, since that is not a path. Update
 - Status: `done`
 - 2026-11-11: Blur, Sharpen, and Clone Stamp tools are implemented with the
   sized brush cursor and local stroke commits. Blur and Sharpen have no
-  keyboard shortcut; Clone Stamp sets its source with Alt-click and has no
-  shortcut either. Whole-layer Blur… and Sharpen… remain on Filters.
+  keyboard shortcut; Clone Stamp uses Shift+C and sets its source with
+  Alt-click. Whole-layer Blur… and Sharpen… remain on Filters. The
+  bracket keys resize every brush-based tool, and Alt changes the Clone Stamp
+  cursor.
 
 Add a clone stamp, a blur tool, and a sharpen tool. Blur… and Sharpen… stay
 on the Filters menu as whole-layer dialogs; these new tools paint locally on
@@ -296,7 +298,7 @@ border or corner to scale the layer, with a live preview, and commit one undo
 step on release. Tool-option Width and Height inputs are read-only for now.
 
 - Status: `done`
-- 2026-11-11: This extra task ran out of queue order. The Scale Layer tool has
-  border and corner handles, GPU-scaled live preview, read-only size options,
-  and a resampled commit on release. Formatting, Clippy, locked tests, and
+- 2026-11-11: This extra task ran out of queue order. The Scale Layer tool uses
+  Shift+S, has border and corner handles, GPU-scaled live preview, read-only
+  size options, and a resampled commit on release. Formatting, Clippy, locked tests, and
   `./scripts/bundle-macos.sh` passed.

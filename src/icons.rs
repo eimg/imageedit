@@ -58,9 +58,7 @@ impl AssetSource for Icons {
             "perspective" => {
                 r#"<path d="m5 7 13-3 2 16-14-2L5 7Z"/><circle cx="5" cy="7" r="1.4" fill="black"/><circle cx="18" cy="4" r="1.4" fill="black"/><circle cx="20" cy="20" r="1.4" fill="black"/><circle cx="6" cy="18" r="1.4" fill="black"/>"#
             }
-            "scale" => {
-                r#"<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 15 15 9m-6 0h6v6"/>"#
-            }
+            "scale" => r#"<path d="M4 20 20 4M13 4h7v7M11 20H4v-7"/>"#,
             "select" => {
                 r#"<rect x="4" y="5" width="16" height="14" rx="1" stroke-dasharray="2.5 2.5"/>"#
             }
@@ -84,9 +82,7 @@ impl AssetSource for Icons {
             "sharpen" => {
                 r#"<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/><path d="M12 8v8m-4-4h8" opacity=".55"/>"#
             }
-            "clone" => {
-                r#"<rect x="8" y="8" width="8" height="8" rx="1"/><path d="M12 8V5m-4 3V5m8 3V5M6 16v3h12v-3M3 12h3m12 0h3"/>"#
-            }
+            "clone" => r#"<path d="M9 3h6v3H9zM8 6h8l1 5H7l1-5ZM5 11h14v3H5zM4 14h16v5H4z"/>"#,
             "bucket" => {
                 r#"<path d="m4 11 8-8 7 7-8 8-7-7Zm0 0h14M7 2l6 6m7 6c-1 2-2 3-2 4a2 2 0 0 0 4 0c0-1-1-2-2-4Z"/>"#
             }

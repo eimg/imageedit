@@ -99,14 +99,16 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   or drag the perspective corners. Return applies the preview and Escape
   cancels it. Click the canvas to start another transform. The selection stays
   in place. Perspective requires a convex shape within the layer size limit.
-  The **Scale Layer** tool draws a frame around the active layer; drag a border
-  or corner to scale it, and release commits one undo step. Its Width and
-  Height options are read-only for now. **Pencil**, **Brush**, **Eraser**
-  (`E`), **Blur**, **Sharpen**, and **Clone Stamp** draw on the active layer.
-  Pencil starts at one pixel and uses a hard edge. Brush, Eraser, Blur,
-  Sharpen, and Clone Stamp also offer hardness and opacity. Blur, Sharpen, and
-  Clone Stamp have no keyboard shortcut. Alt-click with Clone Stamp to set its
-  source, then paint to copy pixels from that offset.
+  The **Scale Layer** tool (`Shift+S`) draws a frame around the active layer;
+  drag a border or corner to scale it, and release commits one undo step. Its
+  Width and Height options are read-only for now. **Pencil**, **Brush**,
+  **Eraser** (`E`), **Blur**, **Sharpen**, and **Clone Stamp** (`Shift+C`)
+  draw on the active layer. Pencil starts at one pixel and uses a hard edge.
+  Brush, Eraser, Blur, Sharpen, and Clone Stamp also offer hardness and
+  opacity. Blur and Sharpen have no keyboard shortcut. Use `[` and `]` to
+  decrease or increase the brush size for all paint tools. Alt-click with
+  Clone Stamp to set its source, then paint to copy pixels from that offset.
+  Holding Alt changes its cursor to show the copy source is ready.
   Blur softens the pixels under the brush, and Sharpen raises local contrast.
   The pointer is a size-accurate ring that follows the brush diameter and zoom:
   solid for Pencil, with a soft inner ring for the other paint tools. Release
@@ -212,6 +214,7 @@ the full names used below.
 | Crop / Bucket / Color Picker | C / B / K |
 | Rectangle Select / Oval Select / Free Select / Magic Wand / Move | R / O / F / W / M |
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
+| Scale Layer / Clone Stamp | Shift+S / Shift+C |
 | Eraser | E |
 | Gradient / Path / Stroke / Text | G / P / S / T |
 | Pan | hold Space |
