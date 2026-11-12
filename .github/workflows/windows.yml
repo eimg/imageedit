@@ -72,6 +72,10 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked --target ${{ env.RUST_TARGET }}
 
+      - name: Verify the executable icon and manifest
+        shell: pwsh
+        run: ./scripts/verify-windows-resources.ps1 -Executable "target/${{ env.RUST_TARGET }}/release/lime.exe"
+
       - name: Package the x64 portable build
         id: package
         shell: pwsh
@@ -103,13 +107,12 @@ jobs:
           review in Windows.
 
           Requirements:
-          - 64-bit Windows 10 or later with DirectX/DirectComposition.
+          - 64-bit Windows 10 or later with DirectX.
           - Microsoft Visual C++ Redistributable 2015-2022 (x64) if the
             vcruntime/UCRT DLLs are not already installed.
 
           Known limitations:
-          - No code signing, executable icon resource, or .lime / Open With
-            file association yet.
+          - No code signing or .lime / Open With file association yet.
           - Windows menus are built from the shared action tree and type-checked
             in CI, but they have not been runtime-verified by the maintainer.
           "@ | Set-Content -Path (Join-Path $out "READ-ME.txt") -Encoding utf8

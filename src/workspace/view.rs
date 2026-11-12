@@ -59,6 +59,8 @@ const TOOLBOX_MAX_COLUMNS: usize = 4;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "windows")]
+        crate::windows_menu::request_sync(cx);
         self.request_preview_level(window, cx);
         let interactive = self.form.is_none() && !self.dialog_open;
         let active = self.active_tab();

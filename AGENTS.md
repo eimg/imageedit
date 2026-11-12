@@ -255,12 +255,19 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   pointer move or a polling timer.
 - `src/windows_menu.rs` converts the shared GPUI menu tree into a `muda`
   native Windows menu bar, attaches it to the Win32 HWND, keeps native owners
-  and item handles on the UI thread, syncs action availability after frames,
-  and forwards activations to GPUI actions after Win32 callbacks return.
+  and item handles on the UI thread, syncs action availability after workspace
+  renders and menu opening (without idle frame polling), and forwards activations
+  to GPUI actions after Win32 callbacks return. A native subclass routes Alt
+  mnemonics and F10 before GPUI's text handling. Windows uses GPUI's HWND DirectX
+  swap-chain path so native menu painting has an opaque backing surface.
   `.github/workflows/windows.yml` builds and tests the x64 MSVC release ZIP,
   setting `GPUI_FXC_PATH` from the installed Windows SDK.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
+  `windows/AppIcon.ico` contains the same original blue artwork in nine sizes.
+  `build.rs` embeds `windows/app.rc` in native Windows builds as icon resource 1,
+  which GPUI loads for its window class. Keep GPUI's manifest separate and enabled.
+  The Windows workflow verifies the icon group and manifest before packaging.
 - `src/macos.rs` applies the same icon to the running Dock entry, including
   development launches from Cargo.
 - `scripts/bundle-macos.sh` copies the executable, Info.plist, and icon into

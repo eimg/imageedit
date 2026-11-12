@@ -23,7 +23,7 @@ support.
 
 Download `Lime-1.0.0-windows-x64.zip`, extract it, and run `Lime.exe`. This is a
 portable program, not an installer. It needs 64-bit Windows 10 or later with
-DirectX/DirectComposition, plus the Microsoft Visual C++ Redistributable
+DirectX, plus the Microsoft Visual C++ Redistributable
 2015–2022 x64 if the runtime DLLs are not already installed.
 
 ### Build from source
@@ -333,13 +333,18 @@ current enabled state of each action, and forwards activated items back through
 the existing action handlers. It omits the macOS application menu and keeps
 File → Exit. Native menu labels use Alt mnemonics, and accelerator text comes
 from the GPUI key bindings; keyboard execution still goes through GPUI's
-existing Ctrl shortcuts.
+existing Ctrl shortcuts. Alt menu mnemonics and F10 go to native menu handling
+before canvas input. Space inserts text even when Windows supplies no character
+data. Menu availability updates after workspace changes and menu opening, without
+idle frame polling. The Windows renderer uses an HWND DirectX swap chain so the
+native menu bar has an opaque backing surface.
 
 GitHub Actions runs formatting, Clippy, tests, and a native
 `x86_64-pc-windows-msvc` release build, then uploads the portable
 `Lime-1.0.0-windows-x64` ZIP. The menus and the artifact have not been
 runtime-verified on Windows yet. A Windows release still needs code signing,
-executable icon and packaging work, and `.lime`/Open With registration. There is
+packaging work and `.lime`/Open With registration. The executable embeds the
+original blue icon for Explorer, the title bar, and the taskbar. There is
 no installer or file association yet.
 
 ## Development

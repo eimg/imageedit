@@ -16,11 +16,29 @@ use muda::{
     accelerator::{Key, KeyAccelerator, Modifiers, NamedKey},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows_sys::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    UI::{
+        Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_F10, VK_MENU, VK_SHIFT},
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::{
+            DefWindowProcW, MSG, PostMessageW, TranslateMessage, WM_EXITMENULOOP, WM_INITMENUPOPUP,
+            WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        },
+    },
+};
 
 const COMMAND_ID_PREFIX: &str = "lime.command.";
+const KEYBOARD_SUBCLASS_ID: usize = 0x4c494d45;
 
 thread_local! {
     static ATTACHED: RefCell<Option<AttachedMenus>> = const { RefCell::new(None) };
+    static REQUESTS: RefCell<Option<mpsc::UnboundedSender<MenuRequest>>> = const { RefCell::new(None) };
+}
+
+enum MenuRequest {
+    Activate(MenuId),
+    Refresh,
 }
 
 struct AttachedMenus {
@@ -29,14 +47,32 @@ struct AttachedMenus {
     commands: Vec<Command>,
     items: Vec<NativeMenuItem>,
     enabled: Vec<Option<bool>>,
+    mnemonics: Vec<usize>,
+    sync_pending: bool,
 }
 
 impl AttachedMenus {
     fn remove(self) {
+        // SAFETY: attachment and teardown run on the HWND's owning UI thread.
+        // RemoveWindowSubclass also safely fails if Windows already destroyed it.
         unsafe {
+            RemoveWindowSubclass(
+                self.hwnd as HWND,
+                Some(keyboard_subclass),
+                KEYBOARD_SUBCLASS_ID,
+            );
             let _ = self.menu.remove_for_hwnd(self.hwnd);
         }
     }
+}
+
+pub(crate) fn configure_renderer() {
+    // GPUI's DirectComposition path uses WS_EX_NOREDIRECTIONBITMAP, so the
+    // GDI-painted native menu bar has no backing surface (the desktop shows
+    // through). Its HWND swap-chain path keeps DirectX acceleration and native
+    // non-client painting. This must run before Application::new reads the flag.
+    // SAFETY: this is Windows-only and called first in main, before GPUI starts.
+    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
 }
 
 #[derive(Debug)]
@@ -126,14 +162,21 @@ fn command_availability(
 }
 
 pub(crate) fn start(cx: &mut App) {
-    let (sender, mut receiver) = mpsc::unbounded::<MenuId>();
+    let (sender, mut receiver) = mpsc::unbounded::<MenuRequest>();
+    REQUESTS.with(|requests| *requests.borrow_mut() = Some(sender.clone()));
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        let _ = sender.unbounded_send(event.id);
+        let _ = sender.unbounded_send(MenuRequest::Activate(event.id));
     }));
     cx.on_window_closed(detach).detach();
     cx.spawn(async move |cx| {
-        while let Some(id) = receiver.next().await {
-            if let Err(error) = cx.update(|cx| dispatch(cx, &id)) {
+        while let Some(request) = receiver.next().await {
+            if let Err(error) = cx.update(|cx| match request {
+                MenuRequest::Activate(id) => dispatch(cx, &id),
+                MenuRequest::Refresh => {
+                    request_sync(cx);
+                    Ok(())
+                }
+            }) {
                 eprintln!("Could not run a Windows menu command: {error:#}");
             }
         }
@@ -155,6 +198,7 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     let keymap = cx.key_bindings();
     let plan = MenuPlan::from_menus(menus, &keymap.borrow());
     let (menu, items) = build_native_menus(&plan)?;
+    let mnemonics = menu_mnemonics(&plan);
 
     if let Some(previous) = ATTACHED.with(|attached| attached.borrow_mut().take()) {
         previous.remove();
@@ -166,6 +210,16 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     unsafe {
         menu.init_for_hwnd(hwnd)
             .context("muda could not attach the menu bar to the window")?;
+        if SetWindowSubclass(
+            hwnd as HWND,
+            Some(keyboard_subclass),
+            KEYBOARD_SUBCLASS_ID,
+            0,
+        ) == 0
+        {
+            let _ = menu.remove_for_hwnd(hwnd);
+            anyhow::bail!("could not attach the native menu keyboard bridge");
+        }
     }
 
     let enabled = vec![None; plan.commands.len()];
@@ -176,11 +230,148 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
             commands: plan.commands,
             items,
             enabled,
+            mnemonics,
+            sync_pending: false,
         });
     });
 
-    schedule_sync(window);
+    request_sync(cx);
     Ok(())
+}
+
+fn menu_mnemonics(plan: &MenuPlan) -> Vec<usize> {
+    let mut used = HashSet::new();
+    plan.menus
+        .iter()
+        .filter_map(|section| {
+            let label = mnemonic_label(&section.label, &mut used);
+            label
+                .chars()
+                .skip_while(|character| *character != '&')
+                .nth(1)
+                .map(|character| character.to_ascii_uppercase() as usize)
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum KeyRoute {
+    Forward,
+    TranslateMnemonic,
+    System,
+    AltRelease,
+}
+
+fn key_route(
+    message: u32,
+    key: usize,
+    control: bool,
+    shift: bool,
+    alt: bool,
+    menu_key: bool,
+) -> KeyRoute {
+    if key == usize::from(VK_F10)
+        && !control
+        && !shift
+        && !alt
+        && matches!(message, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
+    {
+        KeyRoute::System
+    } else if message == WM_SYSKEYDOWN && alt && !control && menu_key {
+        KeyRoute::TranslateMnemonic
+    } else if message == WM_SYSKEYUP && key == usize::from(VK_MENU) && !control && !shift {
+        KeyRoute::AltRelease
+    } else {
+        KeyRoute::Forward
+    }
+}
+
+// SAFETY: installed and removed on the native window's UI thread. No borrowed
+// GPUI state or pointers are held across native calls or the modal menu loop.
+unsafe extern "system" fn keyboard_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if message == WM_NCDESTROY {
+        unsafe { RemoveWindowSubclass(hwnd, Some(keyboard_subclass), KEYBOARD_SUBCLASS_ID) };
+    }
+    if matches!(message, WM_INITMENUPOPUP | WM_EXITMENULOOP) {
+        // Updating GPUI synchronously from a native callback can re-enter an
+        // existing window borrow. Wake the UI task instead.
+        REQUESTS.with(|requests| {
+            if let Some(sender) = requests.borrow().as_ref() {
+                let _ = sender.unbounded_send(MenuRequest::Refresh);
+            }
+        });
+    }
+    if message == WM_EXITMENULOOP {
+        // The modal menu can consume Alt-up. Ask GPUI's native modifier-key
+        // handler to sample GetKeyState after closing, without synthesizing a
+        // character or activating the menu again through WM_SYSKEYUP. Posting
+        // keeps this outside the native callback's potentially borrowed state.
+        unsafe {
+            PostMessageW(
+                hwnd,
+                WM_KEYUP,
+                usize::from(VK_MENU),
+                (3_u32 << 30) as LPARAM,
+            );
+        }
+    }
+    if matches!(message, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
+        let menu_key = ATTACHED.with(|attached| {
+            attached
+                .try_borrow()
+                .ok()
+                .and_then(|attached| {
+                    attached
+                        .as_ref()
+                        .map(|attached| attached.mnemonics.contains(&wparam))
+                })
+                .unwrap_or(false)
+        });
+        let (control, shift, alt) = unsafe {
+            (
+                GetKeyState(i32::from(VK_CONTROL)) < 0,
+                GetKeyState(i32::from(VK_SHIFT)) < 0,
+                GetKeyState(i32::from(VK_MENU)) < 0,
+            )
+        };
+        match key_route(message, wparam, control, shift, alt, menu_key) {
+            KeyRoute::TranslateMnemonic => {
+                // GPUI's main message loop omits TranslateMessage and otherwise
+                // offers Alt+letters to canvas text. Only translate our menu
+                // mnemonics; leave AltGr and application shortcuts to GPUI.
+                let msg = MSG {
+                    hwnd,
+                    message,
+                    wParam: wparam,
+                    lParam: lparam,
+                    ..Default::default()
+                };
+                unsafe { TranslateMessage(&msg) };
+                return 0;
+            }
+            KeyRoute::System => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+            KeyRoute::AltRelease => {
+                // The extended Alt key is AltGr on international layouts. Its
+                // synthetic Ctrl may already be released; do not focus menus.
+                if lparam & (1 << 24) != 0 {
+                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                }
+                // Let GPUI reset its modifier/cursor state, then give Windows
+                // the Alt key-up that GPUI otherwise consumes.
+                unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+            }
+            KeyRoute::Forward => {}
+        }
+    }
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 fn window_hwnd(window: &Window) -> Result<isize> {
@@ -198,11 +389,30 @@ fn detach(_cx: &mut App) {
     }
 }
 
-fn schedule_sync(window: &mut Window) {
-    window.on_next_frame(|window, cx| {
-        cx.defer(sync_enabled);
-        schedule_sync(window);
+pub(crate) fn request_sync(cx: &mut App) {
+    let schedule = ATTACHED.with(|attached| {
+        let mut attached = attached.borrow_mut();
+        let Some(attached) = attached.as_mut() else {
+            return false;
+        };
+        if attached.sync_pending {
+            return false;
+        }
+        attached.sync_pending = true;
+        true
     });
+    if schedule {
+        // A Workspace render calls this while its window is borrowed. Defer
+        // until the completed frame's action tree can be queried safely.
+        cx.defer(|cx| {
+            ATTACHED.with(|attached| {
+                if let Some(attached) = attached.borrow_mut().as_mut() {
+                    attached.sync_pending = false;
+                }
+            });
+            sync_enabled(cx);
+        });
+    }
 }
 
 fn sync_enabled(cx: &mut App) {
@@ -393,6 +603,59 @@ mod tests {
     use crate::commands::{NewImage, SaveImage, SelectTool, Tool, Zoom, application_menus};
     use gpui::{KeyBinding, Menu, MenuItem};
     use std::collections::HashSet;
+
+    #[test]
+    fn menu_keyboard_bridge_reserves_only_native_navigation() {
+        use super::*;
+        let f = 'F' as usize;
+        assert_eq!(
+            key_route(WM_SYSKEYDOWN, f, false, false, true, true),
+            KeyRoute::TranslateMnemonic
+        );
+        assert_eq!(
+            key_route(WM_SYSKEYDOWN, f, true, false, true, true),
+            KeyRoute::Forward,
+            "AltGr stays with text input"
+        );
+        assert_eq!(
+            key_route(WM_SYSKEYDOWN, 'O' as usize, false, false, true, false),
+            KeyRoute::Forward,
+            "Alt+O remains a color shortcut"
+        );
+        assert_eq!(
+            key_route(WM_KEYDOWN, f, false, false, false, true),
+            KeyRoute::Forward
+        );
+        for message in [WM_KEYDOWN, WM_KEYUP] {
+            assert_eq!(
+                key_route(message, usize::from(VK_F10), false, false, false, false),
+                KeyRoute::System
+            );
+        }
+        assert_eq!(
+            key_route(
+                WM_SYSKEYUP,
+                usize::from(VK_MENU),
+                false,
+                false,
+                false,
+                false
+            ),
+            KeyRoute::AltRelease
+        );
+    }
+
+    #[test]
+    fn keyboard_mnemonics_match_the_native_top_level_labels() {
+        let plan = plan(application_menus(false), &Keymap::default());
+        let keys = super::menu_mnemonics(&plan);
+        assert_eq!(keys.len(), plan.menus.len());
+        assert_eq!(
+            keys.iter().copied().collect::<HashSet<_>>().len(),
+            keys.len()
+        );
+        assert_eq!(keys[0], 'F' as usize);
+    }
 
     fn plan(menus: Vec<Menu>, keymap: &Keymap) -> MenuPlan {
         MenuPlan::from_menus(menus.into_iter().map(Menu::owned).collect(), keymap)

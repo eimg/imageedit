@@ -2626,6 +2626,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "cosmic-text",
+ "embed-resource",
  "futures",
  "gpui",
  "image",
@@ -2639,6 +2640,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

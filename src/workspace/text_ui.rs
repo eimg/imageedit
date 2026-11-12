@@ -24,6 +24,20 @@ use crate::text::{
     MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextError, TextSpec,
 };
 
+fn text_command_key(key: &Keystroke, windows: bool) -> bool {
+    key.modifiers.control || key.modifiers.platform || (windows && key.modifiers.alt)
+}
+
+fn typed_text(key: &Keystroke, windows: bool) -> Option<&str> {
+    if text_command_key(key, windows) {
+        return None;
+    }
+    // GPUI's Windows backend reports named Space without key_char.
+    key.key_char
+        .as_deref()
+        .or_else(|| (key.key == "space").then_some(" "))
+}
+
 /// The color dialog uses this swatch index for the text color.
 pub(super) const TEXT_SWATCH: usize = 2;
 
@@ -592,6 +606,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cfg!(target_os = "windows") && key.modifiers.alt {
+            self.close_font_picker(window, cx);
+            return false;
+        }
         if key.modifiers.secondary() {
             match key.key.as_str() {
                 "a" | "c" | "x" | "v" => self.font_search_clipboard(&key.key, cx),
@@ -1228,7 +1246,7 @@ impl Workspace {
             return;
         }
         let key = &event.keystroke;
-        if key.modifiers.secondary() || key.modifiers.control || key.modifiers.platform {
+        if text_command_key(key, cfg!(target_os = "windows")) {
             return;
         }
         match key.key.as_str() {
@@ -1303,7 +1321,7 @@ impl Workspace {
             "enter" => self.insert_text("\n", window, cx),
             "escape" | "tab" => {}
             _ => {
-                if let Some(text) = key.key_char.as_deref() {
+                if let Some(text) = typed_text(key, cfg!(target_os = "windows")) {
                     self.insert_text(text, window, cx);
                 }
             }
@@ -1809,6 +1827,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_space_and_menu_keys_do_not_depend_on_windows_character_data() {
+        let space = Keystroke::parse("space").unwrap();
+        assert_eq!(space.key_char, None);
+        assert_eq!(typed_text(&space, true), Some(" "));
+        assert_eq!(typed_text(&space, false), Some(" "));
+        let mut option_space = Keystroke::parse("alt-space").unwrap();
+        option_space.key_char = Some("\u{a0}".into());
+        assert_eq!(typed_text(&option_space, false), Some("\u{a0}"));
+        let mut menu = Keystroke::parse("alt-f").unwrap();
+        menu.key_char = Some("f".into());
+        assert_eq!(typed_text(&menu, true), None);
+        assert!(text_command_key(&menu, true));
+        // Preserve macOS Option-produced characters.
+        menu.key_char = Some("ƒ".into());
+        assert_eq!(typed_text(&menu, false), Some("ƒ"));
+        let mut shortcut = Keystroke::parse("ctrl-s").unwrap();
+        shortcut.key_char = Some("s".into());
+        assert_eq!(typed_text(&shortcut, true), None);
+    }
+
+    #[test]
     fn font_filter_matches_partial_names_aliases_and_unicode_without_case() {
         for (label, name, query) in [
             ("Arial Rounded", "Arial Rounded", "  ARIAL "),
@@ -1830,8 +1869,10 @@ mod tests {
 
     #[test]
     fn font_query_history_restores_the_query_and_resets_the_highlight() {
-        let mut search = FontSearch::default();
-        search.selected = 5;
+        let mut search = FontSearch {
+            selected: 5,
+            ..Default::default()
+        };
         search.edit(|field| *field = Field::new("Arial".into()));
         assert_eq!(search.selected, 0);
         search.edit(|field| *field = Field::new("Café".into()));

@@ -1,0 +1,3 @@
+// GPUI loads icon resource 1 for its window class and taskbar icon.
+// The manifest remains owned by GPUI; this resource adds only the app icon.
+1 ICON "windows/AppIcon.ico"

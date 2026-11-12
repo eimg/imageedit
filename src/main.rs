@@ -34,6 +34,8 @@ use url::Url;
 use workspace::Workspace;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    windows_menu::configure_renderer();
     let app = Application::new().with_assets(icons::Icons);
     let (file_opens, mut requests) = mpsc::unbounded();
     // Launch Services can deliver URLs before GPUI has created the first window.
