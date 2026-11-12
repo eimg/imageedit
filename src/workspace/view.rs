@@ -15,12 +15,12 @@ use gpui::{
 use crate::commands::{
     AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, BrushSizeDown,
     BrushSizeUp, CancelCrop, CancelFreeSelect, CancelGradient, CancelMove, CancelPath,
-    CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, CommitStroke,
-    DeletePathAnchor, ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor,
-    GrowSelection, InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT,
-    OpenImage, PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone,
-    SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
-    ToggleLayerBoundary, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, DeletePathAnchor,
+    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
+    InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT, OpenImage,
+    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
+    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary, Tool,
+    Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -93,6 +93,7 @@ impl Render for Workspace {
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     let tool = action.0;
                     let changed = this.tool != tool;
+                    let was_path = this.tool == Tool::Path;
                     if changed && this.refuse_pending_text(cx) {
                         return;
                     }
@@ -102,6 +103,11 @@ impl Render for Workspace {
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
                         this.clear_crop();
+                        if tool == Tool::Path {
+                            this.inspector_tab = super::InspectorTab::Paths;
+                        } else if was_path {
+                            this.end_path_session(cx);
+                        }
                     }
                     if changed {
                         this.cancel_stroke(window, cx);
@@ -248,14 +254,6 @@ impl Render for Workspace {
                                 ))
                             })
                     })
-                    .when(self.tool == Tool::Stroke, |root| {
-                        root.key_context("Stroke").on_action(cx.listener(
-                            |this, _: &CommitStroke, window, cx| {
-                                let source = this.stroke_source;
-                                this.stroke_outline(source, window, cx);
-                            },
-                        ))
-                    })
                     .when(
                         self.tool == Tool::Text && self.text_draft.is_some(),
                         |root| {
@@ -269,7 +267,7 @@ impl Render for Workspace {
                     .when(self.tool == Tool::Path, |root| {
                         root.key_context("Path")
                             .on_action(cx.listener(|this, _: &CancelPath, _, cx| {
-                                this.cancel_path_gesture(cx);
+                                this.end_path_session(cx);
                             }))
                             .on_action(cx.listener(|this, _: &ClosePath, window, cx| {
                                 this.close_active_path(window, cx);
@@ -300,7 +298,7 @@ impl Render for Workspace {
                             | Tool::Blur
                             | Tool::Sharpen
                             | Tool::CloneStamp
-                            | Tool::Stroke
+                            | Tool::Path
                     ),
                 |root| {
                     root.on_action(cx.listener(|this, _: &BrushSizeDown, _, cx| {
@@ -1459,17 +1457,7 @@ impl Workspace {
                             })
                             .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
                             .when(self.tool == Tool::Path, |panel| {
-                                panel
-                                    .child(
-                                        "Click to add an anchor. Drag to pull its handles. Click the first anchor to close.",
-                                    )
-                                    .child(
-                                        form_button("Path to Selection", false).on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.path_to_selection(window, cx);
-                                            }),
-                                        ),
-                                    )
+                                panel.child("Path management and Stroke are in the Paths tab.")
                             })
                             .when(self.tool == Tool::Gradient, |panel| {
                                 let shape = self.gradient_shape;
@@ -1728,41 +1716,9 @@ impl Workspace {
                                         | Tool::Blur
                                         | Tool::Sharpen
                                         | Tool::CloneStamp
-                                        | Tool::Stroke
                                 ),
                                 |panel| {
                                     panel
-                                        .when(self.tool == Tool::Stroke, |panel| {
-                                            let source = self.stroke_source;
-                                            panel
-                                                .child(
-                                                    "Stroke the active path or the selection edge. Return commits.",
-                                                )
-                                                .child(div().flex().gap_2().children([
-                                                    stroke_source_button(
-                                                        "Path",
-                                                        source
-                                                            == super::stroke_ui::StrokeSource::Path,
-                                                        super::stroke_ui::StrokeSource::Path,
-                                                        cx,
-                                                    ),
-                                                    stroke_source_button(
-                                                        "Selection",
-                                                        source
-                                                            == super::stroke_ui::StrokeSource::Selection,
-                                                        super::stroke_ui::StrokeSource::Selection,
-                                                        cx,
-                                                    ),
-                                                ]))
-                                                .child(
-                                                    form_button("Stroke", true).on_click(
-                                                        cx.listener(|this, _, window, cx| {
-                                                            let source = this.stroke_source;
-                                                            this.stroke_outline(source, window, cx);
-                                                        }),
-                                                    ),
-                                                )
-                                        })
                                         .when(self.tool == Tool::CloneStamp, |panel| {
                                             panel.child(if self.clone_source.is_some() {
                                                 "Clone source set. Alt-click to change it."
@@ -1823,7 +1779,6 @@ impl Workspace {
                                         | Tool::Sharpen
                                         | Tool::Gradient
                                         | Tool::Path
-                                        | Tool::Stroke
                                         | Tool::Text
                                 ),
                                 |panel| {
@@ -1842,7 +1797,49 @@ impl Workspace {
                                 },
                             ),
                     )
-                    .child(self.layers_panel(cx)),
+                    .child(self.inspector_tabs(cx)),
+            )
+    }
+
+    fn inspector_tabs(&self, cx: &Context<Self>) -> Div {
+        let selected = self.inspector_tab;
+        let tab = |label: &'static str, target: super::InspectorTab, cx: &Context<Self>| {
+            form_button(label, selected == target).on_click(cx.listener(move |this, _, _, cx| {
+                if this.inspector_tab != target {
+                    this.inspector_tab = target;
+                    cx.notify();
+                }
+            }))
+        };
+        let content = match selected {
+            super::InspectorTab::Layers => self.layers_panel(cx),
+            super::InspectorTab::Paths => self.path_panel(cx),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(tab("Layers", super::InspectorTab::Layers, cx))
+                    .child(tab("Paths", super::InspectorTab::Paths, cx)),
+            )
+            .child(
+                div()
+                    .id(("inspector-tab-scroll", selected as usize))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content),
             )
     }
 
@@ -2584,17 +2581,6 @@ fn selection_actions(enabled: bool) -> Div {
         .child(selection_button("Invert", enabled, |window, cx| {
             window.dispatch_action(Box::new(InvertSelection), cx);
         }))
-}
-
-fn stroke_source_button(
-    label: &'static str,
-    selected: bool,
-    source: super::stroke_ui::StrokeSource,
-    cx: &Context<super::Workspace>,
-) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
-        this.set_stroke_source(source, cx);
-    }))
 }
 
 fn fill_mode_button(

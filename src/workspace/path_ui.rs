@@ -1,7 +1,11 @@
-use gpui::{Context, Div, Pixels, Point, Window, point, prelude::*};
+use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*, px, rgb};
 
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
+use super::dialogs::form_button;
+use super::stroke_ui::{PathStrokeStyle, StrokeSource};
+use super::tooltip::tooltip;
+use super::view::{DISABLED, HOVER, MUTED, SELECTED, TEXT, icon, section_label};
 use crate::commands::PathToSelection;
 use crate::paths::{self, Anchor, AnchorId, PathId, VectorPath};
 use crate::preview::Dirty;
@@ -63,11 +67,211 @@ impl Workspace {
         })
     }
 
+    pub(super) fn path_panel(&self, cx: &Context<Self>) -> Div {
+        self.path_options(div().flex().flex_col().gap_3().p_4(), cx)
+    }
+
+    pub(super) fn path_options(&self, panel: Div, cx: &Context<Self>) -> Div {
+        let tab = self.active_tab();
+        let paths = tab.map_or(&[][..], |tab| tab.document.content.paths());
+        let active = tab.and_then(|tab| tab.document.content.active_path_id());
+        let rows = paths.iter().enumerate().map(|(index, path)| {
+            let id = path.id;
+            let visible = path.visible;
+            let selected = active == Some(id);
+            div()
+                .id(("path-row", id.0))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .py_1()
+                .rounded_md()
+                .when(selected, |row| row.bg(rgb(SELECTED)))
+                .hover(|row| row.bg(rgb(HOVER)))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(rgb(if visible { TEXT } else { MUTED }))
+                        .child(format!(
+                            "Path {} · {} anchors",
+                            index + 1,
+                            path.anchors.len()
+                        )),
+                )
+                .child(
+                    div()
+                        .id(("path-eye", id.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.))
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .text_color(rgb(if visible { MUTED } else { DISABLED }))
+                        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                        .tooltip(tooltip(if visible { "Hide path" } else { "Show path" }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.set_path_visible(id, !visible, window, cx);
+                        }))
+                        .child(icon(if visible { "eye" } else { "eye-off" }, 14.)),
+                )
+                .child(
+                    div()
+                        .id(("path-delete", id.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.))
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .text_color(rgb(MUTED))
+                        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                        .tooltip(tooltip("Delete path"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.delete_path(id, window, cx);
+                        }))
+                        .child(icon("trash", 14.)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_path(id, cx);
+                }))
+        });
+        let enabled = tab.is_some_and(|tab| {
+            !tab.busy()
+                && tab
+                    .document
+                    .content
+                    .active_path()
+                    .is_some_and(|path| path.visible && path.anchors.len() >= 2)
+                && tab
+                    .document
+                    .content
+                    .layer(tab.active_layer)
+                    .is_some_and(|layer| layer.visible && layer.text.is_none())
+                && self.brush.opacity > 0
+        });
+        let style = self.path_stroke_style;
+        panel
+            .child("Click to add an anchor. Drag to pull its handles. Click the first anchor to close.")
+            .child(div().flex().flex_col().gap_1().children(rows))
+            .when(paths.is_empty(), |panel| {
+                panel.child(div().text_color(rgb(MUTED)).child("No paths yet."))
+            })
+            .child(form_button("Path to Selection", false).on_click(cx.listener(
+                |this, _, window, cx| {
+                    this.path_to_selection(window, cx);
+                },
+            )))
+            .child(section_label("STROKE"))
+            .child(
+                div().flex().gap_2().children([
+                    form_button("Pencil", style == PathStrokeStyle::Pencil).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.set_path_stroke_style(PathStrokeStyle::Pencil, cx);
+                        }),
+                    ),
+                    form_button("Brush", style == PathStrokeStyle::Brush).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.set_path_stroke_style(PathStrokeStyle::Brush, cx);
+                        },
+                    )),
+                ]),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child("Size")
+                    .child(form_button("−", false).on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_brush_size(-1, cx);
+                    })))
+                    .child(self.brush.diameter.to_string())
+                    .child(form_button("+", false).on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_brush_size(1, cx);
+                    }))),
+            )
+            .child(
+                form_button("Stroke", enabled)
+                    .when(enabled, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.stroke_outline(StrokeSource::Path, window, cx);
+                        }))
+                    })
+                    .when(!enabled, |button| {
+                        button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
+                    }),
+            )
+            .when(!enabled, |panel| {
+                panel.child(
+                    div()
+                        .text_color(rgb(MUTED))
+                        .child("Select a visible path and a paintable layer."),
+                )
+            })
+    }
+
+    fn select_path(&mut self, id: PathId, cx: &mut Context<Self>) {
+        if let Some(index) = self.active
+            && self.tabs[index].document.content.select_path(id)
+        {
+            self.tabs[index].notice = None;
+            cx.notify();
+        }
+    }
+
+    fn set_path_visible(
+        &mut self,
+        id: PathId,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_content(
+            move |content, _, _| {
+                if content.set_path_visible(id, visible) {
+                    Dirty::Unpainted
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn delete_path(&mut self, id: PathId, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_content(
+            move |content, _, _| {
+                if content.delete_path(id) {
+                    Dirty::Unpainted
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn displayed_paths(&self) -> Vec<VectorPath> {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
         };
-        let mut paths = tab.document.content.paths().to_vec();
+        let mut paths: Vec<_> = tab
+            .document
+            .content
+            .paths()
+            .iter()
+            .filter(|path| path.visible)
+            .cloned()
+            .collect();
         let overlay = self
             .path_gesture
             .as_ref()
@@ -186,6 +390,7 @@ impl Workspace {
         } else {
             let path = VectorPath {
                 id: path_id,
+                visible: true,
                 closed: false,
                 anchors: vec![Anchor::corner(anchor_id, point)],
             };
@@ -302,6 +507,17 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    pub(super) fn end_path_session(&mut self, cx: &mut Context<Self>) {
+        self.path_gesture = None;
+        self.path_hold = None;
+        self.path_anchor = None;
+        if let Some(index) = self.active
+            && self.tabs[index].document.content.clear_active_path()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn cancel_path_gesture(&mut self, cx: &mut Context<Self>) {
@@ -423,8 +639,16 @@ impl Workspace {
         if width == 0 || height == 0 {
             return None;
         }
-        let paths = tab.document.content.paths();
+        let paths: Vec<_> = tab
+            .document
+            .content
+            .paths()
+            .iter()
+            .filter(|path| path.visible)
+            .cloned()
+            .collect();
         let active = tab.document.content.active_path_id();
+        let paths = paths.as_slice();
         let mut ordered: Vec<&VectorPath> = paths
             .iter()
             .filter(|path| Some(path.id) == active)

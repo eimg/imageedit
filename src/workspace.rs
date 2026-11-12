@@ -75,6 +75,13 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum InspectorTab {
+    #[default]
+    Layers,
+    Paths,
+}
+
 #[derive(Clone, Copy)]
 enum Change {
     Edit,
@@ -156,6 +163,7 @@ pub struct Workspace {
     gradient_shape: crate::paint::GradientShape,
     gradient_blend: crate::paint::GradientBlend,
     clone_source: Option<(u32, u32)>,
+    inspector_tab: InspectorTab,
     gradient: Option<gradient_ui::GradientSession>,
     gradient_overlay: Option<layers::MovePaint>,
     gradient_token: u64,
@@ -176,7 +184,7 @@ pub struct Workspace {
     path_gesture: Option<path_ui::PathGesture>,
     path_hold: Option<crate::paths::VectorPath>,
     path_anchor: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
-    stroke_source: stroke_ui::StrokeSource,
+    path_stroke_style: stroke_ui::PathStrokeStyle,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
     text_draft: Option<text_ui::TextDraft>,
@@ -314,6 +322,7 @@ impl Workspace {
             gradient_shape: crate::paint::GradientShape::Linear,
             gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
             clone_source: None,
+            inspector_tab: InspectorTab::Layers,
             gradient: None,
             gradient_overlay: None,
             gradient_token: 0,
@@ -334,7 +343,7 @@ impl Workspace {
             path_gesture: None,
             path_hold: None,
             path_anchor: None,
-            stroke_source: stroke_ui::StrokeSource::Path,
+            path_stroke_style: stroke_ui::PathStrokeStyle::Brush,
             stroke: None,
             stroke_commit_preview: None,
             text_draft: None,

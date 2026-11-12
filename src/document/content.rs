@@ -211,6 +211,45 @@ impl DocumentContent {
         true
     }
 
+    pub fn clear_active_path(&mut self) -> bool {
+        self.active_path.take().is_some()
+    }
+
+    pub fn select_path(&mut self, id: crate::paths::PathId) -> bool {
+        if self.paths.iter().any(|path| path.id == id) {
+            self.active_path = Some(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_path_visible(&mut self, id: crate::paths::PathId, visible: bool) -> bool {
+        let Some(path) = self.paths.iter_mut().find(|path| path.id == id) else {
+            return false;
+        };
+        if path.visible == visible {
+            return false;
+        }
+        path.visible = visible;
+        true
+    }
+
+    pub fn delete_path(&mut self, id: crate::paths::PathId) -> bool {
+        let Some(index) = self.paths.iter().position(|path| path.id == id) else {
+            return false;
+        };
+        self.paths.remove(index);
+        if self.active_path == Some(id) {
+            self.active_path = self
+                .paths
+                .get(index)
+                .or_else(|| self.paths.last())
+                .map(|path| path.id);
+        }
+        true
+    }
+
     pub fn close_path(&mut self, id: crate::paths::PathId) -> bool {
         let Some(path) = self.paths.iter_mut().find(|path| path.id == id) else {
             return false;
@@ -1157,11 +1196,23 @@ impl DocumentContent {
 
     // Paints canvas-space polylines onto one layer. Points move by the layer offset.
     // The brush is not limited by a selection: the stroke is the contour itself.
+    #[cfg(test)]
     pub fn stroke_lines(
         &mut self,
         id: LayerId,
         lines: &[Vec<(f64, f64)>],
         color: Rgba<u8>,
+        brush: crate::paint::Brush,
+    ) -> Dirty {
+        self.stroke_lines_kind(id, lines, color, crate::paint::StrokeKind::Paint, brush)
+    }
+
+    pub fn stroke_lines_kind(
+        &mut self,
+        id: LayerId,
+        lines: &[Vec<(f64, f64)>],
+        color: Rgba<u8>,
+        kind: crate::paint::StrokeKind,
         brush: crate::paint::Brush,
     ) -> Dirty {
         let Some(index) = self.layer_index(id) else {
@@ -1176,11 +1227,7 @@ impl DocumentContent {
         }
         let offset = self.layers[index].offset;
         let pixels = Arc::clone(&self.layers[index].pixels);
-        let mut stroke = crate::paint::Stroke::new(
-            crate::paint::StrokeKind::Paint,
-            self.mode.constrain(color),
-            brush,
-        );
+        let mut stroke = crate::paint::Stroke::new(kind, self.mode.constrain(color), brush);
         for line in lines {
             let local = line
                 .iter()
@@ -2962,6 +3009,7 @@ mod tests {
         );
         let path = VectorPath {
             id: PathId(1),
+            visible: true,
             closed: false,
             anchors: vec![Anchor {
                 id: AnchorId(1),
@@ -3018,6 +3066,7 @@ mod tests {
         let color = Rgba([255, 0, 0, 255]);
         let open = VectorPath {
             id: PathId(1),
+            visible: true,
             closed: false,
             anchors: vec![
                 Anchor::corner(AnchorId(1), (2.0, 2.0)),
@@ -3041,6 +3090,7 @@ mod tests {
         let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(12, 12));
         assert!(content.upsert_path(VectorPath {
             id: PathId(2),
+            visible: true,
             closed: true,
             anchors: vec![
                 Anchor::corner(AnchorId(4), (2.0, 2.0)),
@@ -3195,6 +3245,7 @@ mod tests {
         let mut with_path = content.clone();
         assert!(with_path.upsert_path(VectorPath {
             id: PathId(0),
+            visible: true,
             closed: false,
             anchors: vec![Anchor::corner(AnchorId(0), (0.0, 0.0))]
         }));

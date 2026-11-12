@@ -12,6 +12,22 @@ pub(super) enum StrokeSource {
     Selection,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum PathStrokeStyle {
+    Pencil,
+    #[default]
+    Brush,
+}
+
+impl PathStrokeStyle {
+    fn kind(self) -> crate::paint::StrokeKind {
+        match self {
+            Self::Pencil => crate::paint::StrokeKind::Pencil,
+            Self::Brush => crate::paint::StrokeKind::Paint,
+        }
+    }
+}
+
 enum OutlineSource {
     Path(paths::VectorPath),
     Selection(Selection, (u32, u32)),
@@ -38,6 +54,7 @@ enum OutlineRequest {
         layer: crate::document::LayerId,
         outline: OutlineSource,
         color: image::Rgba<u8>,
+        kind: crate::paint::StrokeKind,
         brush: crate::paint::Brush,
     },
 }
@@ -55,7 +72,7 @@ impl Workspace {
             tab.document
                 .content
                 .active_path()
-                .is_some_and(|path| path.anchors.len() >= 2)
+                .is_some_and(|path| path.visible && path.anchors.len() >= 2)
         });
         let selection = ready.is_some_and(|tab| {
             !matches!(tab.selection, Selection::Empty | Selection::Unrestricted)
@@ -72,9 +89,9 @@ impl Workspace {
         })
     }
 
-    pub(super) fn set_stroke_source(&mut self, source: StrokeSource, cx: &mut Context<Self>) {
-        if self.stroke_source != source {
-            self.stroke_source = source;
+    pub(super) fn set_path_stroke_style(&mut self, style: PathStrokeStyle, cx: &mut Context<Self>) {
+        if self.path_stroke_style != style {
+            self.path_stroke_style = style;
             cx.notify();
         }
     }
@@ -88,14 +105,8 @@ impl Workspace {
         if self.refuse_text_pixels(false, cx) {
             return;
         }
-        let changed = self.stroke_source != source;
-        self.stroke_source = source;
         match self.outline_request(source) {
-            None => {
-                if changed {
-                    cx.notify();
-                }
-            }
+            None => {}
             Some(OutlineRequest::Hidden) => {
                 self.notice("The active layer is hidden. Show it before painting.", cx);
             }
@@ -104,11 +115,12 @@ impl Workspace {
                 layer,
                 outline,
                 color,
+                kind,
                 brush,
             }) => {
                 self.edit_content(
                     move |content, _, _| {
-                        content.stroke_lines(layer, &outline.lines(), color, brush)
+                        content.stroke_lines_kind(layer, &outline.lines(), color, kind, brush)
                     },
                     window,
                     cx,
@@ -132,7 +144,7 @@ impl Workspace {
                     .document
                     .content
                     .active_path()
-                    .filter(|path| path.anchors.len() >= 2)
+                    .filter(|path| path.visible && path.anchors.len() >= 2)
                 else {
                     return Some(OutlineRequest::Missing(
                         "There is no active path to stroke.",
@@ -153,6 +165,7 @@ impl Workspace {
             layer: layer.id,
             outline,
             color: solid_color(self.colors[0]),
+            kind: self.path_stroke_style.kind(),
             brush: self.brush,
         })
     }

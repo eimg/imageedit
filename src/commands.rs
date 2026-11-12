@@ -76,7 +76,6 @@ actions!(
         DeletePathAnchor,
         StrokePath,
         StrokeSelection,
-        CommitStroke,
         BrushSizeDown,
         BrushSizeUp,
         ApplyText,
@@ -126,7 +125,6 @@ pub enum Tool {
     Gradient,
     Text,
     Path,
-    Stroke,
 }
 
 pub struct ToolInfo {
@@ -253,11 +251,6 @@ impl Tool {
                 "path",
                 "Click to add anchors and drag for handles. Click the first anchor to close.",
             ),
-            Self::Stroke => (
-                "Stroke",
-                "stroke",
-                "Paint the active path or the selection edge with the brush. Return commits.",
-            ),
         };
         ToolInfo {
             label,
@@ -317,7 +310,6 @@ impl Tool {
             Self::Gradient => "g",
             Self::Text => "t",
             Self::Path => "p",
-            Self::Stroke => "s",
         })
     }
 }
@@ -345,7 +337,7 @@ const PAINT_TOOLS: &[Tool] = &[
     Tool::CloneStamp,
 ];
 const FILL_TOOLS: &[Tool] = &[Tool::BucketFill, Tool::Gradient];
-const DRAW_TOOLS: &[Tool] = &[Tool::Text, Tool::Path, Tool::Stroke];
+const DRAW_TOOLS: &[Tool] = &[Tool::Text, Tool::Path];
 
 pub const TOOL_GROUPS: &[(&str, &[Tool])] = &[
     ("Transform", TRANSFORM_TOOLS),
@@ -447,7 +439,6 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("escape", CancelStroke, Some("Paint")),
         KeyBinding::new("enter", ApplyTransform, Some("Transform")),
         KeyBinding::new("escape", CancelTransform, Some("Transform")),
-        KeyBinding::new("enter", CommitStroke, Some("Stroke")),
         KeyBinding::new("[", BrushSizeDown, None),
         KeyBinding::new("]", BrushSizeUp, None),
         KeyBinding::new("escape", CancelPath, Some("Path")),
@@ -814,7 +805,6 @@ mod tests {
             Tool::Gradient,
             Tool::Text,
             Tool::Path,
-            Tool::Stroke,
         ];
         let mut shortcuts = std::collections::HashSet::new();
         for tool in tools {
@@ -850,7 +840,6 @@ mod tests {
                 Tool::Gradient => assert_eq!(tool.shortcut(), Some("g")),
                 Tool::Text => assert_eq!(tool.shortcut(), Some("t")),
                 Tool::Path => assert_eq!(tool.shortcut(), Some("p")),
-                Tool::Stroke => assert_eq!(tool.shortcut(), Some("s")),
             }
             if let Some(shortcut) = tool.shortcut() {
                 assert!(shortcuts.insert(shortcut), "{shortcut}");
@@ -1011,7 +1000,6 @@ mod tests {
             "menu:Draw",
             "Text",
             "Path",
-            "Stroke",
             "menu:Utilities",
             "Pan",
             "Zoom",

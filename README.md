@@ -122,16 +122,19 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   no drag fills with the foreground color.
   **Path** (`P`) clicks anchors onto the canvas and drags to pull cubic
   handles. Click the first anchor, or press Return, to close a path. Escape
-  cancels the drag and Backspace removes the selected anchor. **Select → Path
-  to Selection** fills every closed path. Overlapping contours use nonzero
-  winding, so a reversed contour cancels the area it shares. Open paths do
-  not fill. Undo restores the previous anchors. Image transforms, scaling,
-  canvas size, and crop move the paths with the image.
-  **Stroke** (`S`) paints the active path, or the selection edge, with the
-  brush. Edit → Stroke Path and Stroke Selection do the same. Return commits
-  the stroke shown in the tool options. A repeated endpoint does not add a
-  dab, and a hole is stroked on both boundaries. The brush is not clipped by
-  the selection. Undo restores the previous pixels and leaves the path in place.
+  cancels the drag and Backspace removes the selected anchor. The **Paths** tab
+  next to Layers lists every path with its anchor count; click one to select
+  it, use the eye to show or hide it, or use the trash button to delete it.
+  Escape or switching tools stops the current path, and the next Path click
+  starts a new one instead of extending the last node. **Select → Path to
+  Selection** fills every visible closed path. Overlapping contours use nonzero
+  winding, so a reversed contour cancels the area it shares. Open paths do not
+  fill. Undo restores the previous anchors. Image transforms, scaling, canvas
+  size, and crop move the paths with the image. **Stroke** in the Paths tab
+  paints the selected visible path onto the active layer with the foreground
+  color. Choose Pencil or Brush and adjust the stroke size there. Edit → Stroke
+  Path and Stroke Selection remain available, and a repeated endpoint does not
+  add a dab.
   **Text** (`T`) clicks an origin, or loads the active text layer. Type into
   the draft. Return starts a new line, and the copy, cut, paste, and select-all
   shortcuts and native Edit menu actions edit the text instead of the image.
@@ -216,7 +219,7 @@ the full names used below.
 | Rotate / Flip / Perspective | Shift+R / Shift+F / Shift+P |
 | Scale Layer / Clone Stamp | Shift+S / Shift+C |
 | Eraser | E |
-| Gradient / Path / Stroke / Text | G / P / S / T |
+| Gradient / Path / Text | G / P / T |
 | Pan | hold Space |
 | Copy / Cut / Paste / Paste as New Layer | ⌘C / ⌘X / ⌘V / ⌘⇧V |
 | Select All / Select None / Invert | ⌘A / ⌘⇧A / ⌘I |

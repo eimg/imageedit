@@ -16,6 +16,10 @@ use crate::document::{
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
 const VERSION: u32 = 5;
+
+fn default_true() -> bool {
+    true
+}
 // Covers the maximum legal path and text metadata while keeping reads bounded.
 const MAX_MANIFEST_BYTES: u32 = 8 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
@@ -37,6 +41,8 @@ struct Manifest {
 #[serde(deny_unknown_fields)]
 struct PathEntry {
     id: u64,
+    #[serde(default = "default_true")]
+    visible: bool,
     closed: bool,
     anchors: Vec<AnchorEntry>,
 }
@@ -199,6 +205,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         .into_iter()
         .map(|path| crate::paths::VectorPath {
             id: crate::paths::PathId(path.id),
+            visible: path.visible,
             closed: path.closed,
             anchors: path
                 .anchors
@@ -252,6 +259,7 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
             .iter()
             .map(|path| PathEntry {
                 id: path.id.0,
+                visible: path.visible,
                 closed: path.closed,
                 anchors: path
                     .anchors
@@ -498,6 +506,7 @@ mod tests {
         let mut with_paths = two_layers();
         let open = crate::paths::VectorPath {
             id: crate::paths::PathId(4),
+            visible: true,
             closed: false,
             anchors: vec![crate::paths::Anchor {
                 id: crate::paths::AnchorId(8),
@@ -508,6 +517,7 @@ mod tests {
         };
         let closed = crate::paths::VectorPath {
             id: crate::paths::PathId(9),
+            visible: false,
             closed: true,
             anchors: vec![
                 crate::paths::Anchor::corner(crate::paths::AnchorId(1), (1.0, 1.0)),
@@ -525,6 +535,8 @@ mod tests {
         let stored = write_bytes(&with_paths).unwrap();
         assert_same(&read_bytes(&stored).unwrap(), &with_paths);
         assert_eq!(manifest_json(&stored)["active_path"], json!(9));
+        assert_eq!(manifest_json(&stored)["paths"][0]["visible"], json!(true));
+        assert_eq!(manifest_json(&stored)["paths"][1]["visible"], json!(false));
         assert_eq!(
             manifest_json(&bytes)["layers"][1],
             json!({
@@ -542,6 +554,7 @@ mod tests {
             assert!(
                 content.upsert_path(VectorPath {
                     id: PathId(path as u64),
+                    visible: true,
                     closed: true,
                     anchors: (0..MAX_ANCHORS)
                         .map(|anchor| Anchor::corner(

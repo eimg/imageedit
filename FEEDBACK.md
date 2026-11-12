@@ -121,15 +121,19 @@ Update the text contract in `AGENTS.md` to match.
 
 ## 8. Stroke from the Path tool
 
-- Status: `open`
+Path stroking lives in the Path tool options. The Stroke tool is removed, paths
+can be selected, shown or hidden, and deleted like layers, and each stroke uses
+the current foreground color with a selectable Pencil or Brush type and
+adjustable size.
 
-Path (`B`) and Stroke (`S`) are separate tools, and stroking is a one-shot
-paint of the path or the selection edge. Put path stroking in the Path tool
-options and remove the Stroke tool from the toolbox, its shortcut, and the
-Tools menu. A path needs more than one stroke, and each stroke can be
-deleted on its own. Keep Edit → Stroke Selection, or an equally direct way to
-stroke a selection, since that is not a path. Update
-`menus_match_the_release_checklist` with the menu change.
+- Status: `done`
+- 2026-11-11: The Stroke tool is gone from the toolbox, shortcut, and Tools
+  menu. A Paths tab beside Layers lists every path with visibility and delete
+  controls, and a Stroke button paints the selected visible path with the
+  foreground color. Stroke type is Pencil or Brush, with adjustable size.
+  Escape or switching tools stops the path and the next click starts a new one.
+  Edit → Stroke Selection remains. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.
 
 ## 9. Clone stamp, blur, and sharpen tools
 

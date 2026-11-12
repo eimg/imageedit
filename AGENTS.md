@@ -58,10 +58,13 @@ not create a history entry. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
 first anchor closes the path. Path to Selection fills every closed path with
 nonzero winding. Image transforms, scale, canvas size, and crop move those
-paths with the image. Stroke (`S`) paints the active path or the selection
-contour with the brush. The contour stays in canvas coordinates and lands on
-the active layer. Return commits one undo step. The selection stays put, and
-the brush is not clipped to it. Text (`T`) adds an editable layer.
+paths with the image. A Paths tab beside Layers lists every path, selects one,
+toggles its visibility, or deletes it. Escape or switching tools stops the
+current path, and the next Path click starts a new one. Stroke in the Paths tab
+paints the selected visible path onto the active layer with the foreground
+color, using a Pencil or Brush stroke and an adjustable size. Stroke Selection
+remains on the Edit menu. The contour stays in canvas coordinates, and the
+brush is not clipped to it. Text (`T`) adds an editable layer.
 Click sets its origin, or loads the active text layer. Typing, Return, and the
 text clipboard stay in that draft until Apply commits one undo step. Native
 Edit menu actions and Undo/Redo operate on the draft. Escape discards it.

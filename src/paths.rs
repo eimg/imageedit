@@ -38,6 +38,7 @@ impl Anchor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorPath {
     pub id: PathId,
+    pub visible: bool,
     pub closed: bool,
     pub anchors: Vec<Anchor>,
 }
@@ -92,7 +93,11 @@ pub fn contour(path: &VectorPath) -> Option<Vec<(f64, f64)>> {
 
 // Closed paths fill together with nonzero winding. Open paths do not fill.
 pub fn selection(paths: &[VectorPath], width: u32, height: u32) -> Selection {
-    let contours: Vec<Vec<(f64, f64)>> = paths.iter().filter_map(contour).collect();
+    let contours: Vec<Vec<(f64, f64)>> = paths
+        .iter()
+        .filter(|path| path.visible)
+        .filter_map(contour)
+        .collect();
     if contours.is_empty() {
         return Selection::Empty;
     }
@@ -201,6 +206,7 @@ mod tests {
         }
         VectorPath {
             id: PathId(id),
+            visible: true,
             closed: true,
             anchors,
         }
@@ -237,6 +243,15 @@ mod tests {
         let mut open = square(3, (1.0, 1.0), 4.0, false);
         open.closed = false;
         assert_eq!(selection(&[open], 10, 10), Selection::Empty);
+    }
+
+    #[test]
+    fn hidden_paths_do_not_contribute_to_a_selection() {
+        let visible = square(1, (1.0, 1.0), 4.0, false);
+        let mut hidden = square(2, (5.0, 5.0), 3.0, false);
+        hidden.visible = false;
+        let selected = selection(&[visible.clone(), hidden], 10, 10);
+        assert_eq!(selected, selection(&[visible], 10, 10));
     }
 
     #[test]

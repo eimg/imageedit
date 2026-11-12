@@ -986,6 +986,7 @@ mod tests {
         let mut session = Session::new(true, 8);
         let open = VectorPath {
             id: PathId(2),
+            visible: true,
             closed: false,
             anchors: vec![
                 Anchor::corner(AnchorId(5), (1.0, 1.0)),
@@ -1036,6 +1037,7 @@ mod tests {
         session.current.selection = selection.clone();
         let path = VectorPath {
             id: PathId(4),
+            visible: true,
             closed: false,
             anchors: vec![
                 Anchor::corner(AnchorId(1), (2.0, 2.0)),
@@ -1121,6 +1123,7 @@ mod tests {
         let id = session.current.active_layer;
         session.current.content.upsert_path(VectorPath {
             id: PathId(0),
+            visible: true,
             closed: false,
             anchors: vec![Anchor::corner(AnchorId(0), (1.0, 1.0))],
         });
