@@ -2,10 +2,12 @@ use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*, px, rgb}
 
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
-use super::dialogs::form_button;
 use super::stroke_ui::{PathStrokeStyle, StrokeSource};
 use super::tooltip::tooltip;
-use super::view::{DISABLED, HOVER, MUTED, SELECTED, TEXT, icon, section_label};
+use super::view::{
+    DISABLED, HOVER, MUTED, SELECTED, TEXT, choice_button, icon, option_action, option_row,
+    section_label, segmented, step_button, stepper,
+};
 use crate::commands::PathToSelection;
 use crate::paths::{self, Anchor, AnchorId, PathId, VectorPath};
 use crate::preview::Dirty;
@@ -163,42 +165,45 @@ impl Workspace {
             .when(paths.is_empty(), |panel| {
                 panel.child(div().text_color(rgb(MUTED)).child("No paths yet."))
             })
-            .child(form_button("Path to Selection", false).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.path_to_selection(window, cx);
-                },
-            )))
-            .child(section_label("STROKE"))
             .child(
-                div().flex().gap_2().children([
-                    form_button("Pencil", style == PathStrokeStyle::Pencil).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.set_path_stroke_style(PathStrokeStyle::Pencil, cx);
-                        }),
-                    ),
-                    form_button("Brush", style == PathStrokeStyle::Brush).on_click(cx.listener(
+                option_action("Path to Selection", false)
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.path_to_selection(window, cx);
+                    })),
+            )
+            .child(section_label("STROKE"))
+            .child(segmented([
+                choice_button("Pencil", style == PathStrokeStyle::Pencil).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.set_path_stroke_style(PathStrokeStyle::Pencil, cx);
+                    },
+                )),
+                choice_button("Brush", style == PathStrokeStyle::Brush).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.set_path_stroke_style(PathStrokeStyle::Brush, cx);
+                    },
+                )),
+            ]))
+            .child(option_row(
+                "Size",
+                stepper(
+                    self.brush.diameter.to_string(),
+                    step_button("path-stroke-down", "−").on_click(cx.listener(
                         |this, _, _, cx| {
-                            this.set_path_stroke_style(PathStrokeStyle::Brush, cx);
+                            this.adjust_brush_size(-1, cx);
                         },
                     )),
-                ]),
-            )
+                    step_button("path-stroke-up", "+").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.adjust_brush_size(1, cx);
+                        },
+                    )),
+                ),
+            ))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child("Size")
-                    .child(form_button("−", false).on_click(cx.listener(|this, _, _, cx| {
-                        this.adjust_brush_size(-1, cx);
-                    })))
-                    .child(self.brush.diameter.to_string())
-                    .child(form_button("+", false).on_click(cx.listener(|this, _, _, cx| {
-                        this.adjust_brush_size(1, cx);
-                    }))),
-            )
-            .child(
-                form_button("Stroke", enabled)
+                option_action("Stroke", enabled)
+                    .w_full()
                     .when(enabled, |button| {
                         button.on_click(cx.listener(|this, _, window, cx| {
                             this.stroke_outline(StrokeSource::Path, window, cx);

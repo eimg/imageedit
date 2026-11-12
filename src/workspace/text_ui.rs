@@ -3,9 +3,11 @@ use std::sync::Arc;
 use gpui::{ClipboardItem, Context, Div, KeyDownEvent, SharedString, Window, div, prelude::*, rgb};
 
 use super::Workspace;
-use super::dialogs::form_button;
 use super::layers::MovePaint;
-use super::view::MUTED;
+use super::view::{
+    MUTED, action_row, choice_button, option_action, option_row, section_label, segmented,
+    step_button, stepper,
+};
 use crate::commands::{
     ApplyText, CancelText, RasterizeText, Redo, TextCopy, TextCut, TextPaste, TextSelectAll, Undo,
 };
@@ -195,11 +197,13 @@ impl Workspace {
         let Some(draft) = &self.text_draft else {
             return panel
                 .child("Click the canvas to place text. Typing stays in the text layer.")
-                .child(form_button("Rasterize Text", false).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.rasterize_text_layer(window, cx);
-                    },
-                )));
+                .child(
+                    option_action("Rasterize Text", false)
+                        .w_full()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.rasterize_text_layer(window, cx);
+                        })),
+                );
         };
         let family = draft.family.clone();
         let size = size_label(draft.size);
@@ -216,48 +220,59 @@ impl Workspace {
             .child("Apply commits one undo step. Escape discards the draft.")
             .child(div().text_color(rgb(MUTED)).text_ellipsis().child(source))
             .when_some(substituted, |panel, message| panel.child(message))
-            .child(div().flex().gap_2().children([
+            .child(section_label("FONT"))
+            .child(segmented([
                 family_button("Sans Serif", "sans-serif", &family, cx),
                 family_button("Serif", "serif", &family, cx),
                 family_button("Monospace", "monospace", &family, cx),
             ]))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(form_button("Smaller", false).on_click(cx.listener(
+            .child(option_row(
+                "Size",
+                stepper(
+                    size,
+                    step_button("text-size-down", "−").on_click(cx.listener(
                         |this, _, window, cx| {
                             this.step_text_size(-1.0, window, cx);
                         },
-                    )))
-                    .child(size)
-                    .child(form_button("Larger", false).on_click(cx.listener(
+                    )),
+                    step_button("text-size-up", "+").on_click(cx.listener(
                         |this, _, window, cx| {
                             this.step_text_size(1.0, window, cx);
                         },
-                    ))),
+                    )),
+                ),
+            ))
+            .child(
+                option_action("Use Foreground", false)
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.recolor_text(window, cx);
+                    })),
             )
-            .child(form_button("Use Foreground", false).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.recolor_text(window, cx);
-                },
-            )))
-            .child(div().flex().gap_2().children([
-                form_button("Apply Text", can_apply).on_click(cx.listener(
+            .child(section_label("LAYER"))
+            .child(action_row([
+                option_action("Apply Text", can_apply)
+                    .when(can_apply, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_text(window, cx);
+                        }))
+                    })
+                    .when(!can_apply, |button| {
+                        button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
+                    }),
+                option_action("Discard Text", false).on_click(cx.listener(
                     |this, _, window, cx| {
-                        this.apply_text(window, cx);
+                        this.cancel_text(window, cx);
                     },
                 )),
-                form_button("Discard Text", false).on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_text(window, cx);
-                })),
             ]))
-            .child(form_button("Rasterize Text", false).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.rasterize_text_layer(window, cx);
-                },
-            )))
+            .child(
+                option_action("Rasterize Text", false)
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.rasterize_text_layer(window, cx);
+                    })),
+            )
     }
 
     pub(super) fn place_text(
@@ -876,7 +891,7 @@ fn family_button(
     cx: &Context<Workspace>,
 ) -> gpui::Stateful<Div> {
     let chosen = current == family;
-    form_button(label, chosen).on_click(cx.listener(move |this, _, window, cx| {
+    choice_button(label, chosen).on_click(cx.listener(move |this, _, window, cx| {
         this.change_text(window, cx, |draft| {
             if draft.family == family {
                 return false;

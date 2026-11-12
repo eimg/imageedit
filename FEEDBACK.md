@@ -169,13 +169,19 @@ readable labels.
 
 ## 11. Clearer tool-option layout
 
-- Status: `open`
-
 Do this last, after the items above have added and removed controls. The
 tool-options column is 232 px wide (`inspector` in `src/workspace/view.rs`)
 and stacks each tool's controls in one gap. Arrange those controls so related
 choices sit together and the column is easier to scan. Cover every tool that
 has options, including the ones added in this queue.
+
+- Status: `done`
+- 2026-11-12: Tool options now group related controls under section labels.
+  Single-choice settings use segmented selectors distinct from action buttons,
+  booleans use check toggles, numeric rows align labels with a shared stepper,
+  readouts share one chip style, and actions span their row. Compact labels and
+  bounded segmented rows keep every tool inside the 232 px inspector.
+  Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
 
 ## 12. Resizable toolbox with full labels
 

@@ -190,8 +190,10 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   options show X, Y, Width, and Height values; inline numeric entry is paused.
   `src/workspace/view.rs` lays out the shell, including the resizable
   and foldable toolbox and its full-label or icon-only buttons, and paints the
-  canvas using the same geometry. `src/workspace/tooltip.rs` renders shared
-  hover tooltips.
+  canvas using the same geometry. Tool options group related controls under
+  section labels: segmented choices for either/or settings, check toggles for
+  booleans, aligned steppers and readouts for numbers, and full-width actions.
+  `src/workspace/tooltip.rs` renders shared hover tooltips.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including

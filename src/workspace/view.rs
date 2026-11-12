@@ -28,7 +28,6 @@ use crate::transform::{Mirror, Resample};
 
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
-use super::dialogs::form_button;
 use super::files::SaveMode;
 use super::tooltip::{tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
@@ -683,19 +682,21 @@ impl Workspace {
     }
 
     fn selection_numeric_options(&self, cx: &Context<Self>) -> Div {
-        let mut options = div().flex().flex_col().gap_2();
+        let mut options = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section_label("SHAPE"));
         if self.tool == Tool::Select {
             options = options.child(self.selection_radius_row(cx));
         }
         if self.tool == Tool::OvalSelect {
-            options = options.child(
-                form_button("Circle", self.oval_circle).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        let circle = !this.oval_circle;
-                        this.set_oval_circle(circle, window, cx);
-                    },
-                )),
-            );
+            options = options.child(toggle_button("Circle", self.oval_circle).on_click(
+                cx.listener(|this, _, window, cx| {
+                    let circle = !this.oval_circle;
+                    this.set_oval_circle(circle, window, cx);
+                }),
+            ));
         }
         if self.selection_shape_rect().is_some() {
             options = options.child(self.selection_size_row());
@@ -704,78 +705,34 @@ impl Workspace {
     }
 
     fn selection_radius_row(&self, cx: &Context<Self>) -> Div {
-        let chip = div()
-            .min_w(px(40.))
-            .h(px(26.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .px_2()
-            .rounded_md()
-            .bg(rgb(CANVAS))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(self.selection_radius.to_string());
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child("Radius")
-            .child(form_button("−", false).on_click(
-                cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
-            ))
-            .child(chip)
-            .child(form_button("+", false).on_click(
-                cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
-            ))
+        option_row(
+            "Radius",
+            stepper(
+                self.selection_radius.to_string(),
+                step_button("selection-radius-down", "−").on_click(
+                    cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
+                ),
+                step_button("selection-radius-up", "+").on_click(
+                    cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
+                ),
+            ),
+        )
     }
 
     fn selection_size_row(&self) -> Div {
         let Some(rect) = self.selection_shape_rect() else {
             return div();
         };
-        let chip = |label: &'static str, value: u32| {
-            div()
-                .h(px(26.))
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .rounded_md()
-                .bg(rgb(CANVAS))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
-                .child(value.to_string())
-        };
         div()
             .flex()
             .gap_2()
-            .child(chip("W", rect.width))
-            .child(chip("H", rect.height))
+            .child(readout_chip("W", rect.width))
+            .child(readout_chip("H", rect.height))
     }
 
     fn crop_fields(&self) -> Div {
         let Some(crop) = self.crop else {
             return div();
-        };
-        let chip = |label: &'static str, value: u32| {
-            div()
-                .h(px(26.))
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .rounded_md()
-                .bg(rgb(CANVAS))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
-                .child(value.to_string())
         };
         div()
             .flex()
@@ -785,15 +742,15 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(chip("X", crop.x))
-                    .child(chip("Y", crop.y)),
+                    .child(readout_chip("X", crop.x))
+                    .child(readout_chip("Y", crop.y)),
             )
             .child(
                 div()
                     .flex()
                     .gap_2()
-                    .child(chip("W", crop.width))
-                    .child(chip("H", crop.height)),
+                    .child(readout_chip("W", crop.width))
+                    .child(readout_chip("H", crop.height)),
             )
     }
 
@@ -1422,18 +1379,30 @@ impl Workspace {
                                     let enabled = self.selection_command_enabled(
                                         super::selection::SelectionCommand::None,
                                     );
-                                    panel.child(selection_actions(enabled))
+                                    panel.child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(section_label("SELECTION"))
+                                            .child(selection_actions(enabled)),
+                                    )
                                 },
                             )
                             .when(
                                 matches!(self.tool, Tool::MagicWand | Tool::BucketFill),
-                                |panel| panel.child(tolerance_row(self.tolerance, cx)),
+                                |panel| {
+                                    panel
+                                        .child(section_label("MATCH"))
+                                        .child(tolerance_row(self.tolerance, cx))
+                                },
                             )
                             .when(self.tool == Tool::BucketFill, |panel| {
                                 let mode = self.fill_mode;
                                 let sample_all = self.sample_all;
                                 panel
-                                    .child(div().flex().gap_2().children([
+                                    .child(section_label("FILL"))
+                                    .child(segmented([
                                         fill_mode_button(
                                             "Connected",
                                             mode == crate::document::FillMode::Connected,
@@ -1448,7 +1417,7 @@ impl Workspace {
                                         ),
                                     ]))
                                     .child(
-                                        form_button("Sample All Layers", sample_all).on_click(
+                                        toggle_button("Sample All Layers", sample_all).on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.set_sample_all(!sample_all, cx);
                                             }),
@@ -1457,13 +1426,17 @@ impl Workspace {
                             })
                             .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
                             .when(self.tool == Tool::Path, |panel| {
-                                panel.child("Path management and Stroke are in the Paths tab.")
+                                panel.child(info_note(
+                                    "Path management and Stroke are in the Paths tab.",
+                                ))
                             })
                             .when(self.tool == Tool::Gradient, |panel| {
                                 let shape = self.gradient_shape;
                                 let blend = self.gradient_blend;
+                                let can_apply = self.can_apply_gradient();
                                 panel
-                                    .child(div().flex().gap_2().children([
+                                    .child(section_label("GRADIENT"))
+                                    .child(segmented([
                                         gradient_shape_button(
                                             "Linear",
                                             shape == crate::paint::GradientShape::Linear,
@@ -1477,70 +1450,67 @@ impl Workspace {
                                             cx,
                                         ),
                                     ]))
-                                    .child(div().flex().gap_2().children([
+                                    .child(segmented([
                                         gradient_blend_button(
-                                            "FG to BG",
+                                            "FG → BG",
                                             blend
                                                 == crate::paint::GradientBlend::ForegroundToBackground,
                                             crate::paint::GradientBlend::ForegroundToBackground,
                                             cx,
                                         ),
                                         gradient_blend_button(
-                                            "FG to Transparent",
+                                            "FG → Clear",
                                             blend
                                                 == crate::paint::GradientBlend::ForegroundToTransparent,
                                             crate::paint::GradientBlend::ForegroundToTransparent,
                                             cx,
-                                        ),
+                                        )
+                                        .tooltip(tooltip("Foreground to Transparent")),
                                     ]))
                                     .when(self.gradient.is_some(), |panel| {
-                                        panel.child(
-                                            div()
-                                                .flex()
-                                                .gap_2()
-                                                .child(
-                                                    form_button("Apply", self.can_apply_gradient())
-                                                        .on_click(|_, window, cx| {
-                                                            window.dispatch_action(
-                                                                Box::new(ApplyGradient),
-                                                                cx,
-                                                            )
-                                                        }),
-                                                )
-                                                .child(form_button("Cancel", false).on_click(
-                                                    |_, window, cx| {
+                                        panel.child(action_row([
+                                            option_action("Apply", true)
+                                                .when(can_apply, |button| {
+                                                    button.on_click(|_, window, cx| {
                                                         window.dispatch_action(
-                                                            Box::new(CancelGradient),
+                                                            Box::new(ApplyGradient),
                                                             cx,
                                                         )
-                                                    },
-                                                )),
-                                        )
+                                                    })
+                                                })
+                                                .when(!can_apply, |button| {
+                                                    button
+                                                        .opacity(0.45)
+                                                        .cursor(CursorStyle::Arrow)
+                                                }),
+                                            option_action("Cancel", false).on_click(|_, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(CancelGradient),
+                                                    cx,
+                                                )
+                                            }),
+                                        ]))
                                     })
                             })
                             .when_some(self.crop, |panel, _| {
                                 panel
+                                    .child(section_label("CROP"))
                                     .child(self.crop_fields())
-                                    .child(
-                                        div()
-                                            .text_color(rgb(MUTED))
-                                            .child("Drag inside to move. Drag a handle to resize."),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_2()
-                                            .child(form_button("Apply Crop", true).on_click(
-                                                |_, window, cx| {
-                                                    window.dispatch_action(Box::new(ApplyCrop), cx)
-                                                },
-                                            ))
-                                            .child(form_button("Cancel", false).on_click(
-                                                |_, window, cx| {
-                                                    window.dispatch_action(Box::new(CancelCrop), cx)
-                                                },
-                                            )),
-                                    )
+                                    .child(info_note(
+                                        "Drag inside to move. Drag a handle to resize.",
+                                    ))
+                                    .child(action_row([
+                                        option_action("Apply Crop", true).on_click(
+                                            |_, window, cx| {
+                                                window.dispatch_action(Box::new(ApplyCrop), cx)
+                                            },
+                                        ),
+                                        option_action("Cancel", false).on_click(
+                                            |_, window, cx| {
+                                                window.dispatch_action(Box::new(CancelCrop), cx)
+                                            },
+                                        ),
+                                    ]))
                             })
                             .when(self.tool == Tool::Move, |panel| {
                                 let enabled = self.geometry_enabled();
@@ -1555,157 +1525,124 @@ impl Workspace {
                                     });
                                 panel
                                     .when_some(offset, |panel, offset| {
-                                        panel.child(format!("Offset {}, {}", offset.0, offset.1))
+                                        panel
+                                            .child(section_label("POSITION"))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .gap_2()
+                                                    .child(readout_chip("X", offset.0))
+                                                    .child(readout_chip("Y", offset.1)),
+                                            )
+                                            .child(section_label("ALIGN"))
+                                            .child(align_controls(enabled, cx))
                                     })
-                                    .child(
-                                        div().flex().flex_wrap().gap_1().children([
-                                            align_button(
-                                                "align-top",
-                                                "Align Top",
-                                                AlignLayer::Top,
-                                                enabled,
-                                                cx,
-                                            ),
-                                            align_button(
-                                                "align-bottom",
-                                                "Align Bottom",
-                                                AlignLayer::Bottom,
-                                                enabled,
-                                                cx,
-                                            ),
-                                            align_button(
-                                                "align-left",
-                                                "Align Left",
-                                                AlignLayer::Left,
-                                                enabled,
-                                                cx,
-                                            ),
-                                            align_button(
-                                                "align-right",
-                                                "Align Right",
-                                                AlignLayer::Right,
-                                                enabled,
-                                                cx,
-                                            ),
-                                            align_button(
-                                                "align-h-center",
-                                                "Center Horizontally",
-                                                AlignLayer::Horizontal,
-                                                enabled,
-                                                cx,
-                                            ),
-                                            align_button(
-                                                "align-v-center",
-                                                "Center Vertically",
-                                                AlignLayer::Vertical,
-                                                enabled,
-                                                cx,
-                                            ),
-                                        ]),
-                                    )
                                     .when(self.move_drag.is_some(), |panel| {
-                                        panel.child(form_button("Cancel", false).on_click(
-                                            |_, window, cx| {
-                                                window.dispatch_action(Box::new(CancelMove), cx);
-                                            },
-                                        ))
+                                        panel.child(
+                                            option_action("Cancel Move", false).w_full().on_click(
+                                                |_, window, cx| {
+                                                    window.dispatch_action(
+                                                        Box::new(CancelMove),
+                                                        cx,
+                                                    );
+                                                },
+                                            ),
+                                        )
                                     })
                             })
                             .when(self.tool == Tool::ScaleLayer, |panel| {
                                 let size = self.scale_size();
                                 panel
-                                    .child("Drag a border or corner to scale the active layer.")
+                                    .child(info_note(
+                                        "Drag a border or corner to scale the active layer.",
+                                    ))
                                     .when_some(size, |panel, (width, height)| {
-                                        panel.child(
-                                            div().flex().gap_2().children([
-                                                readonly_size_chip("W", width),
-                                                readonly_size_chip("H", height),
-                                            ]),
-                                        )
+                                        panel
+                                            .child(section_label("SIZE"))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .gap_2()
+                                                    .child(readout_chip("W", width))
+                                                    .child(readout_chip("H", height)),
+                                            )
                                     })
                             })
                             .when_some(self.warp_status(), |panel, status| {
                                 let horizontal = status.horizontal;
                                 let resample = status.resample;
                                 let show_resample = self.tool != Tool::Flip;
+                                let can_apply = self.can_apply_warp();
                                 panel
                                     .child(if status.applying {
-                                        "Applying…".into()
+                                        info_note("Applying…")
                                     } else {
-                                        status.summary
+                                        info_note(status.summary)
                                     })
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
                                     })
                                     .when(self.tool == Tool::Flip, |panel| {
-                                        panel.child(div().flex().gap_2().children([
-                                            warp_choice(
-                                                "Horizontal",
-                                                horizontal,
-                                                Mirror::Horizontal,
-                                                cx,
-                                            ),
-                                            warp_choice(
-                                                "Vertical",
-                                                !horizontal,
-                                                Mirror::Vertical,
-                                                cx,
-                                            ),
-                                        ]))
+                                        panel
+                                            .child(section_label("MIRROR"))
+                                            .child(segmented([
+                                                warp_choice(
+                                                    "Horizontal",
+                                                    horizontal,
+                                                    Mirror::Horizontal,
+                                                    cx,
+                                                ),
+                                                warp_choice(
+                                                    "Vertical",
+                                                    !horizontal,
+                                                    Mirror::Vertical,
+                                                    cx,
+                                                ),
+                                            ]))
                                     })
                                     .when(show_resample, |panel| {
-                                        panel.child(div().flex().gap_2().children([
-                                            resample_choice(
-                                                "Nearest",
-                                                Resample::Nearest,
-                                                resample,
-                                                cx,
-                                            ),
-                                            resample_choice(
-                                                "Bilinear",
-                                                Resample::Bilinear,
-                                                resample,
-                                                cx,
-                                            ),
-                                            resample_choice(
-                                                "Bicubic",
-                                                Resample::Bicubic,
-                                                resample,
-                                                cx,
-                                            ),
-                                        ]))
+                                        panel
+                                            .child(section_label("RESAMPLE"))
+                                            .child(segmented([
+                                                resample_choice(
+                                                    "Nearest",
+                                                    Resample::Nearest,
+                                                    resample,
+                                                    cx,
+                                                ),
+                                                resample_choice(
+                                                    "Bilinear",
+                                                    Resample::Bilinear,
+                                                    resample,
+                                                    cx,
+                                                ),
+                                                resample_choice(
+                                                    "Bicubic",
+                                                    Resample::Bicubic,
+                                                    resample,
+                                                    cx,
+                                                ),
+                                            ]))
                                     })
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(
-                                                form_button("Apply", true)
-                                                    .w_full()
-                                                    .when(self.can_apply_warp(), |button| {
-                                                        button.on_click(|_, window, cx| {
-                                                            window.dispatch_action(
-                                                                Box::new(ApplyTransform),
-                                                                cx,
-                                                            );
-                                                        })
-                                                    })
-                                                    .when(!self.can_apply_warp(), |button| {
-                                                        button
-                                                            .opacity(0.45)
-                                                            .cursor(CursorStyle::Arrow)
-                                                    }),
-                                            )
-                                            .child(form_button("Cancel", false).w_full().on_click(
-                                                |_, window, cx| {
+                                    .child(action_row([
+                                        option_action("Apply", true)
+                                            .when(can_apply, |button| {
+                                                button.on_click(|_, window, cx| {
                                                     window.dispatch_action(
-                                                        Box::new(CancelTransform),
+                                                        Box::new(ApplyTransform),
                                                         cx,
-                                                    )
-                                                },
-                                            )),
-                                    )
+                                                    );
+                                                })
+                                            })
+                                            .when(!can_apply, |button| {
+                                                button
+                                                    .opacity(0.45)
+                                                    .cursor(CursorStyle::Arrow)
+                                            }),
+                                        option_action("Cancel", false).on_click(|_, window, cx| {
+                                            window.dispatch_action(Box::new(CancelTransform), cx)
+                                        }),
+                                    ]))
                             })
                             .when(
                                 matches!(
@@ -1721,11 +1658,12 @@ impl Workspace {
                                     panel
                                         .when(self.tool == Tool::CloneStamp, |panel| {
                                             panel.child(if self.clone_source.is_some() {
-                                                "Clone source set. Alt-click to change it."
+                                                info_note("Clone source set. Alt-click to change it.")
                                             } else {
-                                                "Alt-click to set the clone source."
+                                                info_note("Alt-click to set the clone source.")
                                             })
                                         })
+                                        .child(section_label("BRUSH"))
                                         .child(brush_row(
                                             "Size",
                                             self.brush_value(super::paint_ui::BrushField::Size),
@@ -1781,20 +1719,7 @@ impl Workspace {
                                         | Tool::Path
                                         | Tool::Text
                                 ),
-                                |panel| {
-                                    panel.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .rounded_md()
-                                            .p_2()
-                                            .bg(rgb(CHROME))
-                                            .text_color(rgb(MUTED))
-                                            .child(icon("info", 14.))
-                                            .child("Planned tool"),
-                                    )
-                                },
+                                |panel| panel.child(info_note("Planned tool")),
                             ),
                     )
                     .child(self.inspector_tabs(cx)),
@@ -1804,12 +1729,33 @@ impl Workspace {
     fn inspector_tabs(&self, cx: &Context<Self>) -> Div {
         let selected = self.inspector_tab;
         let tab = |label: &'static str, target: super::InspectorTab, cx: &Context<Self>| {
-            form_button(label, selected == target).on_click(cx.listener(move |this, _, _, cx| {
-                if this.inspector_tab != target {
-                    this.inspector_tab = target;
-                    cx.notify();
-                }
-            }))
+            let active = selected == target;
+            div()
+                .id(label)
+                .h(px(28.))
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .text_size(px(12.))
+                .when(active, |tab| {
+                    tab.bg(rgb(SELECTED))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                })
+                .when(!active, |tab| {
+                    tab.text_color(rgb(MUTED))
+                        .hover(|tab| tab.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.inspector_tab != target {
+                        this.inspector_tab = target;
+                        cx.notify();
+                    }
+                }))
+                .child(label)
         };
         let content = match selected {
             super::InspectorTab::Layers => self.layers_panel(cx),
@@ -1826,8 +1772,7 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_1()
-                    .px_3()
-                    .py_2()
+                    .p_2()
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(tab("Layers", super::InspectorTab::Layers, cx))
@@ -2111,6 +2056,218 @@ fn icon_button(symbol: &'static str) -> Div {
         .rounded_sm()
         .text_color(rgb(MUTED))
         .child(icon(symbol, 14.))
+}
+
+const OPTION_HEIGHT: f32 = 28.;
+const STEP_HEIGHT: f32 = 26.;
+
+pub(super) fn info_note(text: impl Into<gpui::SharedString>) -> Div {
+    div()
+        .flex()
+        .gap_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(CANVAS))
+        .p_2()
+        .text_size(px(12.))
+        .line_height(px(18.))
+        .text_color(rgb(MUTED))
+        .child(icon("info", 14.))
+        .child(div().flex_1().min_w_0().child(text.into()))
+}
+
+pub(super) fn option_row(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .child(control)
+}
+
+pub(super) fn segmented(children: impl IntoIterator<Item = gpui::Stateful<Div>>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .p_1()
+        .rounded_md()
+        .bg(rgb(CANVAS))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .children(children)
+}
+
+pub(super) fn choice_button(label: &'static str, selected: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(label)
+        .h(px(24.))
+        .flex_1()
+        .min_w_0()
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .text_size(px(11.))
+        .font_weight(if selected {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .when(selected, |button| {
+            button.bg(rgb(SELECTED)).text_color(rgb(TEXT))
+        })
+        .when(!selected, |button| {
+            button
+                .text_color(rgb(MUTED))
+                .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        })
+        .cursor_pointer()
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(label),
+        )
+}
+
+pub(super) fn toggle_button(label: &'static str, selected: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(label)
+        .h(px(OPTION_HEIGHT))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if selected { ACCENT } else { BORDER }))
+        .bg(rgb(if selected { SELECTED } else { CANVAS }))
+        .text_size(px(12.))
+        .text_color(rgb(if selected { TEXT } else { MUTED }))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .child(
+            div()
+                .size(px(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(if selected { ACCENT } else { BORDER }))
+                .when(selected, |mark| mark.bg(rgb(ACCENT)).text_color(rgb(PANEL)))
+                .child(if selected { "✓" } else { "" }),
+        )
+        .child(label)
+}
+
+pub(super) fn step_button(
+    id: impl Into<gpui::ElementId>,
+    symbol: &'static str,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(STEP_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(CHROME))
+        .text_color(rgb(MUTED))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .child(symbol)
+}
+
+pub(super) fn stepper(
+    value: impl Into<gpui::SharedString>,
+    down: gpui::Stateful<Div>,
+    up: gpui::Stateful<Div>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(down)
+        .child(
+            div()
+                .min_w(px(48.))
+                .h(px(STEP_HEIGHT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .bg(rgb(CANVAS))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .text_size(px(12.))
+                .child(value.into()),
+        )
+        .child(up)
+}
+
+pub(super) fn readout_chip(label: &'static str, value: impl ToString) -> Div {
+    div()
+        .h(px(STEP_HEIGHT))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_1()
+        .px_2()
+        .rounded_md()
+        .bg(rgb(CANVAS))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .child(div().text_size(px(12.)).child(value.to_string()))
+}
+
+pub(super) fn option_action(label: &'static str, primary: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(label)
+        .h(px(OPTION_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .px_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if primary { ACCENT } else { BORDER }))
+        .bg(rgb(if primary { SELECTED } else { CHROME }))
+        .text_size(px(12.))
+        .text_color(rgb(if primary { TEXT } else { MUTED }))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .child(label)
+}
+
+pub(super) fn action_row(children: impl IntoIterator<Item = gpui::Stateful<Div>>) -> Div {
+    div()
+        .flex()
+        .gap_2()
+        .children(children.into_iter().map(|child| child.flex_1()))
 }
 
 pub(super) fn section_label(text: &'static str) -> Div {
@@ -2572,15 +2729,14 @@ fn paint_checkerboard(window: &mut Window, image: Bounds<Pixels>, visible: Bound
 }
 
 fn selection_actions(enabled: bool) -> Div {
-    div()
-        .flex()
-        .gap_2()
-        .child(selection_button("Deselect", enabled, |window, cx| {
+    action_row([
+        selection_button("Deselect", enabled, |window, cx| {
             window.dispatch_action(Box::new(SelectNone), cx);
-        }))
-        .child(selection_button("Invert", enabled, |window, cx| {
+        }),
+        selection_button("Invert", enabled, |window, cx| {
             window.dispatch_action(Box::new(InvertSelection), cx);
-        }))
+        }),
+    ])
 }
 
 fn fill_mode_button(
@@ -2589,7 +2745,7 @@ fn fill_mode_button(
     mode: crate::document::FillMode,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
+    choice_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
         this.set_fill_mode(mode, cx);
     }))
 }
@@ -2600,7 +2756,7 @@ fn gradient_shape_button(
     shape: crate::paint::GradientShape,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+    choice_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
         this.set_gradient_shape(shape, window, cx);
     }))
 }
@@ -2611,7 +2767,7 @@ fn gradient_blend_button(
     blend: crate::paint::GradientBlend,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+    choice_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
         this.set_gradient_blend(blend, window, cx);
     }))
 }
@@ -2665,7 +2821,7 @@ fn warp_choice(
     mirror: Mirror,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    form_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+    choice_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
         this.set_warp_mirror(mirror, window, cx);
     }))
 }
@@ -2676,30 +2832,55 @@ fn resample_choice(
     selected: Resample,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    form_button(label, resample == selected).on_click(cx.listener(move |this, _, window, cx| {
+    choice_button(label, resample == selected).on_click(cx.listener(move |this, _, window, cx| {
         this.set_warp_resample(resample, window, cx);
     }))
 }
 
 fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child("Tolerance")
-        .child(
-            form_button("−", false).on_click(cx.listener(|this, _, _, cx| {
+    option_row(
+        "Tolerance",
+        stepper(
+            value.to_string(),
+            step_button("tolerance-down", "−").on_click(cx.listener(|this, _, _, cx| {
                 this.tolerance = this.tolerance.saturating_sub(1);
                 cx.notify();
             })),
-        )
-        .child(value.to_string())
-        .child(
-            form_button("+", false).on_click(cx.listener(|this, _, _, cx| {
+            step_button("tolerance-up", "+").on_click(cx.listener(|this, _, _, cx| {
                 this.tolerance = this.tolerance.saturating_add(1);
                 cx.notify();
             })),
-        )
+        ),
+    )
+}
+
+fn align_controls(enabled: bool, cx: &Context<super::Workspace>) -> Div {
+    div().flex().flex_wrap().gap_1().children([
+        align_button("align-top", "Align Top", AlignLayer::Top, enabled, cx),
+        align_button(
+            "align-bottom",
+            "Align Bottom",
+            AlignLayer::Bottom,
+            enabled,
+            cx,
+        ),
+        align_button("align-left", "Align Left", AlignLayer::Left, enabled, cx),
+        align_button("align-right", "Align Right", AlignLayer::Right, enabled, cx),
+        align_button(
+            "align-h-center",
+            "Center Horizontally",
+            AlignLayer::Horizontal,
+            enabled,
+            cx,
+        ),
+        align_button(
+            "align-v-center",
+            "Center Vertically",
+            AlignLayer::Vertical,
+            enabled,
+            cx,
+        ),
+    ])
 }
 
 fn align_button(
@@ -2732,29 +2913,12 @@ fn align_button(
         .child(icon(symbol, 15.))
 }
 
-fn readonly_size_chip(label: &'static str, value: u32) -> Div {
-    div()
-        .h(px(26.))
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .rounded_md()
-        .bg(rgb(CANVAS))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
-        .child(value.to_string())
-}
-
 fn selection_button(
     label: &'static str,
     enabled: bool,
     action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
-    form_button(label, false)
+    option_action(label, false)
         .when(enabled, |button| {
             button.on_click(move |_, window, cx| action(window, cx))
         })
@@ -2950,14 +3114,14 @@ fn brush_row(
     field: super::paint_ui::BrushField,
     cx: &Context<super::Workspace>,
 ) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(label)
-        .child(value.to_string())
-        .child(brush_step(label, false, field, cx))
-        .child(brush_step(label, true, field, cx))
+    option_row(
+        label,
+        stepper(
+            value.to_string(),
+            brush_step(label, false, field, cx),
+            brush_step(label, true, field, cx),
+        ),
+    )
 }
 
 fn brush_step(
@@ -2967,20 +3131,13 @@ fn brush_step(
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
     let name = if up { "up" } else { "down" };
-    div()
-        .id(gpui::SharedString::from(format!("{label} {name}")))
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(CHROME))
-        .cursor_pointer()
-        .hover(|button| button.bg(rgb(HOVER)))
-        .child(if up { "+" } else { "−" })
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.nudge_brush(field, if up { 1 } else { -1 }, cx);
-        }))
+    step_button(
+        gpui::SharedString::from(format!("{label} {name}")),
+        if up { "+" } else { "−" },
+    )
+    .on_click(cx.listener(move |this, _, _, cx| {
+        this.nudge_brush(field, if up { 1 } else { -1 }, cx);
+    }))
 }
 
 fn paint_stroke_patch(
