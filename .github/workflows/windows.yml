@@ -72,12 +72,13 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked --target ${{ env.RUST_TARGET }}
 
-      - name: Package the x64 test build
+      - name: Package the x64 portable build
         id: package
         shell: pwsh
         run: |
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-          $name = "lime-windows-x64-$shortSha"
+          $version = (Select-String -Path (Join-Path $env:GITHUB_WORKSPACE "Cargo.toml") -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $name = "Lime-$version-windows-x64"
           $zip = Join-Path $env:GITHUB_WORKSPACE "$name.zip"
           $out = Join-Path $env:GITHUB_WORKSPACE "dist-windows"
           $exe = Join-Path $env:GITHUB_WORKSPACE "target\$env:RUST_TARGET\release\lime.exe"
@@ -86,18 +87,19 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path $out -Force | Out-Null
-          Copy-Item $exe (Join-Path $out "lime.exe")
+          Copy-Item $exe (Join-Path $out "Lime.exe")
 
           @"
           Lime - Lite Image Editor
-          Windows x64 test build
+          Windows x64 portable release
 
-          Commit: $env:GITHUB_SHA
+          Version: $version
+          Commit: $env:GITHUB_SHA ($shortSha)
           Built from: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
           Target: $env:RUST_TARGET
 
-          This is a portable test build, not an installer and not a verified
-          release. The native menu bar and editing flows still need a manual
+          This is a portable program. Extract the ZIP and run Lime.exe; there is
+          no installer. The native menu bar and editing flows still need a manual
           review in Windows.
 
           Requirements:
@@ -106,8 +108,8 @@ jobs:
             vcruntime/UCRT DLLs are not already installed.
 
           Known limitations:
-          - No installer, code signing, executable icon resource, or .lime /
-            Open With file association yet.
+          - No code signing, executable icon resource, or .lime / Open With
+            file association yet.
           - Windows menus are built from the shared action tree and type-checked
             in CI, but they have not been runtime-verified by the maintainer.
           "@ | Set-Content -Path (Join-Path $out "READ-ME.txt") -Encoding utf8

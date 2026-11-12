@@ -264,8 +264,10 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/macos.rs` applies the same icon to the running Dock entry, including
   development launches from Cargo.
 - `scripts/bundle-macos.sh` copies the executable, Info.plist, and icon into
-  `dist/Lime.app`, ad hoc signs the bundle, and checks that signature and
-  the project and raster document types.
+  `dist/Lime.app`, ad hoc signs the bundle, checks that signature and the
+  project and raster document types, and rejects a Cargo version that differs
+  from `CFBundleShortVersionString`. `scripts/package-macos.sh` builds the app
+  and creates the drag-to-Applications `dist/Lime-<version>.dmg`.
 
 ## Build and check
 
@@ -274,8 +276,13 @@ From the repository root, use a recent Rust toolchain and Xcode. Run
 `cargo test --locked`. Keep `Cargo.lock` tracked. GPUI on macOS uses
 `font-kit` for text and compiles its Metal shaders at runtime.
 
+Keep the package version in `Cargo.toml` and
+`CFBundleShortVersionString` in `macos/Info.plist` in sync; a test checks both.
+
 Run `./scripts/bundle-macos.sh` and open `dist/Lime.app` for native smoke
-checks. Test a valid image and an unsupported file, switch and close tabs, and
+checks. `./scripts/package-macos.sh` additionally creates and verifies
+`dist/Lime-<version>.dmg` with an Applications shortcut. Test a valid image and
+an unsupported file, switch and close tabs, and
 try Finder's **Open With** after rebuilding packaging changes. For canvas work,
 test fit, fixed zoom, pan at a zoom that clips the image, and sampling after
 panning. Create an image with custom dimensions, fill and crop it, then save
@@ -290,5 +297,5 @@ memory; they are not disposable project fixtures.
 Keep local build output in `target/` and `dist/`. Use temporary directories
 for test images. Keep machine-specific settings and credentials out of source.
 `cargo clean` removes the rebuildable Rust output without deleting the current
-`dist/Lime.app`. Keep the golden project fixture and editable/packaged app
-icons; they are source assets, not generated leftovers.
+`dist/Lime.app` or DMG. Keep the golden project fixture and editable/packaged
+app icons; they are source assets, not generated leftovers.

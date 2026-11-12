@@ -7,6 +7,12 @@ if [ "$(uname -s)" != Darwin ]; then
 fi
 
 cd "$(dirname "$0")/.."
+package_version=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/Info.plist)
+if [ "$package_version" != "$bundle_version" ]; then
+    echo "Cargo version $package_version does not match the bundle version $bundle_version." >&2
+    exit 1
+fi
 cargo build --release --locked --target-dir target
 
 app="dist/Lime.app"

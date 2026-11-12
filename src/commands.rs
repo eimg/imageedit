@@ -1149,6 +1149,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn package_and_bundle_versions_match() {
+        let cargo = include_str!("../Cargo.toml");
+        let version = cargo
+            .lines()
+            .find_map(|line| line.strip_prefix("version = \""))
+            .expect("Cargo.toml has a package version")
+            .trim_end_matches('"');
+        let plist = include_str!("../macos/Info.plist");
+        assert!(
+            plist.contains(&format!(
+                "<key>CFBundleShortVersionString</key>\n    <string>{version}</string>"
+            )),
+            "the macOS bundle version does not match Cargo.toml"
+        );
+    }
+
     fn menu_labels(menus: &[Menu]) -> Vec<String> {
         let mut labels = Vec::new();
         for menu in menus {
