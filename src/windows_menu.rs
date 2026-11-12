@@ -421,7 +421,8 @@ mod tests {
             MenuNode::Command(0),
             "File starts with New Image"
         );
-        assert!(matches!(file.items[1], MenuNode::Separator));
+        assert_eq!(file.items[1], MenuNode::Command(1));
+        assert!(matches!(file.items[2], MenuNode::Separator));
         assert!(
             find_command(&plan, "Exit")
                 .action
