@@ -60,6 +60,7 @@ impl Workspace {
         } else if self.crop.is_some() {
             Some("crop")
         } else if self.move_drag.is_some()
+            || self.scale_drag.is_some()
             || self.stroke.is_some()
             || self.path_gesture.is_some()
             || self.opacity_drag.is_some()

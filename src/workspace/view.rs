@@ -200,6 +200,11 @@ impl Render for Workspace {
                             |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
                         ))
                     })
+                    .when(self.tool == Tool::ScaleLayer, |root| {
+                        root.key_context("Move").on_action(cx.listener(
+                            |this, _: &CancelMove, window, cx| this.cancel_scale(window, cx),
+                        ))
+                    })
                     .when(
                         matches!(
                             self.tool,

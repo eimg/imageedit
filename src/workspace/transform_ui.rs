@@ -47,6 +47,10 @@ impl Workspace {
     }
 
     fn adjust_image(&mut self, action: ImageAdjust, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.adjust_image(action, window, cx));
+            return;
+        }
         if !self.transform_enabled() || self.refuse_text_pixels(true, cx) {
             return;
         }
@@ -75,6 +79,10 @@ impl Workspace {
     }
 
     fn adjust_layer(&mut self, action: LayerAdjust, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.adjust_layer(action, window, cx));
+            return;
+        }
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
@@ -127,7 +135,7 @@ impl Workspace {
                     if !content.scale_image(width, height, resample) {
                         return Dirty::None;
                     }
-                    if matches!(previous, Selection::Mask(_)) {
+                    if matches!(previous, Selection::Mask(_) | Selection::RoundedRect(_)) {
                         *selection = previous.scale_mask(old, content.size());
                         return Dirty::Canvas;
                     }
@@ -139,12 +147,6 @@ impl Workspace {
                         ),
                         Selection::Ellipse(ellipse) => Selection::ellipse_rect(
                             transform::scale_rect(ellipse.rect(), old, content.size()),
-                            content.size().0,
-                            content.size().1,
-                        ),
-                        Selection::RoundedRect(shape) => Selection::rounded_rect_rect(
-                            transform::scale_rect(shape.rect(), old, content.size()),
-                            shape.radius(),
                             content.size().0,
                             content.size().1,
                         ),

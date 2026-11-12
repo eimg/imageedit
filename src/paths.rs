@@ -319,7 +319,6 @@ fn simplify_closed_at(points: &[(f64, f64)], tolerance: f64) -> Vec<(f64, f64)> 
     let mut closing = points[far..].to_vec();
     closing.push(points[0]);
     let right = simplify_open(&closing, tolerance);
-    left.pop();
     left.extend(right.into_iter().skip(1));
     left.pop();
     left
@@ -616,5 +615,11 @@ mod tests {
             (3.0, 2.0)
         );
         assert_eq!(scale_point((2.0, 4.0), (4, 8), (8, 16)), (4.0, 8.0));
+    }
+
+    #[test]
+    fn simplifying_a_closed_outline_preserves_the_shared_farthest_vertex() {
+        let square = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert_eq!(simplify_closed_at(&square, 0.5), square);
     }
 }

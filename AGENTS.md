@@ -40,7 +40,8 @@ commit on Apply, leaving the selection in canvas coordinates. Perspective
 corner grips keep a dark rim so they stay visible on a white image. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
 border or corner; release commits one undo step, and its Width/Height options
-are read-only for now, and the tool uses Shift+S. Clone Stamp uses Shift+C,
+are read-only for now, and the tool uses Shift+S. Escape or a layer/tab change
+cancels the scale drag. Clone Stamp uses Shift+C,
 sets its source with Alt-click, and copies from that offset while painting. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled
@@ -78,7 +79,9 @@ once. Native Edit menu actions and Undo/Redo step through the typing first,
 then fall through to image history. There is no Apply or Discard: Escape,
 Cmd/Ctrl-Enter, a click outside the text, or changing tools, layers, tabs, or
 any image command commits a modified draft as one undo step, and a command
-that depends on the result runs after that commit lands. An empty new draft
+that depends on the result resolves its active layer after that commit lands.
+If rendering or the layer budget rejects a commit, its draft stays available
+on its original tab and Save/Export does not continue. An empty new draft
 just closes. Save/Export commit typed text first and still require other
 visible previews to be applied or discarded; Close/Quit count pending edits as
 unsaved work. The text options pick the font from the installed families, the
@@ -155,7 +158,9 @@ or oval, resizes it from its handles, moves it from inside, and clears it on a
 click outside. Oval Select has a Circle option. Rectangle Select has a corner
 radius control with minus and plus buttons, and the Width/Height fields edit
 the current size with live preview. Empty numeric text keeps the selection
-unchanged. Free Select drags a freehand
+unchanged. Cropping or shrinking the canvas preserves curved selection coverage;
+a partially clipped curve becomes a bounded mask. Scaling a rounded selection
+scales its coverage on both axes as a mask. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
 drag keeps the draft open as a checkpoint, and the start node or Return closes
 it. The Magic Wand shares the bucket tolerance.

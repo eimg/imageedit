@@ -366,19 +366,14 @@ impl Selection {
     }
 
     pub fn ellipse_rect(rect: PixelRect, width: u32, height: u32) -> Self {
-        let Some(rect) = clip(rect, width, height) else {
-            return Self::Empty;
-        };
         Self::Ellipse(EllipseSelection {
             rect,
             outline: Arc::default(),
         })
+        .clip_shape(rect, width, height)
     }
 
     pub fn rounded_rect_rect(rect: PixelRect, radius: u32, width: u32, height: u32) -> Self {
-        let Some(rect) = clip(rect, width, height) else {
-            return Self::Empty;
-        };
         let radius = radius.min(rect.width.min(rect.height) / 2);
         if radius == 0 {
             return Self::from_rect(rect, width, height);
@@ -388,6 +383,34 @@ impl Selection {
             radius,
             outline: Arc::default(),
         })
+        .clip_shape(rect, width, height)
+    }
+
+    // Clipping a curved shape must retain its original curvature. Rebuilding
+    // the shape in the clipped box would squeeze it into a different ellipse
+    // or add rounded corners along the new canvas edge.
+    fn clip_shape(self, rect: PixelRect, width: u32, height: u32) -> Self {
+        let Some(clipped) = clip(rect, width, height) else {
+            return Self::Empty;
+        };
+        if clipped == rect {
+            return self;
+        }
+        let mut pixels = Vec::with_capacity(clipped.width as usize * clipped.height as usize);
+        for y in clipped.y..clipped.bottom() {
+            for x in clipped.x..clipped.right() {
+                pixels.push(self.coverage(x, y, width, height));
+            }
+        }
+        finish_mask(
+            clipped.x as i32,
+            clipped.y as i32,
+            clipped.width,
+            clipped.height,
+            pixels,
+            width,
+            height,
+        )
     }
 
     pub fn invert(self, width: u32, height: u32) -> Self {
@@ -723,25 +746,29 @@ impl Selection {
     }
 
     pub fn scale_mask(self, old: (u32, u32), new: (u32, u32)) -> Self {
-        let Self::Mask(mask) = self else {
+        if !matches!(self, Self::Mask(_) | Self::RoundedRect(_)) {
             return self;
-        };
+        }
         if old.0 == 0 || old.1 == 0 || new.0 == 0 || new.1 == 0 {
             return Self::Empty;
         }
-        let (x, width) = scaled_span(i64::from(mask.x), mask.width, old.0, new.0);
-        let (y, height) = scaled_span(i64::from(mask.y), mask.height, old.1, new.1);
+        let Some(bounds) = self.bounds(old.0, old.1) else {
+            return Self::Empty;
+        };
+        let (x, width) = scaled_span(bounds.x, bounds.width, old.0, new.0);
+        let (y, height) = scaled_span(bounds.y, bounds.height, old.1, new.1);
         if width == 0 || height == 0 {
             return Self::Empty;
         }
         let mut pixels = vec![0u8; width as usize * height as usize];
         for row in 0..height {
             for column in 0..width {
-                let source_x = mask.x
-                    + ((i64::from(column) * i64::from(mask.width)) / i64::from(width)) as i32;
+                let source_x =
+                    bounds.x + (i64::from(column) * i64::from(bounds.width)) / i64::from(width);
                 let source_y =
-                    mask.y + ((i64::from(row) * i64::from(mask.height)) / i64::from(height)) as i32;
-                pixels[(row * width + column) as usize] = mask.coverage(source_x, source_y);
+                    bounds.y + (i64::from(row) * i64::from(bounds.height)) / i64::from(height);
+                pixels[(row * width + column) as usize] =
+                    self.coverage(source_x, source_y, old.0, old.1);
             }
         }
         finish_mask(x, y, width, height, pixels, new.0, new.1)
@@ -2029,6 +2056,47 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cropping_and_canvas_shrinking_clip_curves_without_reshaping_them() {
+        for selection in [
+            Selection::ellipse_rect(PixelRect::new(0, 0, 8, 8), 8, 8),
+            Selection::rounded_rect_rect(PixelRect::new(0, 0, 8, 8), 3, 8, 8),
+        ] {
+            let cropped = selection.clone().rebase(4, 0, 4, 8);
+            let resized = selection.clone().resize_canvas((8, 8), (4, 8), (-4, 0));
+            for y in 0..8 {
+                for x in 0..4 {
+                    let expected = selection.coverage(x + 4, y, 8, 8);
+                    assert_eq!(cropped.coverage(x, y, 4, 8), expected);
+                    assert_eq!(resized.coverage(x, y, 4, 8), expected);
+                }
+            }
+            // Clipped masks still have a closed contour for Path/Stroke Selection.
+            assert!(
+                cropped
+                    .stroke_polylines(4, 8)
+                    .iter()
+                    .all(|line| line.first() == line.last())
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_selection_scaling_scales_corner_coverage_on_both_axes() {
+        let original = Selection::rounded_rect_rect(PixelRect::new(1, 1, 6, 6), 3, 8, 8);
+        for new in [(16, 16), (16, 24)] {
+            let scaled = original.clone().scale_mask((8, 8), new);
+            for y in 0..new.1 {
+                for x in 0..new.0 {
+                    assert_eq!(
+                        scaled.coverage(x as i64, y as i64, new.0, new.1),
+                        original.coverage((x * 8 / new.0) as i64, (y * 8 / new.1) as i64, 8, 8),
+                    );
                 }
             }
         }

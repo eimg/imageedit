@@ -56,6 +56,8 @@ struct Tab {
     notice: Option<String>,
     building_level: Option<u32>,
     selection: Selection,
+    // Keep a recoverable draft until its background commit has published.
+    pending_text: Option<text_ui::TextDraft>,
 }
 
 impl Tab {
@@ -65,6 +67,25 @@ impl Tab {
 
     fn dirty(&self) -> bool {
         self.history.is_dirty()
+            || self
+                .pending_text
+                .as_ref()
+                .is_some_and(text_ui::TextDraft::changed)
+    }
+
+    fn settle_text_commit(&mut self, published: bool) -> bool {
+        if published {
+            self.pending_text = None;
+            return false;
+        }
+        if self.pending_text.is_none() {
+            return false;
+        }
+        self.notice = Some(
+            "Text could not be committed. The draft was kept; check its dimensions and the layer limit."
+                .into(),
+        );
+        true
     }
 
     fn state(&self) -> State {
@@ -470,6 +491,7 @@ impl Workspace {
             notice: None,
             building_level: None,
             selection: Selection::Unrestricted,
+            pending_text: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -490,6 +512,7 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
         if switched {
+            self.commit_numeric_edit(window, cx);
             // A commit that starts here finishes on the tab it belongs to.
             self.finish_text(window, cx);
             self.drop_settled_text(window, cx);
@@ -502,10 +525,12 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_scale(window, cx);
             self.cancel_text(window, cx);
             self.opacity_drag = None;
         }
         self.active = Some(index);
+        self.recover_pending_text(window, cx);
         self.pan_drag = None;
         self.tab_scroll.scroll_to_item(index);
         self.update_title(window);
@@ -537,6 +562,7 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_scale(window, cx);
             self.cancel_text(window, cx);
             self.drop_settled_text(window, cx);
             self.text_continuation = None;
@@ -553,6 +579,7 @@ impl Workspace {
         if let Some(active) = self.active {
             self.tab_scroll.scroll_to_item(active);
         }
+        self.recover_pending_text(window, cx);
         self.update_title(window);
         if closed_active && self.active.is_some() {
             self.begin_warp(window, cx);
@@ -700,7 +727,19 @@ impl Workspace {
         if self.text_settled == Some(id) {
             self.drop_settled_text(window, cx);
         }
-        self.publish_change(id, generation, change, result, window, cx);
+        let published = self.publish_change(id, generation, change, result, window, cx);
+        if let Some(index) = self.tab_index(id)
+            && self.tabs[index].settle_text_commit(published)
+        {
+            if self
+                .text_continuation
+                .as_ref()
+                .is_some_and(|(tab, _)| *tab == id)
+            {
+                self.text_continuation = None;
+            }
+            self.recover_pending_text(window, cx);
+        }
         if self
             .text_continuation
             .as_ref()
@@ -726,9 +765,9 @@ impl Workspace {
         )>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(index) = self.tab_index(id) else {
-            return;
+            return false;
         };
         if self.active == Some(index) && self.move_settled.is_some() {
             self.move_token = self.move_token.wrapping_add(1);
@@ -749,11 +788,11 @@ impl Workspace {
         let tab = &mut self.tabs[index];
         tab.editing = false;
         let Some((content, edited_layer, edited_selection, patch)) = result else {
-            return;
+            return false;
         };
         if tab.history.generation() != generation {
             drop_images(patch.into_images(), window, cx);
-            return;
+            return false;
         }
         let current = tab.state();
         let (content, active_layer, selection) = match change {
@@ -771,7 +810,7 @@ impl Workspace {
                 // Another tab can evict this history target while the patch is rendering.
                 let Some(state) = state else {
                     drop_images(patch.into_images(), window, cx);
-                    return;
+                    return false;
                 };
                 (state.content, state.active_layer, state.selection)
             }
@@ -803,6 +842,7 @@ impl Workspace {
         );
         self.update_title(window);
         self.ensure_preview_level(window.scale_factor(), window, cx);
+        true
     }
 
     fn update_title(&self, window: &mut Window) {

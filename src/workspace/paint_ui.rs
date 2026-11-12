@@ -137,14 +137,7 @@ impl Workspace {
                 self.notice("Alt-click to set the clone source.", cx);
                 return;
             };
-            let source_local = (
-                i64::from(source_point.0) - i64::from(offset.0),
-                i64::from(source_point.1) - i64::from(offset.1),
-            );
-            StrokeKind::Clone {
-                dx: source_local.0 - here.0.round() as i64,
-                dy: source_local.1 - here.1.round() as i64,
-            }
+            clone_kind(source_point, offset, here)
         } else {
             kind
         };
@@ -389,4 +382,35 @@ fn local_point(canvas: (f64, f64), offset: (i32, i32)) -> (f64, f64) {
         canvas.0 - f64::from(offset.0),
         canvas.1 - f64::from(offset.1),
     )
+}
+
+fn clone_kind(source: (u32, u32), offset: (i32, i32), here: (f64, f64)) -> StrokeKind {
+    StrokeKind::Clone {
+        dx: i64::from(source.0) - i64::from(offset.0) - here.0.floor() as i64,
+        dy: i64::from(source.1) - i64::from(offset.1) - here.1.floor() as i64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloning_at_a_pixel_center_samples_the_chosen_source_on_an_offset_layer() {
+        let mut source = RgbaImage::new(5, 3);
+        let ink = image::Rgba([220, 30, 40, 255]);
+        source.put_pixel(4, 2, ink);
+        let offset = (-2, 3);
+        let mut stroke = Stroke::new(
+            clone_kind((2, 5), offset, (0.5, 0.5)),
+            ink,
+            crate::paint::Brush {
+                diameter: 1,
+                ..Default::default()
+            },
+        );
+        stroke.sample(0.5, 0.5, &source, |_, _| 255);
+        let (painted, _) = crate::paint::apply_stroke(&source, &stroke).unwrap();
+        assert_eq!(*painted.get_pixel(0, 0), ink);
+    }
 }

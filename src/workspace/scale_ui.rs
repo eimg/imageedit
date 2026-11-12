@@ -286,6 +286,12 @@ fn scale_target(
     }
     let width = (right - left).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
     let height = (bottom - top).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
+    if edges.left {
+        left = right - i64::from(width);
+    }
+    if edges.top {
+        top = bottom - i64::from(height);
+    }
     PixelRect::new(
         left.clamp(i64::from(i32::MIN), i64::from(i32::MAX)),
         top.clamp(i64::from(i32::MIN), i64::from(i32::MAX)),
@@ -366,6 +372,11 @@ mod tests {
             scale_target(original, right, (0, 0), (-100, 0)),
             PixelRect::new(10, 20, 1, 40)
         );
+        let limited = scale_target(original, corner, (0, 0), (-100_000, -100_000));
+        assert_eq!(limited.width, MAX_NEW_EDGE);
+        assert_eq!(limited.height, MAX_NEW_EDGE);
+        assert_eq!(limited.right(), original.right());
+        assert_eq!(limited.bottom(), original.bottom());
     }
 
     #[test]

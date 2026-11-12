@@ -395,6 +395,10 @@ impl Workspace {
     }
 
     pub(super) fn scale_image_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.scale_image_form(window, cx));
+            return;
+        }
         if self.refuse_text_pixels(true, cx) {
             return;
         }
@@ -405,6 +409,10 @@ impl Workspace {
     }
 
     pub(super) fn scale_layer_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.scale_layer_form(window, cx));
+            return;
+        }
         if self.refuse_text_pixels(false, cx) {
             return;
         }

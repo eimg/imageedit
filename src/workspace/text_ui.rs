@@ -189,11 +189,30 @@ impl TextDraft {
         true
     }
 
-    fn changed(&self) -> bool {
+    pub(super) fn changed(&self) -> bool {
         if self.layer.is_none() {
             return !self.source.is_empty();
         }
         self.anchor != self.baseline_anchor || !self.baseline.matches(&self.spec())
+    }
+
+    fn apply(&self, content: &mut document::DocumentContent, active: &mut LayerId) -> Dirty {
+        let rendered = if self.rendered.matches(&self.spec()) {
+            self.rendered.as_ref().clone()
+        } else {
+            match text::render_spec(&self.spec()) {
+                Ok(rendered) => rendered,
+                Err(_) => return Dirty::None,
+            }
+        };
+        if let Some(id) = self.layer {
+            content.set_text(id, self.anchor, rendered)
+        } else if let Some(id) = content.insert_text_layer(self.above, self.anchor, rendered) {
+            *active = id;
+            Dirty::Canvas
+        } else {
+            Dirty::None
+        }
     }
 
     /// The layout box of the text in canvas pixels: left, top, right, bottom.
@@ -227,6 +246,11 @@ impl TextDraft {
     }
 
     fn hit(&self, pixel: (i64, i64)) -> Option<usize> {
+        // Preview layout runs in the background. Its byte offsets may refer to
+        // the previous source, including the middle of a new UTF-8 character.
+        if !self.carets.matches(&self.spec()) {
+            return None;
+        }
         self.carets.hit(
             pixel.0 as f32 + 0.5 - self.anchor.0 as f32,
             pixel.1 as f32 + 0.5 - self.anchor.1 as f32,
@@ -937,6 +961,11 @@ impl Workspace {
         let Some(draft) = self.text_draft.as_ref() else {
             return false;
         };
+        self.text_defaults = TextDefaults {
+            family: draft.family.clone(),
+            size: draft.size,
+            spacing: draft.spacing,
+        };
         let Some(tab) = self.active_tab() else {
             self.cancel_text(window, cx);
             return false;
@@ -961,41 +990,17 @@ impl Workspace {
             self.notice("The text layer is hidden, so the edit was not kept.", cx);
             return false;
         }
-        if draft.layer.is_none() && !tab.document.content.can_add_layer() {
-            self.cancel_text(window, cx);
-            self.notice("This image cannot take another layer.", cx);
-            return false;
-        }
         let Some(draft) = self.text_draft.take() else {
             return false;
         };
+        if let Some(index) = self.active {
+            self.tabs[index].pending_text = Some(draft.clone());
+        }
         let id = draft.tab;
-        let spec = draft.spec();
-        let layer = draft.layer;
-        let anchor = draft.anchor;
-        let above = draft.above;
-        let rendered = draft.rendered;
         // The preview stays on the canvas until the committed pixels replace it.
         self.text_settled = self.text_overlay.is_some().then_some(id);
         self.edit_content(
-            move |content, active, _| {
-                let rendered = if rendered.matches(&spec) {
-                    Arc::unwrap_or_clone(rendered)
-                } else {
-                    match text::render_spec(&spec) {
-                        Ok(rendered) => rendered,
-                        Err(_) => return Dirty::None,
-                    }
-                };
-                if let Some(id) = layer {
-                    content.set_text(id, anchor, rendered)
-                } else if let Some(id) = content.insert_text_layer(above, anchor, rendered) {
-                    *active = id;
-                    Dirty::Canvas
-                } else {
-                    Dirty::None
-                }
-            },
+            move |content, active, _| draft.apply(content, active),
             window,
             cx,
         );
@@ -1006,9 +1011,28 @@ impl Workspace {
         self.text_error = None;
         if !started {
             self.drop_settled_text(window, cx);
+            self.recover_pending_text(window, cx);
         }
         cx.notify();
         started
+    }
+
+    pub(super) fn recover_pending_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.active else {
+            return;
+        };
+        if self.tabs[index].busy() || self.text_draft.is_some() {
+            return;
+        }
+        let Some(mut draft) = self.tabs[index].pending_text.take() else {
+            return;
+        };
+        draft.generation = self.tabs[index].history.generation();
+        self.tool = crate::commands::Tool::Text;
+        self.text_draft = Some(draft);
+        self.caret_shown_at = std::time::Instant::now();
+        self.start_caret_blink(window, cx);
+        self.request_text_preview(window, cx);
     }
 
     /// Runs `then` after the text commit that `finish_text` just started.
@@ -1526,5 +1550,74 @@ mod tests {
         let line = draft.carets.line_height;
         let byte = draft.hit((2, 3 + line as i64 + 1)).unwrap();
         assert_eq!(byte, 3);
+    }
+
+    #[test]
+    fn clicking_before_the_preview_catches_up_cannot_reuse_stale_utf8_offsets() {
+        let mut draft = draft(None);
+        draft.source = "abcdef".into();
+        draft.carets = Arc::new(text::caret_map(&draft.spec()).unwrap());
+        draft.source = "上".into();
+        draft.cursor = draft.source.len();
+        assert_eq!(draft.hit((20, 4)), None);
+        draft.carets = Arc::new(text::caret_map(&draft.spec()).unwrap());
+        let byte = draft.hit((20, 4)).unwrap();
+        assert!(draft.source.is_char_boundary(byte));
+    }
+
+    #[test]
+    fn failed_commits_keep_the_draft_unsaved_until_it_can_be_recovered() {
+        let document = document::Document::blank("Image".into(), 2, 2, image::Rgba([0, 0, 0, 0]));
+        let mut tab = super::super::Tab {
+            id: 1,
+            stroke_anchor: None,
+            active_layer: document.content.top_layer_id(),
+            document,
+            zoom: crate::commands::Zoom::Fit,
+            pan: gpui::Point::default(),
+            history: super::super::history::History::new(true),
+            editing: false,
+            saving: None,
+            exporting: false,
+            notice: None,
+            building_level: None,
+            selection: crate::selection::Selection::Unrestricted,
+            pending_text: Some(draft(None)),
+        };
+        assert!(tab.settle_text_commit(false));
+        assert!(tab.dirty());
+        assert_eq!(tab.pending_text.as_ref().unwrap().source, "café 上");
+        assert!(tab.notice.is_some());
+        assert!(!tab.settle_text_commit(true));
+        assert!(tab.pending_text.is_none());
+        assert!(!tab.dirty());
+    }
+
+    #[test]
+    fn failed_text_rendering_and_full_layer_stacks_leave_the_document_intact() {
+        let mut draft = draft(None);
+        let mut content = document::DocumentContent::single_layer(
+            "Background".into(),
+            image::RgbaImage::new(2, 2),
+        );
+        let mut active = content.top_layer_id();
+        let pixels = content.layer(active).unwrap().pixels.clone();
+        draft.source = "A".repeat(MAX_TEXT_CHARS);
+        draft.size = MAX_PIXEL_SIZE;
+        assert_eq!(draft.apply(&mut content, &mut active), Dirty::None);
+        assert!(draft.changed());
+        assert_eq!(content.layers().len(), 1);
+        assert!(Arc::ptr_eq(&pixels, &content.layer(active).unwrap().pixels));
+
+        while content.can_add_layer() {
+            content
+                .add_layer(active, "Layer".into(), image::Rgba([0, 0, 0, 0]))
+                .unwrap();
+        }
+        draft.source = draft.rendered.style.source.clone();
+        draft.size = draft.rendered.style.size;
+        assert_eq!(draft.apply(&mut content, &mut active), Dirty::None);
+        assert!(draft.changed());
+        assert!(Arc::ptr_eq(&pixels, &content.layer(active).unwrap().pixels));
     }
 }

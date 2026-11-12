@@ -189,6 +189,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.run_layer_command(command, window, cx)
+            });
+            return;
+        }
         if !self.layer_command_enabled(command) {
             return;
         }
@@ -311,6 +317,7 @@ impl Workspace {
             self.cancel_warp(window, cx);
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
+            self.cancel_scale(window, cx);
             self.begin_warp(window, cx);
             cx.notify();
         }
@@ -619,6 +626,10 @@ impl Workspace {
     }
 
     fn align_active(&mut self, axis: AlignLayer, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.align_active(axis, window, cx));
+            return;
+        }
         let Some(id) = self.active_tab().map(|tab| tab.active_layer) else {
             return;
         };
@@ -639,6 +650,10 @@ impl Workspace {
     }
 
     fn layer_to_image_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.layer_to_image_size(window, cx));
+            return;
+        }
         if self.refuse_text_pixels(false, cx) {
             return;
         }
@@ -663,6 +678,10 @@ impl Workspace {
     }
 
     fn crop_layer_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.crop_layer_to_content(window, cx));
+            return;
+        }
         if self.refuse_text_pixels(false, cx) {
             return;
         }
@@ -688,6 +707,10 @@ impl Workspace {
     }
 
     fn crop_image_to_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.crop_image_to_content(window, cx));
+            return;
+        }
         if self.refuse_text_pixels(true, cx) {
             return;
         }

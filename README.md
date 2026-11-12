@@ -57,7 +57,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   a dashed box or ellipse with handles: drag a handle to resize it, drag inside
   to move it, and click outside it to deselect. The Width and Height fields show
   the current size while drawing, and typed values resize the selection
-  immediately. Empty text leaves the selection unchanged. The dashes move along
+  immediately. Empty text leaves the selection unchanged. Cropping or shrinking
+  the canvas clips curved selections without reshaping them; a partially clipped
+  curve becomes a mask. Scaling a rounded selection scales its corners with the
+  image, also using a mask. The dashes move along
   the outline. The pointer becomes a resize arrow on a handle
   and a hand inside the box. Select All, Deselect, and Invert are in the Select
   menu and in the tool options.
@@ -102,7 +105,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   in place. Perspective requires a convex shape within the layer size limit.
   The **Scale Layer** tool (`Shift+S`) draws a frame around the active layer;
   drag a border or corner to scale it, and release commits one undo step. Its
-  Width and Height options are read-only for now. **Pencil**, **Brush**,
+  Width and Height options are read-only for now. Escape or changing layers or
+  tabs cancels a scale drag. **Pencil**, **Brush**,
   **Eraser** (`E`), **Blur**, **Sharpen**, and **Clone Stamp** (`Shift+C`)
   draw on the active layer. Pencil starts at one pixel and uses a hard edge.
   Brush, Eraser, Blur, Sharpen, and Clone Stamp also offer hardness and
@@ -145,7 +149,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   Edit menu actions edit the text instead of the image. Undo and Redo step
   through the typing first, then the image history. There is no Apply step:
   Escape, another tool, layer, or tab, a click outside the text, or any image
-  command commits the text as one undo step. The tool options choose the font
+  command commits the text as one undo step. Commands resolve the active layer
+  after that commit. If the text exceeds rendering or layer limits, the draft
+  stays available on its tab and Save/Export stops so it can be corrected.
+  The tool options choose the font
   from the installed families (or Sans Serif, Serif, Monospace), the pixel size
   from 1 to 256, letter spacing in pixels, line spacing as a percentage of the
   size, and the text color. New text starts with the last style and the
