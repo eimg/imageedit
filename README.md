@@ -1,22 +1,22 @@
-# ImageEdit
+# Lime — Lite Image Editor
 
-<img src="macos/AppIcon.svg" width="96" alt="ImageEdit app icon">
+<img src="macos/AppIcon.svg" width="96" alt="Lime app icon">
 
-ImageEdit is a lightweight desktop image editor in development. It uses Rust
+Lime is a lite image editor for the desktop, currently in development. It uses Rust
 and [GPUI](https://gpui.rs/) with a GIMP-inspired workspace and native macOS
-menus. The current milestone supports layered image editing.
+menus. It supports layered raster editing.
 
 ## Try it on macOS
 
 Install a recent Rust toolchain with Cargo and select an Xcode installation.
-Clone the repository, then run these commands from its root.
+Clone [eimg/lime](https://github.com/eimg/lime), then run these commands from its root.
 
 ```sh
 ./scripts/bundle-macos.sh
-open dist/ImageEdit.app
+open dist/Lime.app
 ```
 
-The script builds an optimized, ad hoc signed app with the ImageEdit icon and
+The script builds an optimized, ad hoc signed app with the Lime icon and
 Finder file associations. Use the bundle to check image loading performance
 and Finder integration. Run `cargo run --locked` for a debug build.
 
@@ -25,20 +25,21 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - **File → New Image** accepts pixel dimensions and creates a transparent
   canvas or fills it with the background swatch. The empty workspace offers
   the same action as a quiet button under Choose Files.
-- **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
+- **File → Open** accepts Lime projects, PNG, JPEG, and WebP. You can
   also drop files onto the canvas or use Finder’s **Open With** menu.
   Reopening the same file focuses its existing tab.
 - Apply or discard an active transform, gradient, or crop preview before
   saving or exporting. Text being typed is committed first. Closing an image with a pending edit asks before discarding it.
-- **Save** updates the current file. New canvases are saved as `.imageedit`
+- **Save** updates the current file. New canvases are saved as `.lime`
   projects. An opened PNG, JPEG, or WebP keeps saving to its own format while
   it is still a single plain layer without paths or editable text. **Save As** adopts the new filename and
   uses its extension to choose the format. Projects, new canvases, and layered
-  documents can only be saved as `.imageedit`. **Save Project As** suggests
-  `.imageedit` when converting an opened image to a project.
+  documents use the project format, with `.lime` as the default extension. **Save Project As** suggests
+  `.lime` when converting an opened image to a project. Legacy `.imageedit`
+  projects still open and save; Save As suggests `.lime` for them.
 - **File → Export as PNG, JPEG, or WebP** writes a flattened copy of the
   visible image to a separate file and preserves the tab's unsaved marker.
-  Choose a destination that is closed in ImageEdit. PNG and WebP keep
+  Choose a destination that is closed in Lime. PNG and WebP keep
   transparency. JPEG asks for a quality from 1 to
   100 (default 92) and places transparent areas on white.
 - Projects preserve the canvas dimensions and the layer stack: each layer's
@@ -53,7 +54,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   samples the image at full resolution.
   **Rectangle Select** (`R`) drags a rectangle, with a corner-radius control
   that has minus and plus buttons. **Oval Select** (`O`) drags an oval; enable
-  **Circle** in its options to constrain it to an exact circle. Each outline is
+  **Circle** in its options to constrain it to an exact circle. Drags may start
+  or extend outside the canvas, while selected pixels stay clipped to the image.
+  Each editable outline is
   a dashed box or ellipse with handles: drag a handle to resize it, drag inside
   to move it, and click outside it to deselect. The Width and Height fields show
   the current size while drawing, and typed values resize the selection
@@ -113,7 +116,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   opacity. Blur and Sharpen have no keyboard shortcut. Use `[` and `]` to
   decrease or increase the brush size for all paint tools. Alt-click with
   Clone Stamp to set its source, then paint to copy pixels from that offset.
-  Holding Alt changes its cursor to show the copy source is ready.
+  Holding Option (Alt) shows the source-picking cursor; releasing it restores
+  the brush cursor without requiring a pointer move.
   Blur softens the pixels under the brush, and Sharpen raises local contrast.
   The pointer is a size-accurate ring that follows the brush diameter and zoom:
   solid for Pencil, with a soft inner ring for the other paint tools. Release
@@ -153,8 +157,12 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   after that commit. If the text exceeds rendering or layer limits, the draft
   stays available on its tab and Save/Export stops so it can be corrected.
   The tool options choose the font
-  from the installed families (or Sans Serif, Serif, Monospace), the pixel size
-  from 1 to 256, letter spacing in pixels, line spacing as a percentage of the
+  from the installed families (or Sans Serif, Serif, Monospace), with an Aa
+  sample in each font. Scrolling inside the font list keeps Tool Options still.
+  Click the font box and type part of a name to filter it without regard to
+  case. Use the arrow keys to browse, Return to choose, or Escape to close.
+  Bold and Italic are independent toggles for the whole text layer. Choose the
+  pixel size from 1 to 256, letter spacing in pixels, line spacing as a percentage of the
   size, and the text color. New text starts with the last style and the
   foreground color. A missing
   named font shows a substitution notice. Reopening a text layer keeps its saved
@@ -222,6 +230,17 @@ tools keep the icon and tooltip. The foreground and background swatches stack
 vertically in the folded rail, with the swap control between them. Menus keep
 the full names used below.
 
+Tool Options keeps controls and editing values visible. Hover the question-mark
+help icon beside the tool name for essential gestures, modifiers, and how to
+apply or cancel an edit. The Paths panel has its own help icon. Warnings and
+progress remain visible in the panel.
+
+Click a numeric value in Tool Options to type it, including tolerance, brush
+settings, path stroke size, and text spacing. Values update immediately within
+their allowed range; Return accepts the edit, and Escape or an empty field
+restores the previous value. Letter spacing accepts negative values. Scale
+Layer's Width and Height displays remain read-only.
+
 | Action | macOS shortcut |
 | --- | --- |
 | New / Open | ⌘N / ⌘O |
@@ -245,9 +264,17 @@ the full names used below.
 | Zoom tool / Zoom In / Zoom Out | Z / + / − |
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
-Commands without handlers appear disabled. On Windows, Quit is File → Exit
-(Ctrl+Q) and Redo is Ctrl+Y. The Windows gnu target is cross-checked from
-macOS. The app has not been run on Windows.
+Commands without handlers appear disabled. Windows key bindings use Ctrl,
+including Ctrl+Q to quit and Ctrl+Y to redo. The shared menu definitions put
+Exit under File on Windows, but GPUI 0.2.2's Windows backend only stores those
+menus; it does not display a menu bar, and Lime does not yet render one itself.
+Commands available only through menus therefore need a Windows UI before release.
+
+Windows support is experimental. A `cargo check --locked --target
+x86_64-pc-windows-gnu` from macOS checks compilation, not linking or runtime
+behavior. The app has not been run on Windows. A Windows release still needs a
+native release build and tests, menu UI, executable icon and packaging, and
+`.lime`/Open With registration. There is no Windows CI or installer yet.
 
 ## Development
 
@@ -256,6 +283,11 @@ cargo fmt --check
 cargo clippy --locked -- -D warnings
 cargo test --locked
 ```
+
+Run the optional rendering and stroke benchmarks with
+`cargo test --release --locked benchmark -- --ignored --nocapture`.
+`cargo clean` clears generated Rust build files while keeping the current
+`dist/Lime.app` available to run. The next build regenerates that cache.
 
 See [AGENTS.md](AGENTS.md) for the architecture, current scope, and macOS
 smoke checks.

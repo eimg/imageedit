@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.imageedit.editor</string>
+    <string>com.eimg.lime</string>
     <key>CFBundleName</key>
-    <string>ImageEdit</string>
+    <string>Lime</string>
     <key>CFBundleExecutable</key>
-    <string>imageedit</string>
+    <string>lime</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundlePackageType</key>
@@ -22,9 +22,9 @@
     <array>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.imageedit.project</string>
+            <string>com.eimg.lime.project</string>
             <key>UTTypeDescription</key>
-            <string>ImageEdit Project</string>
+            <string>Lime Project</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>public.data</string>
@@ -33,8 +33,12 @@
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key>
-                <array><string>imageedit</string></array>
+                <array>
+                    <string>lime</string>
+                </array>
             </dict>
+            <key>UTTypeIconFile</key>
+            <string>AppIcon.icns</string>
         </dict>
     </array>
     <key>CFBundleDocumentTypes</key>
@@ -55,13 +59,43 @@
         </dict>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>ImageEdit Project</string>
+            <string>Lime Project</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
             <string>Owner</string>
             <key>LSItemContentTypes</key>
-            <array><string>com.imageedit.project</string></array>
+            <array>
+                <string>com.eimg.lime.project</string>
+                <string>com.imageedit.project</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>AppIcon.icns</string>
+        </dict>
+    </array>
+    <key>CFBundleDisplayName</key>
+    <string>Lime</string>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.imageedit.project</string>
+            <key>UTTypeDescription</key>
+            <string>Legacy ImageEdit Project</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.content</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>imageedit</string>
+                </array>
+            </dict>
+            <key>UTTypeIconFile</key>
+            <string>AppIcon.icns</string>
         </dict>
     </array>
 </dict>

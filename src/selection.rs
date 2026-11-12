@@ -343,21 +343,21 @@ impl RoundedRectSelection {
 }
 
 impl Selection {
-    pub fn rectangle(start: (u32, u32), end: (u32, u32), width: u32, height: u32) -> Self {
+    pub fn rectangle(start: (i64, i64), end: (i64, i64), width: u32, height: u32) -> Self {
         Self::from_rect(drag_rect(start, end), width, height)
     }
 
-    pub fn ellipse(start: (u32, u32), end: (u32, u32), width: u32, height: u32) -> Self {
+    pub fn ellipse(start: (i64, i64), end: (i64, i64), width: u32, height: u32) -> Self {
         Self::ellipse_rect(drag_rect(start, end), width, height)
     }
 
-    pub fn circle(start: (u32, u32), end: (u32, u32), width: u32, height: u32) -> Self {
+    pub fn circle(start: (i64, i64), end: (i64, i64), width: u32, height: u32) -> Self {
         Self::ellipse_rect(square_drag_rect(start, end), width, height)
     }
 
     pub fn rounded_rect(
-        start: (u32, u32),
-        end: (u32, u32),
+        start: (i64, i64),
+        end: (i64, i64),
         radius: u32,
         width: u32,
         height: u32,
@@ -1028,19 +1028,29 @@ fn translate(rect: PixelRect, dx: i64, dy: i64) -> PixelRect {
     PixelRect::new(rect.x + dx, rect.y + dy, rect.width, rect.height)
 }
 
-fn drag_rect(start: (u32, u32), end: (u32, u32)) -> PixelRect {
-    let left = i64::from(start.0.min(end.0));
-    let top = i64::from(start.1.min(end.1));
-    let right = i64::from(start.0.max(end.0)) + 1;
-    let bottom = i64::from(start.1.max(end.1)) + 1;
-    PixelRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+// Keep arithmetic and stored dimensions representable even for an extreme
+// zoomed-out pointer, without constraining the gesture to canvas edges.
+fn drag_point(point: (i64, i64)) -> (i64, i64) {
+    let limit = |value: i64| value.clamp(i64::from(i32::MIN) / 2, i64::from(i32::MAX) / 2);
+    (limit(point.0), limit(point.1))
 }
 
-fn square_drag_rect(start: (u32, u32), end: (u32, u32)) -> PixelRect {
-    let sx = i64::from(start.0);
-    let sy = i64::from(start.1);
-    let dx = i64::from(end.0) - sx;
-    let dy = i64::from(end.1) - sy;
+fn drag_rect(start: (i64, i64), end: (i64, i64)) -> PixelRect {
+    let start = drag_point(start);
+    let end = drag_point(end);
+    PixelRect::new(
+        start.0.min(end.0),
+        start.1.min(end.1),
+        (start.0.abs_diff(end.0) + 1) as u32,
+        (start.1.abs_diff(end.1) + 1) as u32,
+    )
+}
+
+fn square_drag_rect(start: (i64, i64), end: (i64, i64)) -> PixelRect {
+    let (sx, sy) = drag_point(start);
+    let end = drag_point(end);
+    let dx = end.0 - sx;
+    let dy = end.1 - sy;
     let side = dx.abs().max(dy.abs()) + 1;
     PixelRect::new(
         if dx >= 0 { sx } else { sx - side + 1 },
@@ -1647,6 +1657,35 @@ mod tests {
             Selection::Rect(PixelRect::new(1, 2, 4, 5))
         );
         assert_eq!(Selection::rectangle((0, 0), (9, 9), 10, 8), Selection::Full);
+    }
+
+    #[test]
+    fn shape_drags_can_start_outside_and_keep_their_geometry_when_clipped() {
+        assert_eq!(
+            Selection::rectangle((-4, -3), (3, 4), 8, 8),
+            Selection::Rect(PixelRect::new(0, 0, 4, 5)),
+        );
+        let oval = Selection::ellipse((-4, -4), (3, 3), 8, 8);
+        let backwards = Selection::ellipse((3, 3), (-4, -4), 8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let inside = (x as f64 + 0.5).powi(2) + (y as f64 + 0.5).powi(2) <= 16.0;
+                assert_eq!(oval.covers(x, y, 8, 8), inside);
+                assert_eq!(backwards.covers(x, y, 8, 8), inside);
+            }
+        }
+        assert!(!oval.covers(-1, 0, 8, 8));
+        assert_eq!(
+            Selection::ellipse((-8, -8), (-2, -2), 8, 8),
+            Selection::Empty
+        );
+        let circle = Selection::circle((-2, 1), (4, 2), 8, 8);
+        assert!(circle.covers(1, 4, 8, 8));
+        assert!(!circle.covers(4, 1, 8, 8));
+        assert_eq!(
+            Selection::rectangle((i64::MIN, i64::MIN), (i64::MAX, i64::MAX), 8, 8),
+            Selection::Full,
+        );
     }
 
     #[test]

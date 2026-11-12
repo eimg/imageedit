@@ -325,7 +325,7 @@ pub(super) struct WarpFrame {
 }
 
 pub(super) struct WarpStatus {
-    pub summary: String,
+    pub degrees: Option<f64>,
     pub error: Option<&'static str>,
     pub horizontal: bool,
     pub applying: bool,
@@ -632,16 +632,8 @@ impl Workspace {
 
     pub(super) fn warp_status(&self) -> Option<WarpStatus> {
         let session = self.warp.as_ref()?;
-        let summary = match session.kind {
-            WarpKind::Rotate => format!("{:.1}°", session.degrees),
-            WarpKind::Flip => match session.mirror {
-                Mirror::Horizontal => "Horizontal".to_string(),
-                Mirror::Vertical => "Vertical".to_string(),
-            },
-            WarpKind::Perspective => "Drag the corners".to_string(),
-        };
         Some(WarpStatus {
-            summary,
+            degrees: (session.kind == WarpKind::Rotate).then_some(session.degrees),
             error: self.warp_error,
             horizontal: session.mirror == Mirror::Horizontal,
             applying: self.warp_applying,

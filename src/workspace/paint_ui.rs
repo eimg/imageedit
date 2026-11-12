@@ -50,12 +50,21 @@ impl Workspace {
 
     pub(super) fn nudge_brush(&mut self, field: BrushField, delta: i32, cx: &mut Context<Self>) {
         let current = self.brush_value(field) as i32;
+        self.set_brush_value(field, (current + delta).max(0) as u32, cx);
+    }
+
+    pub(super) fn set_brush_value(
+        &mut self,
+        field: BrushField,
+        value: u32,
+        cx: &mut Context<Self>,
+    ) {
         let (min, max) = match field {
             BrushField::Size => (1, 500),
             BrushField::Spacing => (1, 100),
             BrushField::Hardness | BrushField::Opacity => (0, 100),
         };
-        let next = (current + delta).clamp(min, max) as u32;
+        let next = value.clamp(min, max);
         let brush = if self.tool == Tool::Pencil {
             &mut self.pencil
         } else {

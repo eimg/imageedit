@@ -100,6 +100,9 @@ impl AssetSource for Icons {
             }
             "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
             "info" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>"#,
+            "help" => {
+                r#"<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-1 .7-1.5 1-1.5 2M12 16h.01"/>"#
+            }
             "loading" => r#"<path d="M12 3a9 9 0 1 1-9 9"/>"#,
             _ => return Ok(None),
         };

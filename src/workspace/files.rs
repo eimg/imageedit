@@ -302,7 +302,7 @@ impl Workspace {
             )
         }) {
             self.errors.push(format!(
-                "{} is already open or being written by ImageEdit.",
+                "{} is already open or being written by Lime.",
                 file_name(&path)
             ));
             cx.notify();
@@ -455,13 +455,22 @@ impl Workspace {
 }
 
 fn suggested_name(document: &Document, format: FileFormat) -> String {
-    if save_format(Path::new(&document.name)).ok() == Some(format) {
+    let name = Path::new(&document.name);
+    let current_format = save_format(name).ok();
+    let preferred_project_extension = name
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(crate::project::EXTENSION));
+    if current_format == Some(format)
+        && (format != FileFormat::Project || preferred_project_extension)
+    {
         return document.name.clone();
     }
     let stem = document
         .path
-        .as_ref()
-        .and_then(|path| path.file_stem())
+        .as_deref()
+        .or_else(|| current_format.map(|_| name))
+        .and_then(Path::file_stem)
         .and_then(|value| value.to_str())
         .unwrap_or(&document.name);
     format!("{stem}.{}", format.extension())
@@ -471,7 +480,7 @@ fn prepare_destination(path: &Path, project_only: bool) -> Result<(PathBuf, File
     let format = save_format(path)?;
     anyhow::ensure!(
         !project_only || format == FileFormat::Project,
-        "Use a .imageedit filename. To save a PNG, JPEG, or WebP copy, use File → Export."
+        "Use a .lime filename. To save a PNG, JPEG, or WebP copy, use File → Export."
     );
     Ok((destination_for_format(path, format)?, format))
 }
@@ -564,6 +573,12 @@ mod tests {
         let path = |name: &str| directory.path().join(name);
         assert!(prepare_destination(&path("a.png"), true).is_err());
         assert!(prepare_destination(&path("a.txt"), false).is_err());
+        for name in ["a.lime", "a.LIME", "a.imageedit"] {
+            assert_eq!(
+                prepare_destination(&path(name), true).unwrap().1,
+                FileFormat::Project
+            );
+        }
         let (saved, format) = prepare_destination(&path("a.png"), false).unwrap();
         assert_eq!(format, FileFormat::Png);
         assert_eq!(
@@ -572,8 +587,30 @@ mod tests {
         );
 
         assert!(prepare_export(&path("a.imageedit"), FileFormat::Png).is_err());
+        assert!(prepare_export(&path("a.lime"), FileFormat::Png).is_err());
         assert!(prepare_export(&path("a.png"), FileFormat::Jpeg).is_err());
         assert!(prepare_export(&path("a.jpeg"), FileFormat::Jpeg).is_ok());
         assert!(prepare_export(&path("missing/a.png"), FileFormat::Png).is_err());
+    }
+
+    #[test]
+    fn project_save_as_suggests_lime_including_for_legacy_projects() {
+        let mut document = Document::blank("Untitled 1".into(), 1, 1, Rgba([0; 4]));
+        assert_eq!(
+            suggested_name(&document, FileFormat::Project),
+            "Untitled 1.lime"
+        );
+        for name in ["photo.png", "photo.imageedit", "photo.lime", "photo.LIME"] {
+            document.name = name.into();
+            document.path = Some(PathBuf::from(name));
+            let expected = if name.ends_with(".LIME") {
+                name
+            } else {
+                "photo.lime"
+            };
+            assert_eq!(suggested_name(&document, FileFormat::Project), expected);
+        }
+        document.name = "photo.jpeg".into();
+        assert_eq!(suggested_name(&document, FileFormat::Jpeg), "photo.jpeg");
     }
 }

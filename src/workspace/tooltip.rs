@@ -1,6 +1,6 @@
 use gpui::{AnyView, App, Div, SharedString, Window, div, prelude::*, px, rgb};
 
-use super::view::{BORDER, CHROME, MUTED, TEXT};
+use super::view::{BORDER, CHROME, HOVER, MUTED, TEXT, icon};
 
 pub(super) struct Tooltip {
     title: SharedString,
@@ -74,4 +74,23 @@ pub(super) fn label_view(text: SharedString) -> Div {
         .text_color(rgb(TEXT))
         .text_size(px(12.))
         .child(text)
+}
+
+pub(super) fn help_icon(
+    id: &'static str,
+    title: &'static str,
+    instructions: &'static str,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(22.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .text_color(rgb(MUTED))
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .tooltip(tooltip_with_detail(title, instructions))
+        .child(icon("help", 16.))
 }

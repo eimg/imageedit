@@ -1,8 +1,9 @@
 [package]
-name = "imageedit"
+name = "lime"
 version = "0.1.0"
 edition = "2024"
-description = "A lightweight desktop image editor"
+description = "Lime — Lite Image Editor"
+repository = "https://github.com/eimg/lime"
 
 [dependencies]
 anyhow = "1"

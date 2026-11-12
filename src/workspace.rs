@@ -221,9 +221,13 @@ pub struct Workspace {
     text_settled: Option<usize>,
     text_continuation: Option<(usize, text_ui::TextContinuation)>,
     text_defaults: text_ui::TextDefaults,
-    font_families: Option<Arc<Vec<String>>>,
+    font_families: Option<Arc<crate::text::FontFamilies>>,
     font_loading: bool,
     font_list_open: bool,
+    font_search: text_ui::FontSearch,
+    font_search_focus: FocusHandle,
+    font_scroll: ScrollHandle,
+    font_input_scroll: ScrollHandle,
     caret_shown_at: std::time::Instant,
     caret_blinking: bool,
     pencil: crate::paint::Brush,
@@ -286,17 +290,26 @@ impl Workspace {
         let focus = cx.focus_handle();
         focus.focus(window);
         let numeric_focus = cx.focus_handle();
+        let font_search_focus = cx.focus_handle();
+        cx.on_blur(&font_search_focus, window, |workspace, _, cx| {
+            workspace.font_list_open = false;
+            cx.notify();
+        })
+        .detach();
         cx.on_blur(&numeric_focus, window, |workspace, window, cx| {
             workspace.commit_numeric_edit(window, cx);
         })
         .detach();
         let numeric_entity = cx.weak_entity();
-        // A numeric field consumes keystrokes before key bindings and element
+        // Inline editors consume keystrokes before key bindings and element
         // listeners run. Stopping propagation here also skips `on_key_down`,
         // so the edit must be applied in the interceptor itself.
         cx.intercept_keystrokes(move |event, window, cx| {
             let handled = numeric_entity
                 .update(cx, |workspace, cx| {
+                    if workspace.font_list_open && workspace.font_search_focus.is_focused(window) {
+                        return workspace.font_search_key(&event.keystroke, window, cx);
+                    }
                     if workspace.numeric_edit.is_none() {
                         return false;
                     }
@@ -422,6 +435,10 @@ impl Workspace {
             font_families: None,
             font_loading: false,
             font_list_open: false,
+            font_search: text_ui::FontSearch::default(),
+            font_search_focus,
+            font_scroll: ScrollHandle::new(),
+            font_input_scroll: ScrollHandle::new(),
             caret_shown_at: std::time::Instant::now(),
             caret_blinking: false,
             pencil: crate::paint::Brush {
@@ -847,10 +864,10 @@ impl Workspace {
 
     fn update_title(&self, window: &mut Window) {
         let title = self.active_tab().map_or_else(
-            || "ImageEdit".to_owned(),
+            || "Lime — Lite Image Editor".to_owned(),
             |tab| {
                 let marker = if tab.dirty() { " •" } else { "" };
-                format!("{}{marker} — ImageEdit", tab.document.name)
+                format!("{}{marker} — Lime", tab.document.name)
             },
         );
         window.set_window_title(&title);

@@ -1,7 +1,7 @@
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, NoAction, SystemMenuType, actions};
 
 actions!(
-    imageedit,
+    lime,
     [
         NewImage,
         OpenImage,
@@ -244,7 +244,7 @@ impl Tool {
             Self::Text => (
                 "Text",
                 "text",
-                "Click to place text, then type. Apply commits one undo step and Escape discards it.",
+                "Click to add or edit text, then type. Escape or leaving the text commits it.",
             ),
             Self::Path => (
                 "Path",
@@ -256,6 +256,75 @@ impl Tool {
             label,
             icon,
             description,
+        }
+    }
+
+    /// Essential instructions shown on demand in Tool Options.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Move => {
+                "Drag to move the active layer; Escape cancels. The alignment buttons place it against a canvas edge or center it. View → Toggle Layer Boundary shows its bounds."
+            }
+            Self::Pan => {
+                "Drag to move the canvas. Hold Space and drag to pan temporarily from another tool."
+            }
+            Self::Zoom => {
+                "Click to zoom in. Control-click or right-click zooms out. Zoom follows the pointer; hold Space and drag to pan."
+            }
+            Self::Eyedropper => {
+                "Click the image to sample the foreground color from the visible layers. The color swatches are at the top of the toolbox."
+            }
+            Self::Crop => {
+                "Drag a crop box. Drag inside to move it or drag a handle to resize it. X, Y, Width, and Height update immediately; an empty field leaves the crop unchanged. Return applies the crop; Escape cancels."
+            }
+            Self::Rotate => {
+                "Drag to rotate the active layer. The angle readout follows the preview. Return applies it; Escape cancels. The selection stays in canvas coordinates."
+            }
+            Self::Flip => {
+                "Choose Horizontal or Vertical, or drag to choose a direction. Return applies the flip; Escape cancels. The selection stays in canvas coordinates."
+            }
+            Self::Perspective => {
+                "Drag the corner grips to change perspective. Keep the corners in a convex shape. Return applies the preview; Escape cancels. The selection stays in canvas coordinates."
+            }
+            Self::ScaleLayer => {
+                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels the drag. Width and Height are read-only. Rasterize editable text before scaling it."
+            }
+            Self::Select => {
+                "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. Width, Height, and corner radius update immediately; empty numeric text leaves the selection unchanged. Shift adds, Control subtracts, and Shift-Control intersects."
+            }
+            Self::OvalSelect => {
+                "Drag an oval; enable Circle to constrain the drag to a circle. Drag inside to move it or drag a handle to resize it; click outside to deselect. Width and Height update immediately. Shift adds, Control subtracts, and Shift-Control intersects."
+            }
+            Self::FreeSelect => {
+                "Click to add vertices or drag to draw a freehand segment. Releasing keeps the outline open. Click its start or press Return to close it; Escape cancels. Shift adds, Control subtracts, and Shift-Control intersects."
+            }
+            Self::MagicWand => {
+                "Click a connected region to select it. Tolerance 0 matches its color exactly; this tolerance is shared with Bucket Fill. Shift adds, Control subtracts, and Shift-Control intersects."
+            }
+            Self::Pencil | Self::Brush => {
+                "Paint with the foreground color inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size. Pencil has a hard edge; Brush uses the chosen hardness."
+            }
+            Self::Eraser => {
+                "Paint to erase to transparency inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
+            }
+            Self::Blur | Self::Sharpen => {
+                "Paint to change local detail on the active layer, inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
+            }
+            Self::CloneStamp => {
+                "Alt-click to set or change the source, then paint to copy from that offset on the active layer. The selection limits the destination. Release commits one stroke; Escape cancels. The bracket keys [ and ] change the brush size."
+            }
+            Self::BucketFill => {
+                "Click to fill with the foreground color. Connected fills a connected region; Selection covers the whole selection. Sample All Layers reads visible layers to find the region, then paints only the active layer. Tolerance 0 matches a color exactly."
+            }
+            Self::Gradient => {
+                "Drag a line to preview the gradient, then adjust its endpoints. FG → BG blends the foreground and background colors; FG → Clear fades to transparency. The selection limits the fill. Return applies it; Escape cancels."
+            }
+            Self::Text => {
+                "Click empty canvas to add text, or click a text layer to edit it. Type, use the arrow keys, and press Return for a new line. Font and style controls affect the whole text layer. In the font picker, type to filter; arrows browse, Return chooses, and Escape closes it. Outside the picker, Escape, Cmd/Ctrl-Enter, clicking outside, or changing tools, layers, or tabs commits the edit. Undo steps through typing first. Rasterize Text enables pixel tools."
+            }
+            Self::Path => {
+                "Click to add anchors; drag to pull their handles. Click the first anchor to close the path. Escape or changing tools ends the current path; the next click starts a new one. Use the Paths tab to select, show, hide, delete, convert, or stroke paths. Stroke uses the foreground color and needs a visible path and a paintable raster layer."
+            }
         }
     }
 
@@ -349,11 +418,11 @@ pub const TOOL_GROUPS: &[(&str, &[Tool])] = &[
 ];
 
 #[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = imageedit, no_json)]
+#[action(namespace = lime, no_json)]
 pub struct SelectTool(pub Tool);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
-#[action(namespace = imageedit, no_json)]
+#[action(namespace = lime, no_json)]
 pub enum AlignLayer {
     Left,
     Right,
@@ -365,7 +434,7 @@ pub enum AlignLayer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
-#[action(namespace = imageedit, no_json)]
+#[action(namespace = lime, no_json)]
 pub enum ImageAdjust {
     RotateLeft,
     RotateRight,
@@ -375,7 +444,7 @@ pub enum ImageAdjust {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
-#[action(namespace = imageedit, no_json)]
+#[action(namespace = lime, no_json)]
 pub enum LayerAdjust {
     RotateLeft,
     RotateRight,
@@ -385,7 +454,7 @@ pub enum LayerAdjust {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Action)]
-#[action(namespace = imageedit, no_json)]
+#[action(namespace = lime, no_json)]
 pub enum Zoom {
     #[default]
     Fit,
@@ -556,15 +625,15 @@ fn application_menus(macos: bool) -> Vec<Menu> {
     let mut menus = Vec::new();
     if macos {
         menus.push(menu(
-            "ImageEdit",
+            "Lime",
             vec![
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide ImageEdit", Hide),
+                MenuItem::action("Hide Lime", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit ImageEdit", Quit),
+                MenuItem::action("Quit Lime", Quit),
             ],
         ));
     }
@@ -877,12 +946,12 @@ mod tests {
         let macos = menu_labels(&application_menus(true));
         let windows = menu_labels(&application_menus(false));
         let checklist = [
-            "menu:ImageEdit",
+            "menu:Lime",
             "Services",
-            "Hide ImageEdit",
+            "Hide Lime",
             "Hide Others",
             "Show All",
-            "Quit ImageEdit",
+            "Quit Lime",
             "menu:File",
             "New Image…",
             "New from Clipboard",
@@ -1034,12 +1103,12 @@ mod tests {
             .filter(|label| {
                 !matches!(
                     *label,
-                    "menu:ImageEdit"
+                    "menu:Lime"
                         | "Services"
-                        | "Hide ImageEdit"
+                        | "Hide Lime"
                         | "Hide Others"
                         | "Show All"
-                        | "Quit ImageEdit"
+                        | "Quit Lime"
                 )
             })
             .collect();
@@ -1063,12 +1132,14 @@ mod tests {
     fn finder_claims_projects_and_raster_images() {
         let plist = include_str!("../macos/Info.plist");
         for needle in [
-            "com.imageedit.editor",
+            "com.eimg.lime",
+            "com.eimg.lime.project",
             "com.imageedit.project",
             "public.png",
             "public.jpeg",
             "org.webmproject.webp",
             "public.filename-extension",
+            "<string>lime</string>",
             "<string>imageedit</string>",
             "<string>Editor</string>",
             "<string>Owner</string>",

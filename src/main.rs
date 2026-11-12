@@ -46,7 +46,7 @@ fn main() {
     });
     app.on_reopen(|cx| {
         if let Err(error) = ensure_workspace(cx) {
-            eprintln!("Could not reopen ImageEdit: {error:#}");
+            eprintln!("Could not reopen Lime: {error:#}");
         }
     });
     app.run(|cx| {
@@ -55,7 +55,7 @@ fn main() {
         commands::register(cx);
         let paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if let Err(error) = open_paths(paths, cx) {
-            eprintln!("Could not start ImageEdit: {error:#}");
+            eprintln!("Could not start Lime: {error:#}");
             cx.quit();
             return;
         }
@@ -88,7 +88,7 @@ fn ensure_workspace(cx: &mut App) -> Result<WindowHandle<Workspace>> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(800.), px(520.))),
             titlebar: Some(TitlebarOptions {
-                title: Some("ImageEdit".into()),
+                title: Some("Lime — Lite Image Editor".into()),
                 ..Default::default()
             }),
             ..Default::default()

@@ -44,11 +44,19 @@ impl Spacing {
     }
 }
 
+/// Face choices shared by rasterization, caret layout, and cached text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontFace {
+    pub bold: bool,
+    pub italic: bool,
+}
+
 /// Everything that decides how a text layer rasterizes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextSpec {
     pub source: String,
     pub family: String,
+    pub face: FontFace,
     pub size: f32,
     pub color: Rgba<u8>,
     pub spacing: Spacing,
@@ -58,6 +66,7 @@ pub struct TextSpec {
 pub struct TextStyle {
     pub source: String,
     pub family: String,
+    pub face: FontFace,
     pub size: f32,
     pub color: Rgba<u8>,
     pub spacing: Spacing,
@@ -96,6 +105,7 @@ impl RenderedText {
     pub fn matches(&self, spec: &TextSpec) -> bool {
         self.style.source == spec.source
             && self.style.family == spec.family
+            && self.style.face == spec.face
             && self.style.size == spec.size
             && self.style.color == spec.color
             && self.style.spacing == spec.spacing
@@ -169,6 +179,7 @@ pub fn render(
     render_spec(&TextSpec {
         source: source.to_owned(),
         family: family.to_owned(),
+        face: FontFace::default(),
         size: pixel_size,
         color,
         spacing: Spacing::default(),
@@ -205,11 +216,12 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
                 pixel_size,
                 color,
                 spacing,
+                spec.face,
                 resolved,
                 (0, 0),
             ));
         }
-        let mut buffer = layout(font_system, source, &family, pixel_size, spacing);
+        let mut buffer = layout(font_system, source, &family, pixel_size, spacing, spec.face);
 
         let mut line_right = 0i32;
         let mut line_bottom = 0i32;
@@ -301,6 +313,7 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
             pixel_size,
             color,
             spacing,
+            spec.face,
             resolved,
             (-left, -top),
         ))
@@ -313,6 +326,7 @@ fn layout(
     family: &str,
     pixel_size: f32,
     spacing: Spacing,
+    face: FontFace,
 ) -> cosmic_text::Buffer {
     let metrics = cosmic_text::Metrics::new(pixel_size, line_height(pixel_size, spacing));
     let mut buffer = cosmic_text::Buffer::new(font_system, metrics);
@@ -320,6 +334,16 @@ fn layout(
     buffer.set_size(None, None);
     let attrs = cosmic_text::Attrs::new()
         .family(family_attr(family))
+        .weight(if face.bold {
+            cosmic_text::Weight::BOLD
+        } else {
+            cosmic_text::Weight::NORMAL
+        })
+        .style(if face.italic {
+            cosmic_text::Style::Italic
+        } else {
+            cosmic_text::Style::Normal
+        })
         .letter_spacing(spacing.letter / pixel_size);
     buffer.set_text(source, &attrs, cosmic_text::Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
@@ -352,6 +376,7 @@ impl CaretMap {
         self.spec.as_ref().is_some_and(|own| {
             own.source == spec.source
                 && own.family == spec.family
+                && own.face == spec.face
                 && own.size == spec.size
                 && own.spacing == spec.spacing
         })
@@ -405,7 +430,14 @@ pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
     let line_height = line_height(spec.size, spec.spacing);
     let mut stops = Vec::with_capacity(spec.source.len() + 1);
     with_fonts(|font_system, _| {
-        let buffer = layout(font_system, &spec.source, &family, spec.size, spec.spacing);
+        let buffer = layout(
+            font_system,
+            &spec.source,
+            &family,
+            spec.size,
+            spec.spacing,
+            spec.face,
+        );
         let mut start = 0;
         for (line, text) in spec.source.split('\n').enumerate() {
             let run = buffer.layout_runs().find(|run| run.line_i == line);
@@ -439,9 +471,14 @@ pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
 }
 
 /// Installed font families, sorted for a picker.
-pub fn families() -> Vec<String> {
-    let mut names = with_fonts(|font_system, _| {
-        font_system
+pub struct FontFamilies {
+    pub names: Vec<String>,
+    pub generic_previews: [String; 3],
+}
+
+pub fn families() -> FontFamilies {
+    let (mut names, generic_previews) = with_fonts(|font_system, _| {
+        let names = font_system
             .db()
             .faces()
             .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
@@ -450,11 +487,24 @@ pub fn families() -> Vec<String> {
                     && name.chars().count() <= MAX_FAMILY_CHARS
                     && !name.chars().any(char::is_control)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // GPUI expects an installed family name rather than CSS generic names.
+        let previews = ["sans-serif", "serif", "monospace"].map(|family| {
+            let id = font_system.db().query(&cosmic_text::fontdb::Query {
+                families: &[family_attr(family)],
+                ..Default::default()
+            });
+            id.and_then(|id| face_family(font_system, id))
+                .unwrap_or_else(|| family.to_owned())
+        });
+        (names, previews)
     });
     names.sort_by_key(|name| name.to_lowercase());
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    names
+    FontFamilies {
+        names,
+        generic_previews,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,6 +515,7 @@ fn rendered(
     pixel_size: f32,
     color: Rgba<u8>,
     spacing: Spacing,
+    face: FontFace,
     resolved: String,
     origin: (i32, i32),
 ) -> RenderedText {
@@ -473,6 +524,7 @@ fn rendered(
         style: TextStyle {
             source: source.to_owned(),
             family,
+            face,
             size: pixel_size,
             color,
             spacing,
@@ -633,6 +685,7 @@ mod tests {
         TextSpec {
             source: source.into(),
             family: "sans-serif".into(),
+            face: FontFace::default(),
             size: 32.0,
             color: Rgba([0, 0, 0, 255]),
             spacing,
@@ -674,6 +727,44 @@ mod tests {
     }
 
     #[test]
+    fn bold_and_italic_change_pixels_and_invalidate_both_preview_caches() {
+        let plain_spec = spec("Aa Hello", Spacing::default());
+        let plain = render_spec(&plain_spec).unwrap();
+        let carets = caret_map(&plain_spec).unwrap();
+        for face in [
+            FontFace {
+                bold: true,
+                italic: false,
+            },
+            FontFace {
+                bold: false,
+                italic: true,
+            },
+            FontFace {
+                bold: true,
+                italic: true,
+            },
+        ] {
+            let styled_spec = TextSpec {
+                face,
+                ..plain_spec.clone()
+            };
+            assert!(!plain.matches(&styled_spec));
+            assert!(!carets.matches(&styled_spec));
+            let styled = render_spec(&styled_spec).unwrap();
+            assert_eq!(styled.style.face, face);
+            assert_ne!(styled.image, plain.image);
+            assert!(styled.matches(&styled_spec));
+            let styled_carets = caret_map(&styled_spec).unwrap();
+            assert!(styled_carets.matches(&styled_spec));
+            assert_eq!(
+                styled_carets.stops.last().unwrap().byte,
+                styled_spec.source.len()
+            );
+        }
+    }
+
+    #[test]
     fn caret_stops_cover_every_boundary_and_follow_lines() {
         let map = caret_map(&spec("ab\nc上", Spacing::default())).unwrap();
         let bytes: Vec<usize> = map.stops.iter().map(|stop| stop.byte).collect();
@@ -700,22 +791,16 @@ mod tests {
 
     #[test]
     fn a_missing_family_is_substituted_and_still_paints() {
-        let rendered = render(
-            "Ag",
-            "ImageEdit Missing Font",
-            32.0,
-            Rgba([20, 40, 60, 255]),
-        )
-        .unwrap();
+        let rendered = render("Ag", "Lime Missing Font", 32.0, Rgba([20, 40, 60, 255])).unwrap();
         assert!(rendered.style.substituted());
         assert!(
             !rendered
                 .style
                 .resolved_family
-                .eq_ignore_ascii_case("ImageEdit Missing Font")
+                .eq_ignore_ascii_case("Lime Missing Font")
         );
         assert!(max_alpha(&rendered.image) > 0);
-        assert_eq!(rendered.style.family, "ImageEdit Missing Font");
+        assert_eq!(rendered.style.family, "Lime Missing Font");
     }
 
     #[test]

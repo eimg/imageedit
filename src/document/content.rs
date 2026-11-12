@@ -3325,6 +3325,7 @@ mod tests {
             size: 24.0,
             color: Rgba([0, 0, 0, 255]),
             spacing: crate::text::Spacing::default(),
+            face: crate::text::FontFace::default(),
             origin: (0, 0),
         });
         assert!(!content.is_plain_raster());
@@ -3339,6 +3340,7 @@ mod tests {
             size: 24.0,
             color: Rgba([0, 0, 0, 255]),
             spacing: crate::text::Spacing::default(),
+            face: crate::text::FontFace::default(),
         }));
         assert_eq!(content.set_text(LayerId(0), (0, 0), cached), Dirty::None);
         assert!(content.rasterize_text(LayerId(0)));
@@ -3368,6 +3370,7 @@ mod tests {
             size: 24.0,
             color: Rgba([0, 0, 0, 255]),
             spacing: crate::text::Spacing::default(),
+            face: crate::text::FontFace::default(),
             origin: (0, 0),
         });
         assert!(!content.can_merge_down(middle));

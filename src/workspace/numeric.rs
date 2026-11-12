@@ -4,6 +4,7 @@ use gpui::{
 };
 
 use super::Workspace;
+use super::paint_ui::BrushField;
 use super::view::{ACCENT, BORDER, CANVAS, MUTED};
 use crate::document::CropRect;
 use crate::preview::PixelRect;
@@ -21,6 +22,13 @@ pub(super) enum NumericField {
     CropHeight,
     TextSize,
     TextLineSpacing,
+    TextLetterSpacing,
+    Tolerance,
+    BrushSize,
+    BrushSpacing,
+    BrushHardness,
+    BrushOpacity,
+    PathStrokeSize,
 }
 
 impl NumericField {
@@ -35,6 +43,13 @@ impl NumericField {
             Self::CropHeight => 6,
             Self::TextSize => 7,
             Self::TextLineSpacing => 8,
+            Self::TextLetterSpacing => 9,
+            Self::Tolerance => 10,
+            Self::BrushSize => 11,
+            Self::BrushSpacing => 12,
+            Self::BrushHardness => 13,
+            Self::BrushOpacity => 14,
+            Self::PathStrokeSize => 15,
         }
     }
 
@@ -51,6 +66,34 @@ impl NumericField {
             Self::SelectionRadius | Self::SelectionWidth | Self::SelectionHeight
         )
     }
+
+    fn is_tool_option(self) -> bool {
+        matches!(
+            self,
+            Self::TextLetterSpacing
+                | Self::Tolerance
+                | Self::BrushSize
+                | Self::BrushSpacing
+                | Self::BrushHardness
+                | Self::BrushOpacity
+                | Self::PathStrokeSize
+        )
+    }
+
+    fn constrain(self, value: i64) -> i64 {
+        let (min, max) = match self {
+            Self::Tolerance => (0, 255),
+            Self::BrushSize | Self::PathStrokeSize => (1, 500),
+            Self::BrushSpacing => (1, 100),
+            Self::BrushHardness | Self::BrushOpacity => (0, 100),
+            Self::TextLetterSpacing => (
+                crate::text::MIN_LETTER_SPACING as i64,
+                crate::text::MAX_LETTER_SPACING as i64,
+            ),
+            _ => (0, i64::from(u32::MAX)),
+        };
+        value.clamp(min, max)
+    }
 }
 
 pub(super) struct NumericEdit {
@@ -58,12 +101,12 @@ pub(super) struct NumericEdit {
     text: String,
     cursor: usize,
     selected: bool,
-    original: u32,
+    original: i64,
     original_crop: Option<CropRect>,
 }
 
 impl NumericEdit {
-    fn new(field: NumericField, value: u32, crop: Option<CropRect>) -> Self {
+    fn new(field: NumericField, value: i64, crop: Option<CropRect>) -> Self {
         let text = value.to_string();
         Self {
             field,
@@ -88,22 +131,32 @@ impl NumericEdit {
     }
 
     fn insert_digits(&mut self, text: &str) {
-        let digits: String = text.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        let signed = self.field == NumericField::TextLetterSpacing;
+        let digits: String = text
+            .chars()
+            .filter(|ch| ch.is_ascii_digit() || (signed && *ch == '-'))
+            .collect();
         if digits.is_empty() {
             return;
         }
-        let existing = if self.selected { 0 } else { self.len() };
-        if existing + digits.chars().count() > 10 {
+        let mut next = if self.selected {
+            String::new()
+        } else {
+            self.text.clone()
+        };
+        let at = if self.selected {
+            0
+        } else {
+            self.byte_at(self.cursor)
+        };
+        next.insert_str(at, &digits);
+        let unsigned = next.strip_prefix('-').unwrap_or(&next);
+        if unsigned.len() > 10 || !unsigned.chars().all(|ch| ch.is_ascii_digit()) {
             return;
         }
-        if self.selected {
-            self.text.clear();
-            self.cursor = 0;
-            self.selected = false;
-        }
-        let at = self.byte_at(self.cursor);
-        self.text.insert_str(at, &digits);
-        self.cursor += digits.chars().count();
+        self.text = next;
+        self.cursor = at + digits.len();
+        self.selected = false;
     }
 
     fn backspace(&mut self) {
@@ -154,28 +207,35 @@ impl NumericEdit {
     }
 }
 
-fn parse_numeric(text: &str) -> Option<u32> {
+fn parse_numeric(text: &str) -> Option<i64> {
     (!text.is_empty())
-        .then(|| text.parse::<u32>().ok())
+        .then(|| text.parse::<i64>().ok())
         .flatten()
 }
 
 impl Workspace {
-    pub(super) fn numeric_value(&self, field: NumericField) -> Option<u32> {
+    pub(super) fn numeric_value(&self, field: NumericField) -> Option<i64> {
         let rect = self.selection_shape_rect();
         let crop = self.crop;
         match field {
-            NumericField::SelectionRadius => Some(self.selection_radius),
-            NumericField::SelectionWidth => rect.map(|rect| rect.width),
-            NumericField::SelectionHeight => rect.map(|rect| rect.height),
-            NumericField::CropX => crop.map(|crop| crop.x),
-            NumericField::CropY => crop.map(|crop| crop.y),
-            NumericField::CropWidth => crop.map(|crop| crop.width),
-            NumericField::CropHeight => crop.map(|crop| crop.height),
-            NumericField::TextSize => Some(self.text_size().round() as u32),
+            NumericField::SelectionRadius => Some(i64::from(self.selection_radius)),
+            NumericField::SelectionWidth => rect.map(|rect| i64::from(rect.width)),
+            NumericField::SelectionHeight => rect.map(|rect| i64::from(rect.height)),
+            NumericField::CropX => crop.map(|crop| i64::from(crop.x)),
+            NumericField::CropY => crop.map(|crop| i64::from(crop.y)),
+            NumericField::CropWidth => crop.map(|crop| i64::from(crop.width)),
+            NumericField::CropHeight => crop.map(|crop| i64::from(crop.height)),
+            NumericField::TextSize => Some(self.text_size().round() as i64),
             NumericField::TextLineSpacing => {
-                Some((self.text_line_spacing() * 100.0).round() as u32)
+                Some((self.text_line_spacing() * 100.0).round() as i64)
             }
+            NumericField::TextLetterSpacing => Some(self.text_letter_spacing().round() as i64),
+            NumericField::Tolerance => Some(i64::from(self.tolerance)),
+            NumericField::BrushSize => Some(i64::from(self.brush_value(BrushField::Size))),
+            NumericField::BrushSpacing => Some(i64::from(self.brush_value(BrushField::Spacing))),
+            NumericField::BrushHardness => Some(i64::from(self.brush_value(BrushField::Hardness))),
+            NumericField::BrushOpacity => Some(i64::from(self.brush_value(BrushField::Opacity))),
+            NumericField::PathStrokeSize => Some(i64::from(self.brush.diameter)),
         }
     }
 
@@ -294,7 +354,10 @@ impl Workspace {
                 }
                 _ => {
                     if let Some(text) = key.key_char.as_deref()
-                        && text.chars().any(|ch| ch.is_ascii_digit())
+                        && text.chars().any(|ch| {
+                            ch.is_ascii_digit()
+                                || (edit.field == NumericField::TextLetterSpacing && ch == '-')
+                        })
                     {
                         edit.insert_digits(text);
                         changed = true;
@@ -326,6 +389,11 @@ impl Workspace {
             cx.notify();
             return;
         };
+        if field.is_tool_option() {
+            self.apply_tool_numeric(field, value, window, cx);
+            return;
+        }
+        let value = value.clamp(0, i64::from(u32::MAX)) as u32;
         match field {
             NumericField::TextSize => {
                 // Sizes below the minimum are mid-typing; wait for more digits.
@@ -340,11 +408,18 @@ impl Workspace {
                 }
             }
             NumericField::SelectionRadius => {
-                let Some(rect) = self.selection_shape_rect() else {
-                    return;
-                };
-                self.selection_radius = value.min(rect.width.min(rect.height) / 2);
-                if let Some(selection) = self.selection_for_rect(rect) {
+                let rect = self.selection_shape_rect();
+                let max = rect.map_or_else(
+                    || {
+                        self.active_tab().map_or(0, |tab| {
+                            let (width, height) = tab.document.content.size();
+                            width.max(height)
+                        })
+                    },
+                    |rect| rect.width.min(rect.height) / 2,
+                );
+                self.selection_radius = value.min(max);
+                if let Some(selection) = rect.and_then(|rect| self.selection_for_rect(rect)) {
                     self.selection_preview = Some(selection);
                 }
             }
@@ -407,6 +482,7 @@ impl Workspace {
                 }
                 self.crop = Some(crop);
             }
+            _ => unreachable!("tool options were handled before selection and crop fields"),
         }
         cx.notify();
     }
@@ -446,18 +522,22 @@ impl Workspace {
     fn restore_numeric_values(
         &mut self,
         field: NumericField,
-        original: u32,
+        original: i64,
         original_crop: Option<CropRect>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if field.is_tool_option() {
+            self.apply_tool_numeric(field, original, window, cx);
+            return;
+        }
         match field {
             NumericField::TextSize => self.set_text_size(original as f32, window, cx),
             NumericField::TextLineSpacing => {
                 self.set_text_line_spacing(original as f32 / 100.0, window, cx)
             }
             NumericField::SelectionRadius => {
-                self.selection_radius = original;
+                self.selection_radius = original as u32;
                 self.selection_preview = None;
             }
             NumericField::SelectionWidth | NumericField::SelectionHeight => {
@@ -467,7 +547,53 @@ impl Workspace {
             | NumericField::CropY
             | NumericField::CropWidth
             | NumericField::CropHeight => self.crop = original_crop,
+            _ => unreachable!("tool options were restored before selection and crop fields"),
         }
+    }
+
+    fn apply_tool_numeric(
+        &mut self,
+        field: NumericField,
+        value: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = field.constrain(value);
+        match field {
+            NumericField::Tolerance => self.tolerance = value as u8,
+            NumericField::BrushSize => self.set_brush_value(BrushField::Size, value as u32, cx),
+            NumericField::BrushSpacing => {
+                self.set_brush_value(BrushField::Spacing, value as u32, cx)
+            }
+            NumericField::BrushHardness => {
+                self.set_brush_value(BrushField::Hardness, value as u32, cx)
+            }
+            NumericField::BrushOpacity => {
+                self.set_brush_value(BrushField::Opacity, value as u32, cx)
+            }
+            NumericField::PathStrokeSize => self.brush.diameter = value as u32,
+            NumericField::TextLetterSpacing => {
+                self.set_text_letter_spacing(value as f32, window, cx)
+            }
+            _ => unreachable!("only tool settings use this numeric setter"),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn numeric_stepper(
+        &self,
+        field: NumericField,
+        down: gpui::Stateful<Div>,
+        up: gpui::Stateful<Div>,
+        cx: &Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(down)
+            .child(self.numeric_chip(field, None, cx))
+            .child(up)
     }
 
     fn selection_for_rect(&self, rect: PixelRect) -> Option<Selection> {
@@ -595,5 +721,47 @@ mod tests {
         edit.selected = true;
         edit.insert_digits("7");
         assert_eq!(edit.text, "7");
+    }
+
+    #[test]
+    fn signed_letter_spacing_keeps_a_partial_sign_and_normal_cursor_deletion() {
+        let mut edit = NumericEdit::new(NumericField::TextLetterSpacing, -3, None);
+        edit.insert_digits("-");
+        assert_eq!(parse_numeric(&edit.text), None);
+        assert_eq!(edit.original, -3);
+        edit.insert_digits("12");
+        assert_eq!(parse_numeric(&edit.text), Some(-12));
+        edit.move_left();
+        edit.insert_digits("-"); // A sign inside a number is rejected.
+        assert_eq!(edit.text, "-12");
+        edit.backspace();
+        assert_eq!(parse_numeric(&edit.text), Some(-2));
+        edit.selected = true;
+        edit.delete();
+        assert_eq!(parse_numeric(&edit.text), None);
+        assert_eq!(edit.original, -3);
+    }
+
+    #[test]
+    fn typed_tool_values_obey_the_same_limits_as_the_step_buttons() {
+        let mut edit = NumericEdit::new(NumericField::Tolerance, 32, None);
+        edit.insert_digits("255");
+        assert_eq!(parse_numeric(&edit.text), Some(255));
+        edit.move_left();
+        edit.backspace();
+        assert_eq!(parse_numeric(&edit.text), Some(25));
+        for (field, min, max) in [
+            (NumericField::Tolerance, 0, 255),
+            (NumericField::BrushSize, 1, 500),
+            (NumericField::BrushSpacing, 1, 100),
+            (NumericField::BrushHardness, 0, 100),
+            (NumericField::BrushOpacity, 0, 100),
+            (NumericField::PathStrokeSize, 1, 500),
+            (NumericField::TextLetterSpacing, -64, 256),
+        ] {
+            assert_eq!(field.constrain(i64::MIN), min);
+            assert_eq!(field.constrain(i64::MAX), max);
+            assert_eq!(field.constrain((min + max) / 2), (min + max) / 2);
+        }
     }
 }

@@ -1,24 +1,26 @@
 use std::sync::Arc;
 
 use gpui::{
-    ClipboardItem, Context, CursorStyle, Div, KeyDownEvent, SharedString, Window, div, prelude::*,
-    px, rgb,
+    ClipboardItem, Context, CursorStyle, Div, KeyDownEvent, Keystroke, MouseButton, Window, div,
+    prelude::*, px, rgb,
 };
 
 use super::Workspace;
+use super::dialogs::{Field, FieldMode};
 use super::layers::MovePaint;
 use super::numeric::NumericField;
 use super::view::{
     ACCENT, BORDER, CANVAS, HOVER, MUTED, SELECTED, TEXT, info_note, option_action, option_row,
-    section_label, step_button, stepper,
+    section_label, step_button, toggle_button,
 };
 use crate::commands::{
-    FinishText, RasterizeText, Redo, TextCopy, TextCut, TextPaste, TextSelectAll, Undo,
+    CopyImage, CutImage, FinishText, PasteImage, RasterizeText, Redo, SelectAll, TextCopy, TextCut,
+    TextPaste, TextSelectAll, Undo,
 };
 use crate::document::{self, LayerId};
 use crate::preview::Dirty;
 use crate::text::{
-    self, CaretMap, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE, MAX_TEXT_CHARS,
+    self, CaretMap, FontFace, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE, MAX_TEXT_CHARS,
     MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextError, TextSpec,
 };
 
@@ -34,10 +36,70 @@ const GENERIC_FAMILIES: [(&str, &str); 3] = [
     ("Monospace", "monospace"),
 ];
 
+pub(super) struct FontSearch {
+    field: Field,
+    selected: usize,
+    undo: Vec<Field>,
+    redo: Vec<Field>,
+}
+
+impl Default for FontSearch {
+    fn default() -> Self {
+        Self {
+            field: Field::new(String::new()),
+            selected: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+}
+
+impl FontSearch {
+    fn edit(&mut self, edit: impl FnOnce(&mut Field)) -> bool {
+        let previous = self.field.clone();
+        edit(&mut self.field);
+        if previous.text() == self.field.text() {
+            return false;
+        }
+        if self.undo.len() == 100 {
+            self.undo.remove(0);
+        }
+        self.undo.push(previous);
+        self.redo.clear();
+        self.selected = 0;
+        true
+    }
+
+    fn step_history(&mut self, redo: bool) -> bool {
+        let target = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop()
+        };
+        if let Some(target) = target {
+            let previous = std::mem::replace(&mut self.field, target);
+            if redo {
+                self.undo.push(previous);
+            } else {
+                self.redo.push(previous);
+            }
+            self.selected = 0;
+            return true;
+        }
+        false
+    }
+}
+
+fn matches_font(label: &str, family: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    label.to_lowercase().contains(&query) || family.to_lowercase().contains(&query)
+}
+
 /// The style the next new text starts with. Editing a draft updates it too.
 #[derive(Clone)]
 pub(super) struct TextDefaults {
     family: String,
+    face: FontFace,
     size: f32,
     spacing: Spacing,
 }
@@ -46,6 +108,7 @@ impl Default for TextDefaults {
     fn default() -> Self {
         Self {
             family: "sans-serif".to_owned(),
+            face: FontFace::default(),
             size: 32.0,
             spacing: Spacing::default(),
         }
@@ -80,6 +143,7 @@ pub(super) struct TextDraft {
     cursor: usize,
     selected: bool,
     family: String,
+    face: FontFace,
     size: f32,
     color: image::Rgba<u8>,
     spacing: Spacing,
@@ -99,6 +163,7 @@ struct TextEdit {
     cursor: usize,
     selected: bool,
     family: String,
+    face: FontFace,
     size: f32,
     color: image::Rgba<u8>,
     spacing: Spacing,
@@ -120,6 +185,7 @@ impl TextDraft {
         TextSpec {
             source: self.source.clone(),
             family: self.family.clone(),
+            face: self.face,
             size: self.size,
             color: self.color,
             spacing: self.spacing,
@@ -144,6 +210,7 @@ impl TextDraft {
             cursor: self.cursor,
             selected: self.selected,
             family: self.family.clone(),
+            face: self.face,
             size: self.size,
             color: self.color,
             spacing: self.spacing,
@@ -156,6 +223,7 @@ impl TextDraft {
         self.cursor = state.cursor;
         self.selected = state.selected;
         self.family = state.family;
+        self.face = state.face;
         self.size = state.size;
         self.color = state.color;
         self.spacing = state.spacing;
@@ -300,7 +368,7 @@ impl Workspace {
         let family = draft.map_or(self.text_defaults.family.clone(), |draft| {
             draft.family.clone()
         });
-        let spacing = draft.map_or(self.text_defaults.spacing, |draft| draft.spacing);
+        let face = draft.map_or(self.text_defaults.face, |draft| draft.face);
         let color = draft.map_or_else(
             || self.colors[0],
             |draft| {
@@ -308,23 +376,37 @@ impl Workspace {
                 u32::from_be_bytes([0, red, green, blue])
             },
         );
-        let hint: SharedString = if draft.is_some() {
-            "Type on the canvas. Escape, another tool, or a click outside the text finishes it."
-                .into()
-        } else {
-            "Click the canvas to add text, or click a text layer to edit it.".into()
-        };
         let substituted = draft.and_then(|draft| draft.substitution.clone());
         let can_rasterize = self
             .active_tab()
             .is_some_and(|tab| !tab.busy() && tab.document.content.layer_is_text(tab.active_layer));
         panel
-            .child(info_note(hint))
             .when_some(substituted, |panel, message| {
                 panel.child(info_note(message))
             })
             .child(section_label("FONT"))
             .child(self.font_picker(&family, cx))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        toggle_button("Bold", face.bold)
+                            .flex_1()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_text_face(true, window, cx)
+                            })),
+                    )
+                    .child(
+                        toggle_button("Italic", face.italic)
+                            .flex_1()
+                            .italic()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_text_face(false, window, cx)
+                            })),
+                    ),
+            )
             .child(option_row(
                 "Size",
                 div()
@@ -347,15 +429,16 @@ impl Workspace {
             ))
             .child(section_label("SPACING"))
             .child(option_row(
-                "Letter",
-                stepper(
-                    format!("{:.0} px", spacing.letter),
+                "Letter px",
+                self.numeric_stepper(
+                    NumericField::TextLetterSpacing,
                     step_button("text-letter-down", "−").on_click(cx.listener(
                         |this, _, window, cx| this.step_text_spacing(-1.0, 0.0, window, cx),
                     )),
                     step_button("text-letter-up", "+").on_click(cx.listener(
                         |this, _, window, cx| this.step_text_spacing(1.0, 0.0, window, cx),
                     )),
+                    cx,
                 ),
             ))
             .child(option_row(
@@ -425,6 +508,141 @@ impl Workspace {
             )
     }
 
+    fn font_entries(&self) -> Vec<(String, String, String)> {
+        let mut entries: Vec<_> = GENERIC_FAMILIES
+            .iter()
+            .enumerate()
+            .map(|(index, (label, name))| {
+                let preview = self.font_families.as_ref().map_or_else(
+                    || (*name).to_owned(),
+                    |families| families.generic_previews[index].clone(),
+                );
+                ((*label).to_owned(), (*name).to_owned(), preview)
+            })
+            .collect();
+        if let Some(families) = &self.font_families {
+            entries.extend(
+                families
+                    .names
+                    .iter()
+                    .map(|name| (name.clone(), name.clone(), name.clone())),
+            );
+        }
+        entries.retain(|(label, name, _)| matches_font(label, name, self.font_search.field.text()));
+        entries
+    }
+
+    fn open_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_numeric_edit(window, cx);
+        self.font_search = FontSearch::default();
+        self.font_list_open = true;
+        self.load_font_families(window, cx);
+        self.reset_font_match();
+        self.font_search_focus.focus(window);
+        cx.notify();
+    }
+
+    pub(super) fn close_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.font_list_open {
+            self.font_list_open = false;
+            self.focus.focus(window);
+            cx.notify();
+        }
+    }
+
+    fn reset_font_match(&mut self) {
+        let family = self
+            .text_draft
+            .as_ref()
+            .map_or(self.text_defaults.family.as_str(), |draft| {
+                draft.family.as_str()
+            });
+        self.font_search.selected = self
+            .font_entries()
+            .iter()
+            .position(|(_, name, _)| name.eq_ignore_ascii_case(family))
+            .unwrap_or(0);
+        self.font_scroll.scroll_to_item(self.font_search.selected);
+    }
+
+    fn font_search_clipboard(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self
+            .font_search
+            .edit(|field| field.clipboard(key, FieldMode::FontQuery, cx))
+        {
+            self.font_scroll.scroll_to_top_of_item(0);
+        }
+        self.font_input_scroll
+            .scroll_to_item(self.font_search.field.caret_item());
+        cx.notify();
+    }
+
+    fn font_search_history(&mut self, redo: bool, cx: &mut Context<Self>) {
+        if self.font_search.step_history(redo) {
+            self.font_scroll.scroll_to_top_of_item(0);
+            self.font_input_scroll
+                .scroll_to_item(self.font_search.field.caret_item());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn font_search_key(
+        &mut self,
+        key: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if key.modifiers.secondary() {
+            match key.key.as_str() {
+                "a" | "c" | "x" | "v" => self.font_search_clipboard(&key.key, cx),
+                "z" => self.font_search_history(key.modifiers.shift, cx),
+                "y" => self.font_search_history(true, cx),
+                _ => {
+                    self.close_font_picker(window, cx);
+                    return false;
+                }
+            }
+            return true;
+        }
+        if key.modifiers.control || key.modifiers.platform {
+            self.close_font_picker(window, cx);
+            return false;
+        }
+        match key.key.as_str() {
+            "escape" | "tab" => self.close_font_picker(window, cx),
+            "enter" => {
+                if let Some((_, name, _)) =
+                    self.font_entries().get(self.font_search.selected).cloned()
+                {
+                    self.close_font_picker(window, cx);
+                    self.set_text_family(name, window, cx);
+                }
+            }
+            "up" | "down" => {
+                let last = self.font_entries().len().saturating_sub(1);
+                self.font_search.selected = if key.key == "down" {
+                    (self.font_search.selected + 1).min(last)
+                } else {
+                    self.font_search.selected.saturating_sub(1)
+                };
+                self.font_scroll.scroll_to_item(self.font_search.selected);
+                cx.notify();
+            }
+            _ => {
+                if self
+                    .font_search
+                    .edit(|field| field.handle_keystroke(key, FieldMode::FontQuery, cx))
+                {
+                    self.font_scroll.scroll_to_top_of_item(0);
+                }
+                self.font_input_scroll
+                    .scroll_to_item(self.font_search.field.caret_item());
+                cx.notify();
+            }
+        }
+        true
+    }
+
     fn font_picker(&self, family: &str, cx: &Context<Self>) -> Div {
         let label = GENERIC_FAMILIES
             .iter()
@@ -444,95 +662,204 @@ impl Workspace {
             .border_color(rgb(if open { ACCENT } else { BORDER }))
             .bg(rgb(CANVAS))
             .cursor_pointer()
+            .when(open, |button| {
+                button
+                    .track_focus(&self.font_search_focus)
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.font_search.field.select_all();
+                            this.font_input_scroll
+                                .scroll_to_item(this.font_search.field.caret_item());
+                            this.font_search_focus.focus(window);
+                            cx.notify();
+                        }),
+                    )
+                    .on_action(cx.listener(|this, _: &CopyImage, _, cx| {
+                        this.font_search_clipboard("c", cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|this, _: &CutImage, _, cx| {
+                        this.font_search_clipboard("x", cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|this, _: &PasteImage, _, cx| {
+                        this.font_search_clipboard("v", cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                        this.font_search_clipboard("a", cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                        this.font_search_history(false, cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                        this.font_search_history(true, cx);
+                        cx.stop_propagation();
+                    }))
+            })
             .hover(|button| button.bg(rgb(HOVER)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.))
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(label),
+            .when_else(
+                open,
+                |button| {
+                    button.child(
+                        self.font_search
+                            .field
+                            .view(true)
+                            .id("font-query-input")
+                            .h(px(26.))
+                            .px_0()
+                            .border_0()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.font_input_scroll)
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                            .whitespace_nowrap()
+                            .text_size(px(12.))
+                            .when(self.font_search.field.text().is_empty(), |field| {
+                                field.child(div().text_color(rgb(MUTED)).child("Filter fonts…"))
+                            }),
+                    )
+                },
+                |button| {
+                    button.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(label),
+                    )
+                },
             )
             .child(
                 div()
+                    .id("font-picker-toggle")
+                    .cursor_pointer()
                     .text_size(px(10.))
                     .text_color(rgb(MUTED))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.font_list_open {
+                            this.close_font_picker(window, cx);
+                        } else {
+                            this.open_font_picker(window, cx);
+                        }
+                    }))
                     .child(if open { "▲" } else { "▼" }),
             )
             .on_click(cx.listener(|this, _, window, cx| {
-                this.font_list_open = !this.font_list_open;
                 if this.font_list_open {
-                    this.load_font_families(window, cx);
+                    this.font_search_focus.focus(window);
+                } else {
+                    this.open_font_picker(window, cx);
                 }
-                cx.notify();
             }));
         let mut picker = div().flex().flex_col().gap_1().child(button);
         if !open {
             return picker;
         }
-        let mut entries: Vec<(String, String)> = GENERIC_FAMILIES
-            .iter()
-            .map(|(label, name)| ((*label).to_owned(), (*name).to_owned()))
-            .collect();
-        if let Some(families) = &self.font_families {
-            entries.extend(families.iter().map(|name| (name.clone(), name.clone())));
-        }
+        let entries = self.font_entries();
+        let no_matches = entries.is_empty();
         let loading = self.font_families.is_none();
         let current = family.to_owned();
-        picker = picker.child(
-            div()
-                .id("text-font-list")
-                .max_h(px(220.))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .p_1()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(CANVAS))
-                .children(
-                    entries
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (label, name))| {
+        picker =
+            picker.child(
+                div()
+                    .id("text-font-list")
+                    .h(px(220.))
+                    .flex_shrink_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.font_scroll)
+                    // GPUI scrolls this element before this bubble listener runs.
+                    // Consume the event here so the enclosing inspector stays put,
+                    // including when this list reaches either end.
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .flex()
+                    .flex_col()
+                    .p_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(CANVAS))
+                    .children(entries.into_iter().enumerate().map(
+                        |(index, (label, name, preview))| {
                             let chosen = name.eq_ignore_ascii_case(&current);
+                            let highlighted = index == self.font_search.selected;
                             div()
                                 .id(("text-font-entry", index))
-                                .h(px(22.))
+                                .h(px(32.))
                                 .flex_shrink_0()
                                 .flex()
                                 .items_center()
+                                .gap_2()
                                 .px_2()
                                 .rounded_sm()
                                 .text_size(px(12.))
                                 .text_ellipsis()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
-                                .text_color(rgb(if chosen { TEXT } else { MUTED }))
-                                .when(chosen, |entry| entry.bg(rgb(SELECTED)))
+                                .text_color(rgb(if chosen {
+                                    ACCENT
+                                } else if highlighted {
+                                    TEXT
+                                } else {
+                                    MUTED
+                                }))
+                                .when(highlighted, |entry| entry.bg(rgb(SELECTED)))
                                 .cursor_pointer()
                                 .hover(|entry| entry.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                .child(label)
+                                .child(
+                                    div()
+                                        .w(px(35.))
+                                        .flex_shrink_0()
+                                        .overflow_hidden()
+                                        .font_family(preview)
+                                        .text_size(px(20.))
+                                        .child("Aa"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(label),
+                                )
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.font_list_open = false;
+                                    this.close_font_picker(window, cx);
                                     this.set_text_family(name.clone(), window, cx);
                                 }))
-                        }),
-                )
-                .when(loading, |list| {
-                    list.child(
-                        div()
-                            .flex_shrink_0()
-                            .px_2()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child("Loading installed fonts…"),
-                    )
-                }),
-        );
+                        },
+                    ))
+                    .when(loading, |list| {
+                        list.child(
+                            div()
+                                .flex_shrink_0()
+                                .px_2()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED))
+                                .child("Loading installed fonts…"),
+                        )
+                    })
+                    .when(no_matches && !loading, |list| {
+                        list.child(
+                            div()
+                                .px_2()
+                                .text_size(px(12.))
+                                .text_color(rgb(MUTED))
+                                .child("No matching fonts"),
+                        )
+                    }),
+            );
         picker
     }
 
@@ -547,6 +874,10 @@ impl Workspace {
             let _ = workspace.update(cx, |workspace, cx| {
                 workspace.font_loading = false;
                 workspace.font_families = Some(Arc::new(families));
+                if workspace.font_list_open && workspace.font_search.field.text().trim().is_empty()
+                {
+                    workspace.reset_font_match();
+                }
                 cx.notify();
             });
         })
@@ -563,6 +894,25 @@ impl Workspace {
         self.text_draft
             .as_ref()
             .map_or(self.text_defaults.spacing.line, |draft| draft.spacing.line)
+    }
+
+    pub(super) fn text_letter_spacing(&self) -> f32 {
+        self.text_draft
+            .as_ref()
+            .map_or(self.text_defaults.spacing.letter, |draft| {
+                draft.spacing.letter
+            })
+    }
+
+    pub(super) fn set_text_letter_spacing(
+        &mut self,
+        letter: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let letter = letter.round().clamp(MIN_LETTER_SPACING, MAX_LETTER_SPACING);
+        let line = self.text_line_spacing();
+        self.set_text_spacing(Spacing { letter, line }, window, cx);
     }
 
     pub(super) fn set_text_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
@@ -633,6 +983,23 @@ impl Workspace {
                 return false;
             }
             draft.family = family;
+            true
+        });
+    }
+
+    fn toggle_text_face(&mut self, bold: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut face = self
+            .text_draft
+            .as_ref()
+            .map_or(self.text_defaults.face, |draft| draft.face);
+        if bold {
+            face.bold = !face.bold;
+        } else {
+            face.italic = !face.italic;
+        }
+        self.text_defaults.face = face;
+        self.change_text(window, cx, |draft| {
+            draft.face = face;
             true
         });
     }
@@ -732,7 +1099,7 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        self.font_list_open = false;
+        self.close_font_picker(window, cx);
         // A click inside the text being typed moves the caret.
         if let Some(draft) = self.text_draft.as_mut()
             && draft.contains(pixel, pad)
@@ -793,6 +1160,7 @@ impl Workspace {
                 style: text::TextStyle {
                     source: String::new(),
                     family: defaults.family.clone(),
+                    face: defaults.face,
                     size: defaults.size,
                     color,
                     spacing: defaults.spacing,
@@ -963,6 +1331,7 @@ impl Workspace {
         };
         self.text_defaults = TextDefaults {
             family: draft.family.clone(),
+            face: draft.face,
             size: draft.size,
             spacing: draft.spacing,
         };
@@ -1170,6 +1539,7 @@ impl Workspace {
             cursor: rendered.style.source.len(),
             selected: false,
             family: rendered.style.family.clone(),
+            face: rendered.style.face,
             size: rendered.style.size,
             color: rendered.style.color,
             spacing: rendered.style.spacing,
@@ -1438,12 +1808,51 @@ fn clamp_i32(value: i64) -> i32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn font_filter_matches_partial_names_aliases_and_unicode_without_case() {
+        for (label, name, query) in [
+            ("Arial Rounded", "Arial Rounded", "  ARIAL "),
+            ("Sans Serif", "sans-serif", "sans-"),
+            ("Café Sans", "Café Sans", "CAFÉ"),
+            ("Myanmar မြန်မာ", "Myanmar မြန်မာ", "မြန်မာ"),
+            ("Any Font", "Any Font", " "),
+        ] {
+            assert!(matches_font(label, name, query));
+        }
+        assert!(!matches_font("Arial", "Arial", "Helvetica"));
+        let families = ["Arial", "Arial Rounded", "Helvetica"];
+        let filtered: Vec<_> = families
+            .into_iter()
+            .filter(|name| matches_font(name, name, "arial"))
+            .collect();
+        assert_eq!(filtered, ["Arial", "Arial Rounded"]);
+    }
+
+    #[test]
+    fn font_query_history_restores_the_query_and_resets_the_highlight() {
+        let mut search = FontSearch::default();
+        search.selected = 5;
+        search.edit(|field| *field = Field::new("Arial".into()));
+        assert_eq!(search.selected, 0);
+        search.edit(|field| *field = Field::new("Café".into()));
+        search.step_history(false);
+        assert_eq!(search.field.text(), "Arial");
+        search.step_history(true);
+        assert_eq!(search.field.text(), "Café");
+        search.step_history(false);
+        search.edit(|field| *field = Field::new("Courier".into()));
+        search.step_history(true);
+        assert_eq!(search.field.text(), "Courier");
+        assert!(search.redo.is_empty());
+    }
+
     fn draft(layer: Option<LayerId>) -> TextDraft {
         let rendered = Arc::new(text::RenderedText {
             image: Arc::new(image::RgbaImage::new(1, 1)),
             style: text::TextStyle {
                 source: "café 上".into(),
                 family: "sans-serif".into(),
+                face: FontFace::default(),
                 size: 24.0,
                 color: image::Rgba([0, 0, 0, 255]),
                 spacing: Spacing::default(),
@@ -1463,6 +1872,7 @@ mod tests {
             cursor: rendered.style.source.len(),
             selected: false,
             family: "sans-serif".into(),
+            face: FontFace::default(),
             size: 24.0,
             color: rendered.style.color,
             spacing: Spacing::default(),
@@ -1487,6 +1897,10 @@ mod tests {
         draft.family = "serif".into();
         draft.anchor = (10, 20);
         draft.spacing.letter = 3.0;
+        draft.face = FontFace {
+            bold: true,
+            italic: true,
+        };
         draft.record(initial);
         assert!(draft.changed());
         assert!(draft.step_history(false));
@@ -1495,12 +1909,20 @@ mod tests {
         assert_eq!(draft.anchor, (2, 3));
         assert_eq!(draft.family, "sans-serif");
         assert_eq!(draft.spacing, Spacing::default());
+        assert_eq!(draft.face, FontFace::default());
         assert!(!draft.changed());
         assert!(draft.step_history(true));
         assert_eq!(draft.source, "café 上!");
         assert_eq!(draft.anchor, (10, 20));
         assert_eq!(draft.family, "serif");
         assert_eq!(draft.spacing.letter, 3.0);
+        assert_eq!(
+            draft.face,
+            FontFace {
+                bold: true,
+                italic: true
+            }
+        );
         assert!(Arc::ptr_eq(&pixels, &draft.rendered.image));
         assert!(draft.step_history(false));
         let previous = draft.state();

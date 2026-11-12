@@ -13,7 +13,9 @@ use crate::document::{
     decode_image,
 };
 
-pub const EXTENSION: &str = "imageedit";
+pub const EXTENSION: &str = "lime";
+pub const LEGACY_EXTENSION: &str = "imageedit";
+// Preserve the on-disk signature so existing projects remain readable.
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
 const VERSION: u32 = 6;
 
@@ -79,6 +81,11 @@ struct LayerEntry {
 struct TextEntry {
     source: String,
     family: String,
+    // Existing version 6 projects predate the face controls.
+    #[serde(default)]
+    bold: bool,
+    #[serde(default)]
+    italic: bool,
     size: f32,
     color: [u8; 4],
     letter_spacing: f32,
@@ -117,7 +124,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     reader
         .read_exact(&mut magic)
         .context("Incomplete project header")?;
-    ensure!(&magic == MAGIC, "Invalid ImageEdit project header");
+    ensure!(&magic == MAGIC, "Invalid Lime project header");
     let mut length = [0; 4];
     reader
         .read_exact(&mut length)
@@ -135,7 +142,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         serde_json::from_slice(&manifest).context("Invalid project manifest")?;
     ensure!(
         manifest.version == VERSION,
-        "Unsupported ImageEdit project version {}",
+        "Unsupported Lime project version {}",
         manifest.version
     );
     check_limits(&manifest)?;
@@ -189,6 +196,10 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
             text: entry.text.map(|text| crate::text::TextStyle {
                 source: text.source,
                 family: text.family,
+                face: crate::text::FontFace {
+                    bold: text.bold,
+                    italic: text.italic,
+                },
                 size: text.size,
                 color: Rgba(text.color),
                 spacing: crate::text::Spacing {
@@ -252,6 +263,8 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                 text: layer.text.as_ref().map(|text| TextEntry {
                     source: text.source.clone(),
                     family: text.family.clone(),
+                    bold: text.face.bold,
+                    italic: text.face.italic,
                     size: text.size,
                     color: text.color.0,
                     letter_spacing: text.spacing.letter,
@@ -585,6 +598,7 @@ mod tests {
             size: 32.0,
             color: Rgba([0, 0, 0, 255]),
             spacing: crate::text::Spacing::default(),
+            face: crate::text::FontFace::default(),
             origin: (0, 0),
         });
         let mut full = DocumentContent::from_layers(4, 3, layers).unwrap();
@@ -796,8 +810,7 @@ mod tests {
         assert_ne!(reopened.layers()[0].pixels, rendered.image);
 
         let missing =
-            crate::text::render("Ag", "ImageEdit Missing Font", 24.0, Rgba([0, 0, 0, 255]))
-                .unwrap();
+            crate::text::render("Ag", "Lime Missing Font", 24.0, Rgba([0, 0, 0, 255])).unwrap();
         let mut missing_doc = DocumentContent::single_layer("Base".into(), RgbaImage::new(4, 4));
         let missing_id = missing_doc.top_layer_id();
         missing_doc.set_text(missing_id, (0, 0), missing.clone());
@@ -806,6 +819,44 @@ mod tests {
         assert!(style.substituted());
         assert_eq!(style.resolved_family, missing.style.resolved_family);
         assert_eq!(loaded.layers()[0].pixels, missing.image);
+    }
+
+    #[test]
+    fn text_faces_round_trip_and_existing_v6_text_defaults_to_regular() {
+        let rendered = crate::text::render("Aa", "sans-serif", 32.0, Rgba([0, 0, 0, 255])).unwrap();
+        let mut content = DocumentContent::single_layer("Text".into(), RgbaImage::new(4, 4));
+        let id = content.top_layer_id();
+        content.set_text(id, (0, 0), rendered);
+        let original = write_bytes(&content).unwrap();
+        let mut manifest = manifest_json(&original);
+        let text = manifest["layers"][0]["text"].as_object_mut().unwrap();
+        text.remove("bold");
+        text.remove("italic");
+        let legacy = read_bytes(&with_manifest(&original, &manifest)).unwrap();
+        assert_eq!(
+            legacy.layers()[0].text.as_ref().unwrap().face,
+            crate::text::FontFace::default()
+        );
+        assert_same(&legacy, &content);
+
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            let rendered = crate::text::render_spec(&crate::text::TextSpec {
+                source: "Aa".into(),
+                family: "sans-serif".into(),
+                face: crate::text::FontFace { bold, italic },
+                size: 32.0,
+                color: Rgba([0, 0, 0, 255]),
+                spacing: crate::text::Spacing::default(),
+            })
+            .unwrap();
+            content.set_text(id, (0, 0), rendered);
+            let opened = read_bytes(&write_bytes(&content).unwrap()).unwrap();
+            assert_same(&opened, &content);
+            assert_eq!(
+                opened.layers()[0].text.as_ref().unwrap().face,
+                crate::text::FontFace { bold, italic }
+            );
+        }
     }
 
     #[test]

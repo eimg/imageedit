@@ -30,7 +30,7 @@ use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
 use super::files::SaveMode;
 use super::numeric::NumericField;
-use super::tooltip::{tooltip, tooltip_with_detail};
+use super::tooltip::{help_icon, tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
 
 pub(super) const CHROME: u32 = 0x20242c;
@@ -71,6 +71,15 @@ impl Render for Workspace {
             .text_color(rgb(TEXT))
             .text_size(px(13.))
             .track_focus(&self.focus)
+            // Modifier events follow the focus path, not the hovered canvas.
+            // Keep this on the root so Option press/release repaints the clone
+            // cursor immediately, including while a numeric field has focus.
+            .on_modifiers_changed(
+                cx.listener(|_, _: &gpui::ModifiersChangedEvent, window, cx| {
+                    window.refresh();
+                    cx.notify();
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.begin_space_pan(event, cx);
             }))
@@ -97,14 +106,12 @@ impl Render for Workspace {
                 let root = self.bind_stroke_actions(root, cx);
                 let root = self.bind_text_actions(root, cx);
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
+                    this.close_font_picker(window, cx);
                     let tool = action.0;
                     let changed = this.tool != tool;
                     let was_path = this.tool == Tool::Path;
                     // Typed text commits on its own; a transform tool starts once it lands.
                     let committing = changed && this.finish_text(window, cx);
-                    if changed {
-                        this.font_list_open = false;
-                    }
                     if committing && matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
                         this.defer_after_text(|this, window, cx| {
                             this.cancel_warp(window, cx);
@@ -1232,12 +1239,6 @@ impl Workspace {
                             },
                         },
                     ))
-                    .on_modifiers_changed(cx.listener(
-                        |_this, _: &gpui::ModifiersChangedEvent, window, cx| {
-                            window.refresh();
-                            cx.notify();
-                        },
-                    ))
                     .on_hover(cx.listener(|this, hovered, window, _| {
                         if *hovered {
                             this.canvas_cursor
@@ -1298,7 +1299,7 @@ impl Workspace {
                         .child(
                             div()
                                 .text_color(rgb(MUTED))
-                                .child("Drop an ImageEdit project, PNG, JPEG, or WebP here."),
+                                .child("Drop a Lime project, PNG, JPEG, or WebP here."),
                         )
                         .child(
                             div()
@@ -1375,7 +1376,7 @@ impl Workspace {
                                     .gap_2()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(icon(tool.icon, 16.))
-                                    .child(tool.label)
+                                    .child(div().flex_1().min_w_0().text_ellipsis().child(tool.label))
                                     .when_some(self.tool.shortcut_label(), |row, shortcut| {
                                         row.child(
                                             div()
@@ -1384,13 +1385,8 @@ impl Workspace {
                                                 .text_color(rgb(MUTED))
                                                 .child(shortcut),
                                         )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(MUTED))
-                                    .line_height(px(19.))
-                                    .child(tool.description),
+                                    })
+                                    .child(help_icon("tool-options-help", tool.label, self.tool.help())),
                             )
                             .when(
                                 matches!(self.tool, Tool::Select | Tool::OvalSelect),
@@ -1423,7 +1419,7 @@ impl Workspace {
                                 |panel| {
                                     panel
                                         .child(section_label("MATCH"))
-                                        .child(tolerance_row(self.tolerance, cx))
+                                        .child(tolerance_row(self, cx))
                                 },
                             )
                             .when(self.tool == Tool::BucketFill, |panel| {
@@ -1454,11 +1450,6 @@ impl Workspace {
                                     )
                             })
                             .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
-                            .when(self.tool == Tool::Path, |panel| {
-                                panel.child(info_note(
-                                    "Path management and Stroke are in the Paths tab.",
-                                ))
-                            })
                             .when(self.tool == Tool::Gradient, |panel| {
                                 let shape = self.gradient_shape;
                                 let blend = self.gradient_blend;
@@ -1525,9 +1516,6 @@ impl Workspace {
                                 panel
                                     .child(section_label("CROP"))
                                     .child(self.crop_fields(cx))
-                                    .child(info_note(
-                                        "Drag inside to move. Drag a handle to resize.",
-                                    ))
                                     .child(action_row([
                                         option_action("Apply Crop", true).on_click(
                                             |_, window, cx| {
@@ -1570,9 +1558,6 @@ impl Workspace {
                             .when(self.tool == Tool::ScaleLayer, |panel| {
                                 let size = self.scale_size();
                                 panel
-                                    .child(info_note(
-                                        "Drag a border or corner to scale the active layer.",
-                                    ))
                                     .when_some(size, |panel, (width, height)| {
                                         panel
                                             .child(section_label("SIZE"))
@@ -1591,10 +1576,11 @@ impl Workspace {
                                 let show_resample = self.tool != Tool::Flip;
                                 let can_apply = self.can_apply_warp();
                                 panel
-                                    .child(if status.applying {
-                                        info_note("Applying…")
-                                    } else {
-                                        info_note(status.summary)
+                                    .when(status.applying, |panel| {
+                                        panel.child(info_note("Applying…"))
+                                    })
+                                    .when_some(status.degrees, |panel, degrees| {
+                                        panel.child(readout_chip("Angle", format!("{degrees:.1}°")))
                                     })
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
@@ -1673,71 +1659,36 @@ impl Workspace {
                                 ),
                                 |panel| {
                                     panel
-                                        .when(self.tool == Tool::CloneStamp, |panel| {
-                                            panel.child(if self.clone_source.is_some() {
-                                                info_note("Clone source set. Alt-click to change it.")
-                                            } else {
-                                                info_note("Alt-click to set the clone source.")
-                                            })
-                                        })
                                         .child(section_label("BRUSH"))
                                         .child(brush_row(
+                                            self,
                                             "Size",
-                                            self.brush_value(super::paint_ui::BrushField::Size),
                                             super::paint_ui::BrushField::Size,
                                             cx,
                                         ))
                                         .child(brush_row(
+                                            self,
                                             "Spacing",
-                                            self.brush_value(super::paint_ui::BrushField::Spacing),
                                             super::paint_ui::BrushField::Spacing,
                                             cx,
                                         ))
                                         .when(self.tool != Tool::Pencil, |panel| {
                                             panel.child(brush_row(
+                                                self,
                                                 "Hardness",
-                                                self.brush_value(
-                                                    super::paint_ui::BrushField::Hardness,
-                                                ),
                                                 super::paint_ui::BrushField::Hardness,
                                                 cx,
                                             ))
                                         })
                                         .child(brush_row(
+                                            self,
                                             "Opacity",
-                                            self.brush_value(super::paint_ui::BrushField::Opacity),
                                             super::paint_ui::BrushField::Opacity,
                                             cx,
                                         ))
                                 },
-                            )
-                            .when(
-                                !matches!(
-                                    self.tool,
-                                    Tool::Pan
-                                        | Tool::Zoom
-                                        | Tool::Eyedropper
-                                        | Tool::Crop
-                                        | Tool::BucketFill
-                                        | Tool::Select
-                                        | Tool::OvalSelect
-                                        | Tool::FreeSelect
-                                        | Tool::MagicWand
-                                        | Tool::Move
-                                        | Tool::Rotate
-                                        | Tool::Flip
-                                        | Tool::Perspective
-                                        | Tool::Pencil
-                                        | Tool::Brush
-                                        | Tool::Eraser
-                                        | Tool::Blur
-                                        | Tool::Sharpen
-                                        | Tool::Gradient
-                                        | Tool::Path
-                                        | Tool::Text
-                                ),
-                                |panel| panel.child(info_note("Planned tool")),
                             ),
+
                     )
                     .child(self.inspector_tabs(cx)),
             )
@@ -2209,33 +2160,6 @@ pub(super) fn step_button(
         .cursor_pointer()
         .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
         .child(symbol)
-}
-
-pub(super) fn stepper(
-    value: impl Into<gpui::SharedString>,
-    down: gpui::Stateful<Div>,
-    up: gpui::Stateful<Div>,
-) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .child(down)
-        .child(
-            div()
-                .min_w(px(48.))
-                .h(px(STEP_HEIGHT))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .bg(rgb(CANVAS))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .text_size(px(12.))
-                .child(value.into()),
-        )
-        .child(up)
 }
 
 pub(super) fn readout_chip(label: &'static str, value: impl ToString) -> Div {
@@ -2869,11 +2793,11 @@ fn resample_choice(
     }))
 }
 
-fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
+fn tolerance_row(workspace: &Workspace, cx: &Context<super::Workspace>) -> Div {
     option_row(
         "Tolerance",
-        stepper(
-            value.to_string(),
+        workspace.numeric_stepper(
+            NumericField::Tolerance,
             step_button("tolerance-down", "−").on_click(cx.listener(|this, _, _, cx| {
                 this.tolerance = this.tolerance.saturating_sub(1);
                 cx.notify();
@@ -2882,6 +2806,7 @@ fn tolerance_row(value: u8, cx: &Context<super::Workspace>) -> Div {
                 this.tolerance = this.tolerance.saturating_add(1);
                 cx.notify();
             })),
+            cx,
         ),
     )
 }
@@ -3162,17 +3087,24 @@ fn paint_contours(
 }
 
 fn brush_row(
+    workspace: &Workspace,
     label: &'static str,
-    value: u32,
     field: super::paint_ui::BrushField,
     cx: &Context<super::Workspace>,
 ) -> Div {
+    let numeric_field = match field {
+        super::paint_ui::BrushField::Size => NumericField::BrushSize,
+        super::paint_ui::BrushField::Spacing => NumericField::BrushSpacing,
+        super::paint_ui::BrushField::Hardness => NumericField::BrushHardness,
+        super::paint_ui::BrushField::Opacity => NumericField::BrushOpacity,
+    };
     option_row(
         label,
-        stepper(
-            value.to_string(),
+        workspace.numeric_stepper(
+            numeric_field,
             brush_step(label, false, field, cx),
             brush_step(label, true, field, cx),
+            cx,
         ),
     )
 }

@@ -46,7 +46,7 @@ impl FileFormat {
             Self::Png => "PNG",
             Self::Jpeg => "JPEG",
             Self::WebP => "WebP",
-            Self::Project => "ImageEdit project",
+            Self::Project => "Lime project",
         }
     }
 
@@ -478,7 +478,7 @@ impl Document {
                 Some(ImageFormat::Png) => FileFormat::Png,
                 Some(ImageFormat::Jpeg) => FileFormat::Jpeg,
                 Some(ImageFormat::WebP) => FileFormat::WebP,
-                _ => anyhow::bail!("Choose an ImageEdit project or a PNG, JPEG, or WebP image"),
+                _ => anyhow::bail!("Choose a Lime project or a PNG, JPEG, or WebP image"),
             };
             let mut decoder = reader.into_decoder().context("Invalid image data")?;
             let orientation = decoder.orientation().context("Invalid image metadata")?;
@@ -665,8 +665,8 @@ pub fn save_format(path: &Path) -> Result<FileFormat> {
         "png" => Ok(FileFormat::Png),
         "jpg" | "jpeg" => Ok(FileFormat::Jpeg),
         "webp" => Ok(FileFormat::WebP),
-        project::EXTENSION => Ok(FileFormat::Project),
-        _ => anyhow::bail!("Use a .imageedit, .png, .jpg, .jpeg, or .webp filename."),
+        project::EXTENSION | project::LEGACY_EXTENSION => Ok(FileFormat::Project),
+        _ => anyhow::bail!("Use a .lime, .png, .jpg, .jpeg, or .webp filename."),
     }
 }
 
@@ -919,6 +919,36 @@ mod tests {
         )
         .unwrap();
         canvas.apply(patch)
+    }
+
+    #[test]
+    fn legacy_project_opens_and_saves_as_lime_without_losing_layers() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/projects/v6-two-layers.imageedit"
+        ));
+        let document = Document::open(legacy).unwrap();
+        let path = directory.path().join("converted.lime");
+        let format = save_format(&path).unwrap();
+        assert_eq!(format, FileFormat::Project);
+        save_image(&document.content, &path, format).unwrap();
+        let reopened = Document::open(&path).unwrap();
+        assert_eq!(reopened.format, FileFormat::Project);
+        assert_eq!(reopened.content.layers().len(), 2);
+        assert_eq!(*reopened.canvas.pixels, *document.canvas.pixels);
+        for (before, after) in document
+            .content
+            .layers()
+            .iter()
+            .zip(reopened.content.layers())
+        {
+            assert_eq!(before.name, after.name);
+            assert_eq!(before.offset, after.offset);
+            assert_eq!(before.visible, after.visible);
+            assert_eq!(before.opacity, after.opacity);
+            assert_eq!(before.pixels, after.pixels);
+        }
     }
 
     #[test]

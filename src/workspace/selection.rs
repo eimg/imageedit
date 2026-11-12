@@ -23,7 +23,7 @@ pub(super) enum MaskEdit {
 pub(super) enum SelectionGesture {
     Create {
         origin: Point<Pixels>,
-        anchor: Option<(u32, u32)>,
+        anchor: (i64, i64),
         op: SelectionOp,
     },
     Move {
@@ -82,6 +82,9 @@ impl Workspace {
         let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
         };
+        let Some(anchor) = self.unclamped_pointer_pixel(position, scale) else {
+            return;
+        };
         let gesture =
             if let Some(rect) = adjustable_rect(selection).filter(|_| op == SelectionOp::Replace) {
                 let hit = self
@@ -120,18 +123,16 @@ impl Workspace {
                     }
                     SelectionHit::Outside => SelectionGesture::Create {
                         origin: position,
-                        anchor: self.canvas_pixel(position, scale, false),
+                        anchor,
                         op,
                     },
                 }
-            } else if let Some(anchor) = self.canvas_pixel(position, scale, false) {
+            } else {
                 SelectionGesture::Create {
                     origin: position,
-                    anchor: Some(anchor),
+                    anchor,
                     op,
                 }
-            } else {
-                return;
             };
         self.selection_drag = Some(gesture);
         cx.notify();
@@ -155,7 +156,7 @@ impl Workspace {
         let preview = match drag {
             SelectionGesture::Create {
                 origin,
-                anchor: Some(start),
+                anchor: start,
                 ..
             } => {
                 let delta = position - origin;
@@ -170,19 +171,10 @@ impl Workspace {
                         SelectionShape::Ellipse
                     };
                     let radius = self.selection_radius;
-                    pointer.map(|end| {
-                        drag_selection(
-                            shape,
-                            radius,
-                            start,
-                            (end.0 as u32, end.1 as u32),
-                            width,
-                            height,
-                        )
-                    })
+                    self.unclamped_pointer_pixel(position, scale)
+                        .map(|end| drag_selection(shape, radius, start, end, width, height))
                 }
             }
-            SelectionGesture::Create { anchor: None, .. } => None,
             SelectionGesture::Move { rect, grab } => pointer.map(|pixel| {
                 placed_selection(
                     previous,
@@ -807,8 +799,8 @@ pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
 fn drag_selection(
     shape: SelectionShape,
     radius: u32,
-    start: (u32, u32),
-    end: (u32, u32),
+    start: (i64, i64),
+    end: (i64, i64),
     width: u32,
     height: u32,
 ) -> Selection {

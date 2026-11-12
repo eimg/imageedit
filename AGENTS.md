@@ -1,21 +1,24 @@
-# ImageEdit agent guide
+# Lime agent guide
 
-ImageEdit is a Rust and GPUI desktop image editor. Build for macOS first and
+Lime is a Rust and GPUI desktop image editor. Build for macOS first and
 keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
 app menu. Windows uses File → Exit. The product
 takes cues from GIMP, with native menus, a docked, resizable, and foldable
 toolbox, a Layers panel, and a tabbed canvas. File commands belong in the menu.
 The workspace favors canvas space and has no top toolbar.
+Windows is not release-ready: the current GPUI backend stores menu definitions
+without displaying them, and this app has no Windows menu bar yet. See the
+Windows status in README.md before treating a cross-check as runtime support.
 
-For planned work, start with [FEEDBACK.md](FEEDBACK.md) and take the first open
-item only. Leave the rest for another agent. The implementation plan and the
-latest pass handoff are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
-The plan is guidance, not a requirement to preserve choices that hurt the
-overall editing experience.
+Use the user's current request to scope work. This guide records the current
+architecture and editing contracts; [README.md](README.md) describes using the
+app. Update both when behavior changes. Completed plans, feedback queues, and
+review handoffs belong in Git history rather than separate living documents.
+Keep unrelated work and existing edits intact.
 
 ## Current product scope
 
-ImageEdit supports layered raster editing. The empty workspace can open a
+Lime supports layered raster editing. The empty workspace can open a
 file or create an image. Crop that image: drag the box, move it from inside,
 resize it from its handles, and edit X, Y, Width, and Height in the Crop
 options. Typed values apply immediately, and an empty field leaves the crop
@@ -27,6 +30,8 @@ are separate tools. Oval Select has a Circle option for an exact circle, and
 Rectangle Select has a corner radius control with minus and plus buttons, and
 the Width/Height fields accept typed values. Empty numeric text does not change
 the selection.
+Rectangle and oval drags may start or extend outside the canvas; coverage stays
+bounded to canvas pixels and clipped curves retain their original geometry.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and its tool options
@@ -84,12 +89,17 @@ If rendering or the layer budget rejects a commit, its draft stays available
 on its original tab and Save/Export does not continue. An empty new draft
 just closes. Save/Export commit typed text first and still require other
 visible previews to be applied or discarded; Close/Quit count pending edits as
-unsaved work. The text options pick the font from the installed families, the
-size, letter spacing in pixels, line spacing as a percent of the size, and the
-text color; new text inherits the last style and the foreground color. The
-layer stores the source, one font, a pixel size, letter and line spacing, and a
-color,
-plus the raster used for display and export. Opening a draft preserves those
+unsaved work. The text options pick the font from the installed families, Bold
+and Italic independently, the size, letter spacing in pixels, line spacing as a
+percent of the size, and the text color; new text inherits the last style and
+the foreground color. The
+font list scrolls independently of Tool Options and shows an English Aa sample
+in each font. Opening the font box focuses a case-insensitive name filter;
+typing narrows the list, arrows browse it, Return chooses, and Escape closes
+it. Query typing, clipboard actions, and undo/redo stay in the filter and do not
+edit the canvas text. The layer stores the source, one font with bold/italic flags, a
+pixel size, letter and line spacing, and a color, plus the raster used for
+display and export. Opening a draft preserves those
 pixels until its source or style changes. Preview jobs coalesce changes and
 preserve layer opacity and stack order. A missing named font shows a substitution
 notice. Rasterize Text Layer drops the source
@@ -106,7 +116,7 @@ zoomed out. Transparent pixels show a checker on the canvas and in each layer
 thumbnail. A thumbnail keeps the layer's aspect ratio, and its finer checker
 fills only that area rather than the square row slot. It also supports a grid
 and center guides. Save and Save As handle
-ImageEdit projects,
+Lime (`.lime`) projects (legacy `.imageedit` files remain readable),
 PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
 and preserves the tab’s saved state. Raster Save is offered only while a
@@ -186,10 +196,14 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
 - `src/project.rs` reads and writes the version 6 project format and applies
-  the same size limits in both directions. ImageEdit has not shipped, so older
+  the same size limits in both directions. Lime has not shipped, so older
   project versions are not supported. `fixtures/projects/` holds a golden
   project that the reader must keep opening. Regenerate it only when the
-  format intentionally changes. The current fixture is version 6 (`v6-two-layers.imageedit`).
+  format intentionally changes. The current fixture is version 6
+  (`v6-two-layers.imageedit`); keep its legacy extension to exercise compatibility. New projects use `.lime`; the file magic
+  and version stay unchanged.
+  Text bold/italic flags are optional in version 6 and default to regular for
+  projects written before those controls were added.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it
@@ -215,8 +229,11 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/numeric.rs` edits the selection radius, selection size, crop
-  fields, and the text size and line spacing inline with a caret, text selection, live preview, and one history
-  commit. Empty text restores the value that was present before editing.
+  fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity, path
+  stroke size, and text size/letter/line spacing inline with a caret and text
+  selection. Values preview live; selection edits commit one history entry.
+  Empty text and Escape restore the value from before editing. Letter spacing
+  accepts negative values. Scale Layer's size readouts remain read-only.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
   options edit X, Y, Width, and Height live.
@@ -225,13 +242,19 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   canvas using the same geometry. Tool options group related controls under
   section labels: segmented choices for either/or settings, check toggles for
   booleans, aligned steppers and readouts for numbers, and full-width actions.
-  `src/workspace/tooltip.rs` renders shared hover tooltips.
+  Explanatory paragraphs stay out of Tool Options. Each tool has a help icon
+  with essential gestures and shortcuts from `Tool::help`; the Paths panel has
+  the same help. Warnings, progress, and editing readouts remain visible.
+  `src/workspace/tooltip.rs` renders shared hover tooltips and help icons.
+  Modifier-change events are handled on the workspace focus path so Clone
+  Stamp's source cursor repaints on Option/Alt press and release without a
+  pointer move or a polling timer.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including
   development launches from Cargo.
 - `scripts/bundle-macos.sh` copies the executable, Info.plist, and icon into
-  `dist/ImageEdit.app`, ad hoc signs the bundle, and checks that signature and
+  `dist/Lime.app`, ad hoc signs the bundle, and checks that signature and
   the project and raster document types.
 
 ## Build and check
@@ -241,13 +264,21 @@ From the repository root, use a recent Rust toolchain and Xcode. Run
 `cargo test --locked`. Keep `Cargo.lock` tracked. GPUI on macOS uses
 `font-kit` for text and compiles its Metal shaders at runtime.
 
-Run `./scripts/bundle-macos.sh` and open `dist/ImageEdit.app` for native smoke
+Run `./scripts/bundle-macos.sh` and open `dist/Lime.app` for native smoke
 checks. Test a valid image and an unsupported file, switch and close tabs, and
 try Finder's **Open With** after rebuilding packaging changes. For canvas work,
 test fit, fixed zoom, pan at a zoom that clips the image, and sampling after
 panning. Create an image with custom dimensions, fill and crop it, then save
-and reopen a project and a raster image. Confirm a planned action stays
-visibly disabled until implemented.
+and reopen a project and a raster image. Confirm menu availability matches the
+active document, layer, and edit state.
+
+The preview and stroke benchmarks are ignored by default. Run them explicitly
+with `cargo test --release --locked benchmark -- --ignored --nocapture` when
+changing rendering or stroke performance. Benchmark fixtures are generated in
+memory; they are not disposable project fixtures.
 
 Keep local build output in `target/` and `dist/`. Use temporary directories
 for test images. Keep machine-specific settings and credentials out of source.
+`cargo clean` removes the rebuildable Rust output without deleting the current
+`dist/Lime.app`. Keep the golden project fixture and editable/packaged app
+icons; they are source assets, not generated leftovers.

@@ -1,9 +1,9 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Point, Window,
-    canvas, div, fill, img, point, prelude::*, px, rgb, rgba, size,
+    Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels,
+    Point, Window, canvas, div, fill, img, point, prelude::*, px, rgb, rgba, size,
 };
 
 use super::Workspace;
@@ -108,22 +108,24 @@ enum LayerFill {
 }
 
 #[derive(Clone, Copy)]
-enum FieldMode {
+pub(super) enum FieldMode {
     Digits { max: usize },
     Hex,
     Name,
+    FontQuery,
 }
 
-struct Field {
+#[derive(Clone)]
+pub(super) struct Field {
     text: String,
     cursor: usize,
     selected: bool,
 }
 
 impl Field {
-    fn new(text: String) -> Self {
+    pub(super) fn new(text: String) -> Self {
         Self {
-            cursor: text.len(),
+            cursor: text.chars().count(),
             text,
             selected: true,
         }
@@ -153,23 +155,52 @@ impl Field {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, mode: FieldMode, cx: &mut Context<Workspace>) {
-        let key = &event.keystroke;
-        if key.modifiers.secondary() {
-            match key.key.as_str() {
-                "a" => self.selected = true,
-                "c" | "x" if self.selected => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(self.text.clone()));
-                    if key.key == "x" {
-                        self.replace("");
-                    }
+        self.handle_keystroke(&event.keystroke, mode, cx);
+    }
+
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) fn select_all(&mut self) {
+        self.selected = true;
+        self.cursor = self.len();
+    }
+
+    pub(super) fn caret_item(&self) -> usize {
+        if self.selected && !self.text.is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
+    pub(super) fn clipboard(&mut self, key: &str, mode: FieldMode, cx: &mut Context<Workspace>) {
+        match key {
+            "a" => self.select_all(),
+            "c" | "x" if self.selected => {
+                cx.write_to_clipboard(ClipboardItem::new_string(self.text.clone()));
+                if key == "x" {
+                    self.replace("");
                 }
-                "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.insert(text.trim(), mode);
-                    }
-                }
-                _ => {}
             }
+            "v" => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.insert(text.trim(), mode);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn handle_keystroke(
+        &mut self,
+        key: &Keystroke,
+        mode: FieldMode,
+        cx: &mut Context<Workspace>,
+    ) {
+        if key.modifiers.secondary() {
+            self.clipboard(&key.key, mode, cx);
         } else if !key.modifiers.alt && !key.modifiers.control && !key.modifiers.platform {
             match key.key.as_str() {
                 "backspace" | "delete" if self.selected => self.replace(""),
@@ -200,7 +231,13 @@ impl Field {
                     };
                     self.selected = false;
                 }
-                _ => self.insert(key.key_char.as_deref().unwrap_or(&key.key), mode),
+                _ => {
+                    if let Some(text) = key.key_char.as_deref() {
+                        self.insert(text, mode);
+                    } else if key.key == "space" {
+                        self.insert(" ", mode);
+                    }
+                }
             }
         }
     }
@@ -215,11 +252,12 @@ impl Field {
             FieldMode::Digits { max } => max,
             FieldMode::Hex => 6,
             FieldMode::Name => MAX_LAYER_NAME_CHARS,
+            FieldMode::FontQuery => crate::text::MAX_FAMILY_CHARS,
         };
         let ok = match mode {
             FieldMode::Digits { .. } => text.bytes().all(|byte| byte.is_ascii_digit()),
             FieldMode::Hex => text.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            FieldMode::Name => text.chars().all(|ch| !ch.is_control()),
+            FieldMode::Name | FieldMode::FontQuery => text.chars().all(|ch| !ch.is_control()),
         };
         if !text.is_empty() && existing + text.chars().count() <= allowed && ok {
             self.replace(text);
@@ -232,7 +270,7 @@ impl Field {
             .flatten()
     }
 
-    fn view(&self, active: bool) -> Div {
+    pub(super) fn view(&self, active: bool) -> Div {
         let mut field = div()
             .h(px(36.))
             .px_3()
@@ -256,7 +294,7 @@ impl Field {
             let at = self.byte_at(self.cursor);
             field = field
                 .child(self.text[..at].to_owned())
-                .child(div().w(px(1.)).h(px(16.)).bg(rgb(ACCENT)))
+                .child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(rgb(ACCENT)))
                 .child(self.text[at..].to_owned());
             field
         }
@@ -2528,4 +2566,32 @@ fn hit_curve_point(bounds: Bounds<Pixels>, position: Point<Pixels>, curve: Curve
         let dy = f32::from(position.y) - f32::from(center.y);
         dx * dx + dy * dy <= 64.
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_query_fields_keep_unicode_cursor_boundaries_and_the_full_font_name_limit() {
+        let mut field = Field::new("café".into());
+        field.selected = false;
+        field.replace(" 上");
+        assert_eq!(field.text(), "café 上");
+        assert_eq!(field.cursor, field.text.chars().count());
+        field.cursor = 4;
+        field.replace("!");
+        assert_eq!(field.text(), "café! 上");
+        field.select_all();
+        field.insert(
+            &"x".repeat(crate::text::MAX_FAMILY_CHARS),
+            FieldMode::FontQuery,
+        );
+        assert_eq!(field.len(), crate::text::MAX_FAMILY_CHARS);
+        field.insert("x", FieldMode::FontQuery);
+        assert_eq!(field.len(), crate::text::MAX_FAMILY_CHARS);
+        field.select_all();
+        field.insert("invalid\nquery", FieldMode::FontQuery);
+        assert_eq!(field.len(), crate::text::MAX_FAMILY_CHARS);
+    }
 }

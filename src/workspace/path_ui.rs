@@ -2,11 +2,12 @@ use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*, px, rgb}
 
 use super::Workspace;
 use super::canvas_tools::PreviewGeometry;
+use super::numeric::NumericField;
 use super::stroke_ui::{PathStrokeStyle, StrokeSource};
-use super::tooltip::tooltip;
+use super::tooltip::{help_icon, tooltip};
 use super::view::{
     DISABLED, HOVER, MUTED, SELECTED, TEXT, choice_button, icon, option_action, option_row,
-    section_label, segmented, step_button, stepper,
+    section_label, segmented, step_button,
 };
 use crate::commands::{PathToSelection, SelectionToPath};
 use crate::paths::{self, Anchor, AnchorId, PathId, VectorPath};
@@ -181,7 +182,18 @@ impl Workspace {
                 )
         });
         panel
-            .child("Click to add an anchor. Drag to pull its handles. Click the first anchor to close.")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section_label("PATHS"))
+                    .child(help_icon(
+                        "paths-help",
+                        "Paths",
+                        crate::commands::Tool::Path.help(),
+                    )),
+            )
             .child(div().flex().flex_col().gap_1().children(rows))
             .when(paths.is_empty(), |panel| {
                 panel.child(div().text_color(rgb(MUTED)).child("No paths yet."))
@@ -220,18 +232,17 @@ impl Workspace {
             ]))
             .child(option_row(
                 "Size",
-                stepper(
-                    self.brush.diameter.to_string(),
-                    step_button("path-stroke-down", "−").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.adjust_brush_size(-1, cx);
-                        },
-                    )),
-                    step_button("path-stroke-up", "+").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.adjust_brush_size(1, cx);
-                        },
-                    )),
+                self.numeric_stepper(
+                    NumericField::PathStrokeSize,
+                    step_button("path-stroke-down", "−").on_click(cx.listener(|this, _, _, cx| {
+                        this.brush.diameter = this.brush.diameter.saturating_sub(1).max(1);
+                        cx.notify();
+                    })),
+                    step_button("path-stroke-up", "+").on_click(cx.listener(|this, _, _, cx| {
+                        this.brush.diameter = this.brush.diameter.saturating_add(1).min(500);
+                        cx.notify();
+                    })),
+                    cx,
                 ),
             ))
             .child(
@@ -246,13 +257,6 @@ impl Workspace {
                         button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
                     }),
             )
-            .when(!enabled, |panel| {
-                panel.child(
-                    div()
-                        .text_color(rgb(MUTED))
-                        .child("Select a visible path and a paintable layer."),
-                )
-            })
     }
 
     fn select_path(&mut self, id: PathId, cx: &mut Context<Self>) {
