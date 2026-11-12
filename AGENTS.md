@@ -1,5 +1,7 @@
 # Lime agent guide
 
+Work directly on `main` unless the user explicitly requests another branch.
+
 Lime is a Rust and GPUI desktop image editor. Build for macOS first and
 keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
 app menu. Windows uses File → Exit. The product
@@ -11,8 +13,6 @@ builds a native menu bar from the shared GPUI menu tree, and
 `.github/workflows/windows.yml` produces an x64 release test ZIP. The adapter
 still needs manual review on Windows; do not treat the cross-check or CI build
 as runtime support. See the Windows status in README.md.
-[docs/WINDOWS_HANDOFF.md](docs/WINDOWS_HANDOFF.md) records the original
-requirements for this work.
 
 Use the user's current request to scope work. This guide records the current
 architecture and editing contracts; [README.md](README.md) describes using the
