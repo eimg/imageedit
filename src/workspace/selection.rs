@@ -54,6 +54,13 @@ enum SelectionHit {
 
 impl Workspace {
     pub(super) fn clear_selection_gesture(&mut self) {
+        if self
+            .numeric_edit
+            .as_ref()
+            .is_some_and(|edit| edit.field.is_selection())
+        {
+            self.numeric_edit = None;
+        }
         self.selection_drag = None;
         self.selection_preview = None;
         self.free_points.clear();
@@ -449,7 +456,7 @@ impl Workspace {
         tab.selection.crop_bounds(width, height)
     }
 
-    fn commit_selection(
+    pub(super) fn commit_selection(
         &mut self,
         selection: Selection,
         window: &mut Window,

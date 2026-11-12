@@ -251,7 +251,12 @@ caret, normal text selection and deletion, and a single history change per
 committed edit. Keep the existing +/- buttons and read-only value displays until
 the editor is reliable.
 
-- Status: `open`
+- Status: `done`
+- 2026-11-12: Selection radius, selection Width/Height, and crop X/Y/Width/Height
+  accept typed values with a visible caret, selection, and normal deletion.
+  Values preview immediately, empty text leaves the existing value unchanged,
+  and selection edits commit one history entry. Formatting, Clippy, locked
+  tests, and `./scripts/bundle-macos.sh` passed.
 
 ## 17. Separate rectangle and oval select tools
 

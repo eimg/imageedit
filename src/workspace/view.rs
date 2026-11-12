@@ -29,6 +29,7 @@ use crate::transform::{Mirror, Resample};
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
 use super::files::SaveMode;
+use super::numeric::NumericField;
 use super::tooltip::{tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
 
@@ -70,12 +71,21 @@ impl Render for Workspace {
             .text_color(rgb(TEXT))
             .text_size(px(13.))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.numeric_key(event, window, cx) {
+                    return;
+                }
                 this.begin_space_pan(event, cx);
             }))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
                 this.end_space_pan(event, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.commit_numeric_edit(window, cx);
+                }),
+            )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
@@ -97,6 +107,7 @@ impl Render for Workspace {
                         return;
                     }
                     if changed {
+                        this.commit_numeric_edit(window, cx);
                         this.tool = tool;
                         this.pan_drag = None;
                         this.clear_selection_gesture();
@@ -699,7 +710,7 @@ impl Workspace {
             ));
         }
         if self.selection_shape_rect().is_some() {
-            options = options.child(self.selection_size_row());
+            options = options.child(self.selection_size_row(cx));
         }
         options
     }
@@ -707,33 +718,35 @@ impl Workspace {
     fn selection_radius_row(&self, cx: &Context<Self>) -> Div {
         option_row(
             "Radius",
-            stepper(
-                self.selection_radius.to_string(),
-                step_button("selection-radius-down", "−").on_click(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(step_button("selection-radius-down", "−").on_click(
                     cx.listener(|this, _, window, cx| this.nudge_selection_radius(-1, window, cx)),
-                ),
-                step_button("selection-radius-up", "+").on_click(
+                ))
+                .child(self.numeric_chip(NumericField::SelectionRadius, None, cx))
+                .child(step_button("selection-radius-up", "+").on_click(
                     cx.listener(|this, _, window, cx| this.nudge_selection_radius(1, window, cx)),
-                ),
-            ),
+                )),
         )
     }
 
-    fn selection_size_row(&self) -> Div {
-        let Some(rect) = self.selection_shape_rect() else {
+    fn selection_size_row(&self, cx: &Context<Self>) -> Div {
+        if self.selection_shape_rect().is_none() {
             return div();
-        };
+        }
         div()
             .flex()
             .gap_2()
-            .child(readout_chip("W", rect.width))
-            .child(readout_chip("H", rect.height))
+            .child(self.numeric_chip(NumericField::SelectionWidth, Some("W"), cx))
+            .child(self.numeric_chip(NumericField::SelectionHeight, Some("H"), cx))
     }
 
-    fn crop_fields(&self) -> Div {
-        let Some(crop) = self.crop else {
+    fn crop_fields(&self, cx: &Context<Self>) -> Div {
+        if self.crop.is_none() {
             return div();
-        };
+        }
         div()
             .flex()
             .flex_col()
@@ -742,15 +755,15 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(readout_chip("X", crop.x))
-                    .child(readout_chip("Y", crop.y)),
+                    .child(self.numeric_chip(NumericField::CropX, Some("X"), cx))
+                    .child(self.numeric_chip(NumericField::CropY, Some("Y"), cx)),
             )
             .child(
                 div()
                     .flex()
                     .gap_2()
-                    .child(readout_chip("W", crop.width))
-                    .child(readout_chip("H", crop.height)),
+                    .child(self.numeric_chip(NumericField::CropWidth, Some("W"), cx))
+                    .child(self.numeric_chip(NumericField::CropHeight, Some("H"), cx)),
             )
     }
 
@@ -1324,6 +1337,7 @@ impl Workspace {
             .flex_col()
             .border_l_1()
             .border_color(rgb(BORDER))
+            .track_focus(&self.numeric_focus)
             .child(panel_header("Tool Options"))
             .child(
                 div()
@@ -1495,7 +1509,7 @@ impl Workspace {
                             .when_some(self.crop, |panel, _| {
                                 panel
                                     .child(section_label("CROP"))
-                                    .child(self.crop_fields())
+                                    .child(self.crop_fields(cx))
                                     .child(info_note(
                                         "Drag inside to move. Drag a handle to resize.",
                                     ))
@@ -1807,7 +1821,8 @@ impl Workspace {
                     } else {
                         String::new()
                     };
-                    let selection = match &tab.selection {
+                    let selection = match self.selection_preview.as_ref().unwrap_or(&tab.selection)
+                    {
                         crate::selection::Selection::Unrestricted => String::new(),
                         crate::selection::Selection::Empty => "  ·  Empty selection".to_owned(),
                         crate::selection::Selection::Full => "  ·  All pixels".to_owned(),

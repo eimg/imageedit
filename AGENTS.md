@@ -17,14 +17,16 @@ overall editing experience.
 
 ImageEdit supports layered raster editing. The empty workspace can open a
 file or create an image. Crop that image: drag the box, move it from inside,
-resize it from its handles, and read X, Y, Width, and Height in the Crop
-options. Inline numeric entry is temporarily disabled. Sample or set swatches,
+resize it from its handles, and edit X, Y, Width, and Height in the Crop
+options. Typed values apply immediately, and an empty field leaves the crop
+unchanged. Sample or set swatches,
 and fill connected regions on the active layer. Rectangle, oval, circle,
 freehand or polygon, and wand selections limit fill and Clear to Transparency,
 and Crop to Selection uses the selection bounds. Rectangle Select and Oval Select
 are separate tools. Oval Select has a Circle option for an exact circle, and
-Rectangle Select has a corner radius control with minus and plus buttons.
-Width/Height fields show the current size.
+Rectangle Select has a corner radius control with minus and plus buttons, and
+the Width/Height fields accept typed values. Empty numeric text does not change
+the selection.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
 Shrink edit the mask. Move repositions the active layer, and its tool options
@@ -140,8 +142,9 @@ a rectangle, an ellipse, a rounded rectangle, the inverse of a rectangle, or a
 canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle
 or oval, resizes it from its handles, moves it from inside, and clears it on a
 click outside. Oval Select has a Circle option. Rectangle Select has a corner
-radius control with minus and plus buttons, and the Width/Height fields show
-the current size. Inline numeric entry is paused. Free Select drags a freehand
+radius control with minus and plus buttons, and the Width/Height fields edit
+the current size with live preview. Empty numeric text keeps the selection
+unchanged. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
 drag keeps the draft open as a checkpoint, and the start node or Return closes
 it. The Magic Wand shares the bucket tolerance.
@@ -192,9 +195,12 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
+- `src/workspace/numeric.rs` edits the selection radius, selection size, and
+  crop fields inline with a caret, text selection, live preview, and one history
+  commit. Empty text restores the value that was present before editing.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
-  options show X, Y, Width, and Height values; inline numeric entry is paused.
+  options edit X, Y, Width, and Height live.
   `src/workspace/view.rs` lays out the shell, including the resizable
   and foldable toolbox and its full-label or icon-only buttons, and paints the
   canvas using the same geometry. Tool options group related controls under

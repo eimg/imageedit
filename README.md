@@ -46,9 +46,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   transparency. PNG and lossless WebP preserve transparency. JPEG saves
   against white. The working pixel format is 8-bit RGBA.
 - Drag a rectangle with **Crop** (`C`). Drag inside the box to move it, drag a
-  handle to resize it, and read X, Y, Width, and Height in the Crop options.
-  Manual entry in those fields is temporarily disabled. Press Return to apply
-  the crop or Escape to cancel. **Bucket Fill** (`B`) uses the foreground color
+  handle to resize it, and edit X, Y, Width, and Height in the Crop options.
+  Typed values apply immediately; an empty field leaves the crop unchanged.
+  Press Return to apply the crop or Escape to cancel. **Bucket Fill** (`B`) uses the foreground color
   on connected pixels within the shared tolerance. **Color Picker** (`K`)
   samples the image at full resolution.
   **Rectangle Select** (`R`) drags a rectangle, with a corner-radius control
@@ -56,8 +56,9 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   **Circle** in its options to constrain it to an exact circle. Each outline is
   a dashed box or ellipse with handles: drag a handle to resize it, drag inside
   to move it, and click outside it to deselect. The Width and Height fields show
-  the current size while drawing; manual entry is temporarily disabled. The
-  dashes move along the outline. The pointer becomes a resize arrow on a handle
+  the current size while drawing, and typed values resize the selection
+  immediately. Empty text leaves the selection unchanged. The dashes move along
+  the outline. The pointer becomes a resize arrow on a handle
   and a hand inside the box. Select All, Deselect, and Invert are in the Select
   menu and in the tool options.
   **Free Select** (`F`) works two ways: drag to add a freehand segment, or click

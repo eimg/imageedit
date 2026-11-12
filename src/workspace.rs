@@ -9,6 +9,7 @@ mod filter_ui;
 mod gradient_ui;
 mod history;
 mod layers;
+mod numeric;
 mod paint_ui;
 mod path_ui;
 mod scale_ui;
@@ -118,6 +119,8 @@ enum CropDrag {
 
 pub struct Workspace {
     focus: FocusHandle,
+    numeric_focus: FocusHandle,
+    numeric_edit: Option<numeric::NumericEdit>,
     tab_scroll: ScrollHandle,
     tabs: Vec<Tab>,
     active: Option<usize>,
@@ -252,6 +255,21 @@ impl Workspace {
         .detach();
         let focus = cx.focus_handle();
         focus.focus(window);
+        let numeric_focus = cx.focus_handle();
+        cx.on_blur(&numeric_focus, window, |workspace, window, cx| {
+            workspace.commit_numeric_edit(window, cx);
+        })
+        .detach();
+        let numeric_entity = cx.weak_entity();
+        cx.intercept_keystrokes(move |_, _, cx| {
+            if numeric_entity
+                .update(cx, |workspace, _| workspace.numeric_edit.is_some())
+                .unwrap_or(false)
+            {
+                cx.stop_propagation();
+            }
+        })
+        .detach();
         let (loader, mut requests) = mpsc::unbounded::<PathBuf>();
         let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |workspace, cx| {
@@ -277,6 +295,8 @@ impl Workspace {
 
         Self {
             focus,
+            numeric_focus,
+            numeric_edit: None,
             tab_scroll: ScrollHandle::new(),
             tabs: Vec::new(),
             active: None,
@@ -507,6 +527,13 @@ impl Workspace {
     }
 
     fn clear_crop(&mut self) {
+        if self
+            .numeric_edit
+            .as_ref()
+            .is_some_and(|edit| edit.is_crop())
+        {
+            self.numeric_edit = None;
+        }
         self.crop = None;
         self.crop_drag = None;
     }
