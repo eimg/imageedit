@@ -133,8 +133,8 @@ pub(crate) fn start(cx: &mut App) {
     cx.on_window_closed(detach).detach();
     cx.spawn(async move |cx| {
         while let Some(id) = receiver.next().await {
-            if cx.update(|cx| dispatch(cx, &id)).is_err() {
-                break;
+            if let Err(error) = cx.update(|cx| dispatch(cx, &id)) {
+                eprintln!("Could not run a Windows menu command: {error:#}");
             }
         }
     })
@@ -347,7 +347,12 @@ fn build_submenu(
                     true,
                     None,
                 );
-                item.set_key_accelerator(command.accelerator.clone())?;
+                if let Err(error) = item.set_key_accelerator(command.accelerator.clone()) {
+                    eprintln!(
+                        "Could not show the accelerator for {:?}: {error}",
+                        command.label
+                    );
+                }
                 submenu.append(&item)?;
                 debug_assert_eq!(items.len(), *index);
                 items.push(item);
