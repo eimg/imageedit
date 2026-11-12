@@ -50,6 +50,7 @@ pub enum StrokeKind {
     Erase,
     Blur,
     Sharpen,
+    Clone { dx: i64, dy: i64 },
 }
 
 #[derive(Clone, Copy)]
@@ -330,6 +331,18 @@ impl Stroke {
                         let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
                         filters::blend(before, sharpen_pixel(source, px, py), coverage)
                     }
+                    StrokeKind::Clone { dx, dy } => {
+                        let sx = i64::from(px) + dx;
+                        let sy = i64::from(py) + dy;
+                        if sx < 0
+                            || sy < 0
+                            || sx >= i64::from(source.width())
+                            || sy >= i64::from(source.height())
+                        {
+                            continue;
+                        }
+                        source_over(before, *source.get_pixel(sx as u32, sy as u32), amount)
+                    }
                 };
                 if before != after {
                     let key = (px / STROKE_TILE, py / STROKE_TILE);
@@ -577,6 +590,27 @@ mod tests {
         for (point, target) in points.iter().zip(expected) {
             assert!((point.0 - target.0).abs() < 1e-6 && (point.1 - target.1).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn clone_stamp_copies_pixels_from_its_offset() {
+        let mut source = RgbaImage::new(4, 1);
+        source.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        source.put_pixel(3, 0, Rgba([0, 0, 255, 255]));
+        let brush = Brush {
+            diameter: 1,
+            spacing: 100,
+            hardness: 100,
+            opacity: 100,
+        };
+        let mut stroke = Stroke::new(
+            StrokeKind::Clone { dx: 3, dy: 0 },
+            Rgba([0, 0, 0, 255]),
+            brush,
+        );
+        stroke.sample(0.5, 0.5, &source, |_, _| 255);
+        let cloned = apply_stroke(&source, &stroke).unwrap().0;
+        assert_eq!(cloned.get_pixel(0, 0).0, [0, 0, 255, 255]);
     }
 
     #[test]

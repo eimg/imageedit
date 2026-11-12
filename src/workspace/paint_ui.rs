@@ -71,6 +71,19 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn set_clone_source(
+        &mut self,
+        position: Point<Pixels>,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.canvas_pixel(position, scale, false) else {
+            return;
+        };
+        self.clone_source = Some((x, y));
+        self.notice("Clone source set.", cx);
+    }
+
     pub(super) fn begin_stroke(
         &mut self,
         position: Point<Pixels>,
@@ -114,6 +127,23 @@ impl Workspace {
             .content
             .mode()
             .constrain(solid_color(self.colors[0]));
+        let here = local_point(point, offset);
+        let kind = if matches!(kind, StrokeKind::Clone { .. }) {
+            let Some(source_point) = self.clone_source else {
+                self.notice("Alt-click to set the clone source.", cx);
+                return;
+            };
+            let source_local = (
+                i64::from(source_point.0) - i64::from(offset.0),
+                i64::from(source_point.1) - i64::from(offset.1),
+            );
+            StrokeKind::Clone {
+                dx: source_local.0 - here.0.round() as i64,
+                dy: source_local.1 - here.1.round() as i64,
+            }
+        } else {
+            kind
+        };
         let mut session = StrokeSession {
             layer: id,
             offset,
@@ -121,7 +151,7 @@ impl Workspace {
             selection,
             canvas,
             stroke: Stroke::new(kind, color, *self.active_brush()),
-            last_point: local_point(point, offset),
+            last_point: here,
             patches: BTreeMap::new(),
         };
         if shift
@@ -130,7 +160,6 @@ impl Workspace {
         {
             session.paint(x, y);
         }
-        let here = local_point(point, offset);
         session.paint(here.0, here.1);
         session.last_point = here;
         self.stroke = Some(session);
@@ -346,6 +375,7 @@ fn stroke_kind(tool: Tool) -> Option<StrokeKind> {
         Tool::Eraser => Some(StrokeKind::Erase),
         Tool::Blur => Some(StrokeKind::Blur),
         Tool::Sharpen => Some(StrokeKind::Sharpen),
+        Tool::CloneStamp => Some(StrokeKind::Clone { dx: 0, dy: 0 }),
         _ => None,
     }
 }

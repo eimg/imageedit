@@ -181,7 +181,12 @@ impl Render for Workspace {
                     .when(
                         matches!(
                             self.tool,
-                            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+                            Tool::Pencil
+                                | Tool::Brush
+                                | Tool::Eraser
+                                | Tool::Blur
+                                | Tool::Sharpen
+                                | Tool::CloneStamp
                         ),
                         |root| {
                             root.key_context("Paint").on_action(cx.listener(
@@ -358,7 +363,12 @@ impl Workspace {
     fn brush_cursor(&self, tab: &Tab, scale: f32) -> Option<BrushCursor> {
         if !matches!(
             self.tool,
-            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+            Tool::Pencil
+                | Tool::Brush
+                | Tool::Eraser
+                | Tool::Blur
+                | Tool::Sharpen
+                | Tool::CloneStamp
         ) {
             return None;
         }
@@ -1001,19 +1011,32 @@ impl Workspace {
                     .when(
                         matches!(
                             self.tool,
-                            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+                            Tool::Pencil
+                                | Tool::Brush
+                                | Tool::Eraser
+                                | Tool::Blur
+                                | Tool::Sharpen
+                                | Tool::CloneStamp
                         ) && !tab.busy(),
                         |area| {
                             area.cursor(CursorStyle::Crosshair).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.begin_stroke(
-                                        event.position,
-                                        event.modifiers.shift,
-                                        window.scale_factor(),
-                                        window,
-                                        cx,
-                                    );
+                                    if this.tool == Tool::CloneStamp && event.modifiers.alt {
+                                        this.set_clone_source(
+                                            event.position,
+                                            window.scale_factor(),
+                                            cx,
+                                        );
+                                    } else {
+                                        this.begin_stroke(
+                                            event.position,
+                                            event.modifiers.shift,
+                                            window.scale_factor(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 }),
                             )
                         },
@@ -1673,6 +1696,7 @@ impl Workspace {
                                         | Tool::Eraser
                                         | Tool::Blur
                                         | Tool::Sharpen
+                                        | Tool::CloneStamp
                                         | Tool::Stroke
                                 ),
                                 |panel| {
@@ -1707,6 +1731,13 @@ impl Workspace {
                                                         }),
                                                     ),
                                                 )
+                                        })
+                                        .when(self.tool == Tool::CloneStamp, |panel| {
+                                            panel.child(if self.clone_source.is_some() {
+                                                "Clone source set. Alt-click to change it."
+                                            } else {
+                                                "Alt-click to set the clone source."
+                                            })
                                         })
                                         .child(brush_row(
                                             "Size",

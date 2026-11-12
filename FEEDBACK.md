@@ -133,10 +133,11 @@ stroke a selection, since that is not a path. Update
 
 ## 9. Clone stamp, blur, and sharpen tools
 
-- Status: `open`
-- 2026-11-11: Blur and Sharpen tools are implemented with the sized brush
-  cursor and local stroke commits, without keyboard shortcuts per the later
-  request. The clone stamp remains.
+- Status: `done`
+- 2026-11-11: Blur, Sharpen, and Clone Stamp tools are implemented with the
+  sized brush cursor and local stroke commits. Blur and Sharpen have no
+  keyboard shortcut; Clone Stamp sets its source with Alt-click and has no
+  shortcut either. Whole-layer Blur… and Sharpen… remain on Filters.
 
 Add a clone stamp, a blur tool, and a sharpen tool. Blur… and Sharpen… stay
 on the Filters menu as whole-layer dialogs; these new tools paint locally on

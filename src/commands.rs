@@ -119,6 +119,7 @@ pub enum Tool {
     Eraser,
     Blur,
     Sharpen,
+    CloneStamp,
     BucketFill,
     Gradient,
     Text,
@@ -225,6 +226,11 @@ impl Tool {
                 "sharpen",
                 "Sharpen the active layer under the brush. Release commits the stroke.",
             ),
+            Self::CloneStamp => (
+                "Clone Stamp",
+                "clone",
+                "Alt-click to set the source, then paint to copy pixels from it.",
+            ),
             Self::BucketFill => (
                 "Bucket Fill",
                 "bucket",
@@ -294,6 +300,7 @@ impl Tool {
             | Self::Brush
             | Self::Blur
             | Self::Sharpen
+            | Self::CloneStamp
             | Self::ScaleLayer => return None,
             Self::Zoom => "z",
             Self::Eyedropper => "k",
@@ -335,6 +342,7 @@ const PAINT_TOOLS: &[Tool] = &[
     Tool::Eraser,
     Tool::Blur,
     Tool::Sharpen,
+    Tool::CloneStamp,
 ];
 const FILL_TOOLS: &[Tool] = &[Tool::BucketFill, Tool::Gradient];
 const DRAW_TOOLS: &[Tool] = &[Tool::Text, Tool::Path, Tool::Stroke];
@@ -797,6 +805,7 @@ mod tests {
             Tool::Eraser,
             Tool::Blur,
             Tool::Sharpen,
+            Tool::CloneStamp,
             Tool::BucketFill,
             Tool::Gradient,
             Tool::Text,
@@ -815,7 +824,12 @@ mod tests {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), Some("␣"));
                 }
-                Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen | Tool::ScaleLayer => {
+                Tool::Pencil
+                | Tool::Brush
+                | Tool::Blur
+                | Tool::Sharpen
+                | Tool::CloneStamp
+                | Tool::ScaleLayer => {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), None);
                 }
@@ -843,7 +857,12 @@ mod tests {
             match (tool.shortcut(), tool.shortcut_label()) {
                 (None, None) => assert!(matches!(
                     tool,
-                    Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen | Tool::ScaleLayer
+                    Tool::Pencil
+                        | Tool::Brush
+                        | Tool::Blur
+                        | Tool::Sharpen
+                        | Tool::CloneStamp
+                        | Tool::ScaleLayer
                 )),
                 (None, Some("␣")) => assert_eq!(tool, Tool::Pan),
                 (Some(shortcut), Some(label)) => {
@@ -989,6 +1008,7 @@ mod tests {
             "Eraser",
             "Blur",
             "Sharpen",
+            "Clone Stamp",
             "menu:Fill",
             "Bucket Fill",
             "Gradient Fill",

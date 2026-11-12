@@ -102,9 +102,11 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   The **Scale Layer** tool draws a frame around the active layer; drag a border
   or corner to scale it, and release commits one undo step. Its Width and
   Height options are read-only for now. **Pencil**, **Brush**, **Eraser**
-  (`E`), **Blur**, and **Sharpen** draw on the active layer. Pencil starts at
-  one pixel and uses a hard edge. Brush, Eraser, Blur, and Sharpen also offer
-  hardness and opacity. Blur and Sharpen have no keyboard shortcut.
+  (`E`), **Blur**, **Sharpen**, and **Clone Stamp** draw on the active layer.
+  Pencil starts at one pixel and uses a hard edge. Brush, Eraser, Blur,
+  Sharpen, and Clone Stamp also offer hardness and opacity. Blur, Sharpen, and
+  Clone Stamp have no keyboard shortcut. Alt-click with Clone Stamp to set its
+  source, then paint to copy pixels from that offset.
   Blur softens the pixels under the brush, and Sharpen raises local contrast.
   The pointer is a size-accurate ring that follows the brush diameter and zoom:
   solid for Pencil, with a soft inner ring for the other paint tools. Release
