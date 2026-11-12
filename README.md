@@ -99,14 +99,19 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   or drag the perspective corners. Return applies the preview and Escape
   cancels it. Click the canvas to start another transform. The selection stays
   in place. Perspective requires a convex shape within the layer size limit.
-  **Pencil**, **Brush**, and **Eraser** (`E`) draw on the
-  active layer. Pencil starts at one pixel and uses a hard edge. Brush and
-  Eraser also offer a hardness control. The pointer is a size-accurate ring
-  that follows the brush diameter and zoom: solid for Pencil, with a soft
-  inner ring for Brush and Eraser. Release commits the whole stroke and
-  Escape discards it. Shift-click extends from the last committed stroke in
-  the current tab when it was on the same layer. The eraser lowers alpha, and
-  a selection limits where the stroke lands.
+  The **Scale Layer** tool draws a frame around the active layer; drag a border
+  or corner to scale it, and release commits one undo step. Its Width and
+  Height options are read-only for now. **Pencil**, **Brush**, **Eraser**
+  (`E`), **Blur**, and **Sharpen** draw on the active layer. Pencil starts at
+  one pixel and uses a hard edge. Brush, Eraser, Blur, and Sharpen also offer
+  hardness and opacity. Blur and Sharpen have no keyboard shortcut.
+  Blur softens the pixels under the brush, and Sharpen raises local contrast.
+  The pointer is a size-accurate ring that follows the brush diameter and zoom:
+  solid for Pencil, with a soft inner ring for the other paint tools. Release
+  commits the whole stroke and Escape discards it. Shift-click extends from the
+  last committed stroke in the current tab when it was on the same layer. The
+  eraser lowers alpha, and a selection limits where the stroke lands. The
+  whole-layer Blur… and Sharpen… dialogs stay on the Filters menu.
   **Gradient** (`G`) drags a line across the active layer. It can be linear or
   radial, and it fades from the foreground color to the background or to
   transparent. Return applies the preview and Escape cancels it. A click with

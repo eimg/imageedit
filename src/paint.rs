@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use image::{Rgba, RgbaImage};
 
+use crate::filters;
 use crate::preview::PixelRect;
 
 pub const STROKE_TILE: u32 = 64;
@@ -47,6 +48,8 @@ pub enum StrokeKind {
     Pencil,
     Paint,
     Erase,
+    Blur,
+    Sharpen,
 }
 
 #[derive(Clone, Copy)]
@@ -319,6 +322,14 @@ impl Stroke {
                         source_over(before, self.color, amount)
                     }
                     StrokeKind::Erase => erase(before, amount),
+                    StrokeKind::Blur => {
+                        let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
+                        filters::blend(before, blur_pixel(source, px, py), coverage)
+                    }
+                    StrokeKind::Sharpen => {
+                        let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
+                        filters::blend(before, sharpen_pixel(source, px, py), coverage)
+                    }
                 };
                 if before != after {
                     let key = (px / STROKE_TILE, py / STROKE_TILE);
@@ -370,6 +381,48 @@ pub fn apply_stroke(source: &RgbaImage, stroke: &Stroke) -> Option<(RgbaImage, V
         }
     }
     Some((image?, regions))
+}
+
+fn blur_pixel(source: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return Rgba([0, 0, 0, 0]);
+    }
+    let mut sum = [0.0f64; 4];
+    let mut count = 0.0;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as u32;
+            let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as u32;
+            let pixel = source.get_pixel(sx, sy).0;
+            let alpha = f64::from(pixel[3]) / 255.0;
+            sum[0] += f64::from(pixel[0]) * alpha;
+            sum[1] += f64::from(pixel[1]) * alpha;
+            sum[2] += f64::from(pixel[2]) * alpha;
+            sum[3] += alpha;
+            count += 1.0;
+        }
+    }
+    if sum[3] <= 0.0 {
+        return Rgba([0, 0, 0, 0]);
+    }
+    let alpha = (sum[3] / count * 255.0).round().clamp(0.0, 255.0) as u8;
+    let channel = |value: f64| (value / sum[3]).round().clamp(0.0, 255.0) as u8;
+    Rgba([channel(sum[0]), channel(sum[1]), channel(sum[2]), alpha])
+}
+
+fn sharpen_pixel(source: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
+    let before = *source.get_pixel(x, y);
+    if before.0[3] == 0 {
+        return before;
+    }
+    let soft = blur_pixel(source, x, y);
+    let channel = |index: usize| {
+        let original = f64::from(before.0[index]);
+        let blurred = f64::from(soft.0[index]);
+        (original + (original - blurred)).round().clamp(0.0, 255.0) as u8
+    };
+    Rgba([channel(0), channel(1), channel(2), before.0[3]])
 }
 
 fn dab_falloff(dx: f64, dy: f64, radius: f64, hardness: u8) -> f64 {
@@ -524,6 +577,29 @@ mod tests {
         for (point, target) in points.iter().zip(expected) {
             assert!((point.0 - target.0).abs() < 1e-6 && (point.1 - target.1).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn blur_and_sharpen_change_a_soft_impulse() {
+        let mut source = RgbaImage::from_pixel(5, 5, Rgba([100, 100, 100, 255]));
+        source.put_pixel(2, 2, Rgba([200, 200, 200, 255]));
+        let brush = Brush {
+            diameter: 5,
+            spacing: 100,
+            hardness: 100,
+            opacity: 100,
+        };
+        let mut blur = Stroke::new(StrokeKind::Blur, Rgba([0, 0, 0, 255]), brush);
+        blur.sample(2.5, 2.5, &source, |_, _| 255);
+        let blurred = apply_stroke(&source, &blur).unwrap().0;
+        assert!(blurred.get_pixel(2, 2).0[0] < 200);
+        assert!(blurred.get_pixel(2, 1).0[0] > 100);
+
+        let mut sharpen = Stroke::new(StrokeKind::Sharpen, Rgba([0, 0, 0, 255]), brush);
+        sharpen.sample(2.5, 2.5, &source, |_, _| 255);
+        let sharpened = apply_stroke(&source, &sharpen).unwrap().0;
+        assert!(sharpened.get_pixel(2, 2).0[0] > 200);
+        assert!(sharpened.get_pixel(2, 1).0[0] < 100);
     }
 
     #[test]

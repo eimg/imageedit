@@ -387,7 +387,7 @@ fn unpremultiply(sample: [f64; 4]) -> Rgba<u8> {
     ])
 }
 
-fn blend(before: Rgba<u8>, after: Rgba<u8>, coverage: u8) -> Rgba<u8> {
+pub(crate) fn blend(before: Rgba<u8>, after: Rgba<u8>, coverage: u8) -> Rgba<u8> {
     if coverage == 0 {
         return before;
     }

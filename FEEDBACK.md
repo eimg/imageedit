@@ -134,6 +134,9 @@ stroke a selection, since that is not a path. Update
 ## 9. Clone stamp, blur, and sharpen tools
 
 - Status: `open`
+- 2026-11-11: Blur and Sharpen tools are implemented with the sized brush
+  cursor and local stroke commits, without keyboard shortcuts per the later
+  request. The clone stamp remains.
 
 Add a clone stamp, a blur tool, and a sharpen tool. Blur… and Sharpen… stay
 on the Filters menu as whole-layer dialogs; these new tools paint locally on
@@ -284,3 +287,15 @@ Size and Crop to Content in the Layer menu only.
   alignment buttons and no longer repeats the Layer menu fit and crop commands.
   View → Toggle Layer Boundary replaces the Move options toggle. Formatting,
   Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
+
+## 21. Scale Layer tool
+
+Add a Scale Layer tool that draws a frame around the active layer. Drag a
+border or corner to scale the layer, with a live preview, and commit one undo
+step on release. Tool-option Width and Height inputs are read-only for now.
+
+- Status: `done`
+- 2026-11-11: This extra task ran out of queue order. The Scale Layer tool has
+  border and corner handles, GPU-scaled live preview, read-only size options,
+  and a resampled commit on release. Formatting, Clippy, locked tests, and
+  `./scripts/bundle-macos.sh` passed.

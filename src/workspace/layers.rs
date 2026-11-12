@@ -834,6 +834,7 @@ impl Workspace {
             .or_else(|| self.warp_overlay.clone())
             .or_else(|| self.gradient_overlay.clone())
             .or_else(|| self.text_overlay.clone())
+            .or_else(|| self.scale_overlay.clone())
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {

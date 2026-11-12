@@ -106,6 +106,7 @@ impl Render for Workspace {
                         this.cancel_stroke(window, cx);
                         this.cancel_gradient(window, cx);
                         this.cancel_text(window, cx);
+                        this.cancel_scale(window, cx);
                         this.cancel_path_gesture(cx);
                     }
                     if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
@@ -178,7 +179,10 @@ impl Render for Workspace {
                         ))
                     })
                     .when(
-                        matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser),
+                        matches!(
+                            self.tool,
+                            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+                        ),
                         |root| {
                             root.key_context("Paint").on_action(cx.listener(
                                 |this, _: &CancelStroke, window, cx| this.cancel_stroke(window, cx),
@@ -352,7 +356,10 @@ impl Render for Workspace {
 
 impl Workspace {
     fn brush_cursor(&self, tab: &Tab, scale: f32) -> Option<BrushCursor> {
-        if !matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser) {
+        if !matches!(
+            self.tool,
+            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+        ) {
             return None;
         }
         let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
@@ -914,6 +921,7 @@ impl Workspace {
                                     );
                                     this.extend_move(event.position, window.scale_factor(), cx);
                                     this.extend_free(event.position, window.scale_factor(), cx);
+                                    this.extend_scale(event.position, window.scale_factor(), cx);
                                     this.extend_warp_drag(
                                         event.position,
                                         window.scale_factor(),
@@ -991,8 +999,10 @@ impl Workspace {
                         },
                     )
                     .when(
-                        matches!(self.tool, Tool::Pencil | Tool::Brush | Tool::Eraser)
-                            && !tab.busy(),
+                        matches!(
+                            self.tool,
+                            Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Blur | Tool::Sharpen
+                        ) && !tab.busy(),
                         |area| {
                             area.cursor(CursorStyle::Crosshair).on_mouse_down(
                                 MouseButton::Left,
@@ -1008,6 +1018,14 @@ impl Workspace {
                             )
                         },
                     )
+                    .when(self.tool == Tool::ScaleLayer && !tab.busy(), |area| {
+                        area.cursor(self.scale_cursor(scale)).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_scale(event.position, window.scale_factor(), cx);
+                            }),
+                        )
+                    })
                     .when(self.tool == Tool::Crop && !tab.busy(), |area| {
                         area.cursor(self.crop_cursor(scale)).on_mouse_down(
                             MouseButton::Left,
@@ -1166,6 +1184,7 @@ impl Workspace {
                             } else {
                                 None
                             },
+                            scale_frame: self.scale_frame(),
                             selection: self
                                 .selection_preview
                                 .clone()
@@ -1198,7 +1217,9 @@ impl Workspace {
                         let native_cursor = (matches!(self.tool, Tool::Select | Tool::OvalSelect)
                             && self.selection_cursor(scale) != CursorStyle::Crosshair)
                             || (self.tool == Tool::Crop
-                                && self.crop_cursor(scale) != CursorStyle::Crosshair);
+                                && self.crop_cursor(scale) != CursorStyle::Crosshair)
+                            || (self.tool == Tool::ScaleLayer
+                                && self.scale_cursor(scale) != CursorStyle::Crosshair);
                         if native_cursor {
                             self.canvas_cursor.show_native(true);
                         }
@@ -1548,6 +1569,19 @@ impl Workspace {
                                         ))
                                     })
                             })
+                            .when(self.tool == Tool::ScaleLayer, |panel| {
+                                let size = self.scale_size();
+                                panel
+                                    .child("Drag a border or corner to scale the active layer.")
+                                    .when_some(size, |panel, (width, height)| {
+                                        panel.child(
+                                            div().flex().gap_2().children([
+                                                readonly_size_chip("W", width),
+                                                readonly_size_chip("H", height),
+                                            ]),
+                                        )
+                                    })
+                            })
                             .when_some(self.warp_status(), |panel, status| {
                                 let horizontal = status.horizontal;
                                 let resample = status.resample;
@@ -1634,7 +1668,12 @@ impl Workspace {
                             .when(
                                 matches!(
                                     self.tool,
-                                    Tool::Pencil | Tool::Brush | Tool::Eraser | Tool::Stroke
+                                    Tool::Pencil
+                                        | Tool::Brush
+                                        | Tool::Eraser
+                                        | Tool::Blur
+                                        | Tool::Sharpen
+                                        | Tool::Stroke
                                 ),
                                 |panel| {
                                     panel
@@ -1718,6 +1757,8 @@ impl Workspace {
                                         | Tool::Pencil
                                         | Tool::Brush
                                         | Tool::Eraser
+                                        | Tool::Blur
+                                        | Tool::Sharpen
                                         | Tool::Gradient
                                         | Tool::Path
                                         | Tool::Stroke
@@ -2157,6 +2198,7 @@ struct CanvasDecorations {
     show_guides: bool,
     crop: Option<CropRect>,
     layer_bounds: Option<preview::PixelRect>,
+    scale_frame: Option<preview::PixelRect>,
     selection: crate::selection::Selection,
     show_handles: bool,
     move_layer: Option<super::layers::MovePaint>,
@@ -2180,6 +2222,7 @@ fn image_preview(
         show_guides,
         crop,
         layer_bounds,
+        scale_frame,
         selection,
         show_handles,
         move_layer,
@@ -2305,6 +2348,9 @@ fn image_preview(
             );
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
+            }
+            if let Some(frame) = scale_frame {
+                paint_scale_frame(window, &geometry, width, height, visible, frame);
             }
             if let Some(frame) = warp {
                 paint_warp_frame(window, &geometry, viewport, width, height, frame);
@@ -2620,6 +2666,23 @@ fn align_button(
         })
         .when(!enabled, |button| button.cursor(CursorStyle::Arrow))
         .child(icon(symbol, 15.))
+}
+
+fn readonly_size_chip(label: &'static str, value: u32) -> Div {
+    div()
+        .h(px(26.))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .rounded_md()
+        .bg(rgb(CANVAS))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(label))
+        .child(value.to_string())
 }
 
 fn selection_button(
@@ -3186,6 +3249,39 @@ fn span_draw_range(start: f32, end: f32, draw_min: f32, draw_max: f32) -> (f32, 
     let near = along(draw_min);
     let far = along(draw_max);
     (near.min(far), near.max(far))
+}
+
+fn paint_scale_frame(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    rect: preview::PixelRect,
+) {
+    if width == 0 || height == 0 || rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let start = geometry.project(point(
+        rect.x as f32 / width as f32,
+        rect.y as f32 / height as f32,
+    ));
+    let end = geometry.project(point(
+        (rect.x + i64::from(rect.width)) as f32 / width as f32,
+        (rect.y + i64::from(rect.height)) as f32 / height as f32,
+    ));
+    let bounds = Bounds::from_corners(start, end);
+    if bounds.intersect(&visible).is_empty() {
+        return;
+    }
+    window.with_content_mask(Some(ContentMask { bounds: visible }), |window| {
+        window.paint_quad(gpui::outline(
+            bounds,
+            rgba(0xacc6ffb0),
+            gpui::BorderStyle::Solid,
+        ));
+        paint_handles(window, geometry, width, height, rect);
+    });
 }
 
 fn paint_layer_bounds(

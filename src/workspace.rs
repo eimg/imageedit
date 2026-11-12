@@ -11,6 +11,7 @@ mod history;
 mod layers;
 mod paint_ui;
 mod path_ui;
+mod scale_ui;
 mod selection;
 mod stroke_ui;
 mod text_ui;
@@ -137,6 +138,8 @@ pub struct Workspace {
     free_dragging: bool,
     move_drag: Option<layers::MoveDrag>,
     move_overlay: Option<layers::MovePaint>,
+    scale_drag: Option<scale_ui::ScaleDrag>,
+    scale_overlay: Option<layers::MovePaint>,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
     warp: Option<transform_ui::WarpSession>,
@@ -233,6 +236,7 @@ impl Workspace {
                 }
                 workspace.end_warp_drag(cx);
                 workspace.end_gradient_drag(cx);
+                workspace.cancel_scale(window, cx);
             }
             cx.notify();
         })
@@ -291,6 +295,8 @@ impl Workspace {
             free_dragging: false,
             move_drag: None,
             move_overlay: None,
+            scale_drag: None,
+            scale_overlay: None,
             move_settled: None,
             move_token: 0,
             warp: None,
@@ -557,6 +563,7 @@ impl Workspace {
         self.cancel_warp(window, cx);
         self.cancel_stroke(window, cx);
         self.cancel_gradient(window, cx);
+        self.cancel_scale(window, cx);
         let tab = &mut self.tabs[index];
         self.free_points.clear();
         let target = match change {

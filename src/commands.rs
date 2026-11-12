@@ -109,6 +109,7 @@ pub enum Tool {
     Rotate,
     Flip,
     Perspective,
+    ScaleLayer,
     Select,
     OvalSelect,
     FreeSelect,
@@ -116,6 +117,8 @@ pub enum Tool {
     Pencil,
     Brush,
     Eraser,
+    Blur,
+    Sharpen,
     BucketFill,
     Gradient,
     Text,
@@ -172,6 +175,11 @@ impl Tool {
                 "perspective",
                 "Drag the corners, then apply. The selection stays where it is.",
             ),
+            Self::ScaleLayer => (
+                "Scale Layer",
+                "scale",
+                "Drag a border or corner to scale the active layer.",
+            ),
             Self::Select => (
                 "Select",
                 "select",
@@ -206,6 +214,16 @@ impl Tool {
                 "Eraser",
                 "eraser",
                 "Reduce the layer's alpha. Escape discards the stroke.",
+            ),
+            Self::Blur => (
+                "Blur",
+                "blur",
+                "Soften the active layer under the brush. Release commits the stroke.",
+            ),
+            Self::Sharpen => (
+                "Sharpen",
+                "sharpen",
+                "Sharpen the active layer under the brush. Release commits the stroke.",
             ),
             Self::BucketFill => (
                 "Bucket Fill",
@@ -271,7 +289,12 @@ impl Tool {
     pub fn shortcut(self) -> Option<&'static str> {
         Some(match self {
             Self::Move => "m",
-            Self::Pan | Self::Pencil | Self::Brush => return None,
+            Self::Pan
+            | Self::Pencil
+            | Self::Brush
+            | Self::Blur
+            | Self::Sharpen
+            | Self::ScaleLayer => return None,
             Self::Zoom => "z",
             Self::Eyedropper => "k",
             Self::Crop => "c",
@@ -298,6 +321,7 @@ const TRANSFORM_TOOLS: &[Tool] = &[
     Tool::Rotate,
     Tool::Flip,
     Tool::Perspective,
+    Tool::ScaleLayer,
 ];
 const SELECTION_TOOLS: &[Tool] = &[
     Tool::Select,
@@ -305,7 +329,13 @@ const SELECTION_TOOLS: &[Tool] = &[
     Tool::FreeSelect,
     Tool::MagicWand,
 ];
-const PAINT_TOOLS: &[Tool] = &[Tool::Pencil, Tool::Brush, Tool::Eraser];
+const PAINT_TOOLS: &[Tool] = &[
+    Tool::Pencil,
+    Tool::Brush,
+    Tool::Eraser,
+    Tool::Blur,
+    Tool::Sharpen,
+];
 const FILL_TOOLS: &[Tool] = &[Tool::BucketFill, Tool::Gradient];
 const DRAW_TOOLS: &[Tool] = &[Tool::Text, Tool::Path, Tool::Stroke];
 
@@ -757,6 +787,7 @@ mod tests {
             Tool::Rotate,
             Tool::Flip,
             Tool::Perspective,
+            Tool::ScaleLayer,
             Tool::Select,
             Tool::OvalSelect,
             Tool::FreeSelect,
@@ -764,6 +795,8 @@ mod tests {
             Tool::Pencil,
             Tool::Brush,
             Tool::Eraser,
+            Tool::Blur,
+            Tool::Sharpen,
             Tool::BucketFill,
             Tool::Gradient,
             Tool::Text,
@@ -782,7 +815,7 @@ mod tests {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), Some("␣"));
                 }
-                Tool::Pencil | Tool::Brush => {
+                Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen | Tool::ScaleLayer => {
                     assert_eq!(tool.shortcut(), None);
                     assert_eq!(tool.shortcut_label(), None);
                 }
@@ -808,7 +841,10 @@ mod tests {
                 assert!(shortcuts.insert(shortcut), "{shortcut}");
             }
             match (tool.shortcut(), tool.shortcut_label()) {
-                (None, None) => assert!(matches!(tool, Tool::Pencil | Tool::Brush)),
+                (None, None) => assert!(matches!(
+                    tool,
+                    Tool::Pencil | Tool::Brush | Tool::Blur | Tool::Sharpen | Tool::ScaleLayer
+                )),
                 (None, Some("␣")) => assert_eq!(tool, Tool::Pan),
                 (Some(shortcut), Some(label)) => {
                     let key = shortcut.rsplit('-').next().unwrap();
@@ -941,6 +977,7 @@ mod tests {
             "Rotate",
             "Flip",
             "Perspective",
+            "Scale Layer",
             "menu:Selection",
             "Select",
             "Oval Select",
@@ -950,6 +987,8 @@ mod tests {
             "Pencil",
             "Brush",
             "Eraser",
+            "Blur",
+            "Sharpen",
             "menu:Fill",
             "Bucket Fill",
             "Gradient Fill",

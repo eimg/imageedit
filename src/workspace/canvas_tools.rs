@@ -100,6 +100,9 @@ impl Workspace {
             self.extend_selection(event.position, window.scale_factor(), cx);
             self.finish_selection(window, cx);
         }
+        if event.button == MouseButton::Left && self.scale_drag.is_some() {
+            self.finish_scale(window, cx);
+        }
         if event.button == MouseButton::Left && !self.free_points.is_empty() {
             self.finish_free(event.position, window, cx);
         }

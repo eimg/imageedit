@@ -344,6 +344,8 @@ fn stroke_kind(tool: Tool) -> Option<StrokeKind> {
         Tool::Pencil => Some(StrokeKind::Pencil),
         Tool::Brush => Some(StrokeKind::Paint),
         Tool::Eraser => Some(StrokeKind::Erase),
+        Tool::Blur => Some(StrokeKind::Blur),
+        Tool::Sharpen => Some(StrokeKind::Sharpen),
         _ => None,
     }
 }

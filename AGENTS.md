@@ -35,10 +35,14 @@ pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Perspective
-corner grips keep a dark rim so they stay visible on a white image. Pencil, Brush, and
-Eraser paint the active layer inside the selection; a stroke commits when the
-pointer is released. Their pointer is a size-scaled ring, hard for Pencil and
-soft for Brush and Eraser. Gradient fills the active layer between two colors, and
+corner grips keep a dark rim so they stay visible on a white image. The Scale
+Layer tool draws a frame around the active layer and scales it from a dragged
+border or corner; release commits one undo step, and its Width/Height options
+are read-only for now. Pencil,
+Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
+stroke commits when the pointer is released. Their pointer is a size-scaled
+ring, hard for Pencil and soft for the others. Blur and Sharpen change local
+pixels under the brush and have no keyboard shortcut. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
 dialog and apply inside the selection. The layer's alpha stays in place. Cancel
@@ -96,12 +100,14 @@ document is a single plain layer without paths or editable text.
   there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
-- `src/paint.rs` spaces pencil, brush, and eraser dabs along the pointer path
-  and stores touched 64 px tiles. It also samples linear and radial gradients
+- `src/paint.rs` spaces pencil, brush, eraser, blur, and sharpen dabs along the
+  pointer path and stores touched 64 px tiles. It also samples linear and radial gradients
   and strokes a polyline in one pass, skipping a repeated endpoint.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
   preview. Release commits their dirty regions in one undo step.
   `src/workspace/gradient_ui.rs` previews a gradient until Apply.
+- `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
+  the live GPU-scaled preview, and the commit that resamples the layer.
 - `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
   lightness, and it desaturates or inverts. It also balances color and maps
   levels and curves through a 256-entry lookup table per channel.

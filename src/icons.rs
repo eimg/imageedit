@@ -58,6 +58,9 @@ impl AssetSource for Icons {
             "perspective" => {
                 r#"<path d="m5 7 13-3 2 16-14-2L5 7Z"/><circle cx="5" cy="7" r="1.4" fill="black"/><circle cx="18" cy="4" r="1.4" fill="black"/><circle cx="20" cy="20" r="1.4" fill="black"/><circle cx="6" cy="18" r="1.4" fill="black"/>"#
             }
+            "scale" => {
+                r#"<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 15 15 9m-6 0h6v6"/>"#
+            }
             "select" => {
                 r#"<rect x="4" y="5" width="16" height="14" rx="1" stroke-dasharray="2.5 2.5"/>"#
             }
@@ -74,6 +77,12 @@ impl AssetSource for Icons {
             }
             "eraser" => {
                 r#"<path d="m4 13 9-9a2 2 0 0 1 3 0l4 4a2 2 0 0 1 0 3l-8 9H8l-4-4a2 2 0 0 1 0-3Zm5-5 8 8m-5 4h9"/>"#
+            }
+            "blur" => {
+                r#"<circle cx="12" cy="12" r="9" opacity=".35"/><circle cx="12" cy="12" r="6" opacity=".6"/><circle cx="12" cy="12" r="3"/>"#
+            }
+            "sharpen" => {
+                r#"<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/><path d="M12 8v8m-4-4h8" opacity=".55"/>"#
             }
             "bucket" => {
                 r#"<path d="m4 11 8-8 7 7-8 8-7-7Zm0 0h14M7 2l6 6m7 6c-1 2-2 3-2 4a2 2 0 0 0 4 0c0-1-1-2-2-4Z"/>"#
