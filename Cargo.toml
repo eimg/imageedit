@@ -22,3 +22,7 @@ gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSCursor", "NSImage", "NSResponder", "std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "std"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+muda = { version = "0.20", default-features = false }
+raw-window-handle = "0.6"

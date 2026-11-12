@@ -601,7 +601,7 @@ fn bind_tool_shortcuts(cx: &mut App) {
     }
 }
 
-fn application_menus(macos: bool) -> Vec<Menu> {
+pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
     let mut file = vec![
         MenuItem::action("New Image…", NewImage),
         MenuItem::action("New from Clipboard", NewFromClipboard),

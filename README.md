@@ -265,16 +265,23 @@ Layer's Width and Height displays remain read-only.
 | Actual pixels / Fit | 1 / ⌘⇧J |
 
 Commands without handlers appear disabled. Windows key bindings use Ctrl,
-including Ctrl+Q to quit and Ctrl+Y to redo. The shared menu definitions put
-Exit under File on Windows, but GPUI 0.2.2's Windows backend only stores those
-menus; it does not display a menu bar, and Lime does not yet render one itself.
-Commands available only through menus therefore need a Windows UI before release.
+including Ctrl+Q to quit and Ctrl+Y to redo. A Windows-only adapter
+(`src/windows_menu.rs`) converts the same GPUI menu tree into a native menu bar
+with `muda`, attaches it to the Win32 window, follows the current enabled state
+of each action, and forwards activated items back through the existing action
+handlers. It omits the macOS application menu and keeps File → Exit. The native
+menu labels use Alt mnemonics, and accelerator text comes from the GPUI key
+bindings; keyboard execution still goes through GPUI's existing Ctrl shortcuts.
 
-Windows support is experimental. A `cargo check --locked --target
-x86_64-pc-windows-gnu` from macOS checks compilation, not linking or runtime
-behavior. The app has not been run on Windows. A Windows release still needs a
-native release build and tests, menu UI, executable icon and packaging, and
-`.lime`/Open With registration. There is no Windows CI or installer yet.
+Windows support remains experimental. GitHub Actions runs formatting, Clippy,
+tests, and a native `x86_64-pc-windows-msvc` release build, then uploads a
+portable `lime-windows-x64-<sha>` ZIP artifact for manual testing. The build
+steps and menu definitions have not been runtime-verified on Windows yet; review
+the artifact in Parallels. The ZIP needs 64-bit Windows 10 or later and, if the
+system does not already have them, the Microsoft Visual C++ Redistributable
+2015-2022 x64 runtime DLLs. A Windows release still needs executable icon and
+packaging work and `.lime`/Open With registration. There is no installer, code
+signing, or file association yet.
 
 ## Development
 

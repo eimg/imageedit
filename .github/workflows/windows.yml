@@ -1,0 +1,125 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  build:
+    name: Windows x64 release
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          Write-Output "Commit: $env:GITHUB_SHA"
+          Write-Output "Rust: $(rustc --version)"
+          Write-Output "Cargo: $(cargo --version)"
+          Write-Output "Target: $env:RUST_TARGET"
+          rustc -vV
+
+      - name: Locate the Windows SDK fxc.exe
+        shell: pwsh
+        run: |
+          $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          if (-not (Test-Path $kits)) {
+            throw "Windows SDK bin directory not found at $kits"
+          }
+          $fxc = Get-ChildItem -Path $kits -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\fxc\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) {
+            throw "No Windows SDK x64 fxc.exe found under $kits"
+          }
+          Write-Output "Using fxc.exe: $($fxc.FullName)"
+          Write-Output "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:VCToolsInstallDir) {
+            Write-Output "MSVC tools: $env:VCToolsInstallDir"
+          }
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --target ${{ env.RUST_TARGET }} -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --target ${{ env.RUST_TARGET }}
+
+      - name: Build release executable
+        run: cargo build --release --locked --target ${{ env.RUST_TARGET }}
+
+      - name: Package the x64 test build
+        id: package
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $name = "lime-windows-x64-$shortSha"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "$name.zip"
+          $out = Join-Path $env:GITHUB_WORKSPACE "dist-windows"
+          $exe = Join-Path $env:GITHUB_WORKSPACE "target\$env:RUST_TARGET\release\lime.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Release executable not found at $exe"
+          }
+
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item $exe (Join-Path $out "lime.exe")
+
+          @"
+          Lime - Lite Image Editor
+          Windows x64 test build
+
+          Commit: $env:GITHUB_SHA
+          Built from: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
+          Target: $env:RUST_TARGET
+
+          This is a portable test build, not an installer and not a verified
+          release. The native menu bar and editing flows still need a manual
+          review in Windows.
+
+          Requirements:
+          - 64-bit Windows 10 or later with DirectX/DirectComposition.
+          - Microsoft Visual C++ Redistributable 2015-2022 (x64) if the
+            vcruntime/UCRT DLLs are not already installed.
+
+          Known limitations:
+          - No installer, code signing, executable icon resource, or .lime /
+            Open With file association yet.
+          - Windows menus are built from the shared action tree and type-checked
+            in CI, but they have not been runtime-verified by the maintainer.
+          "@ | Set-Content -Path (Join-Path $out "READ-ME.txt") -Encoding utf8
+
+          Compress-Archive -Path (Join-Path $out "*") -DestinationPath $zip -Force
+          Write-Output "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Output "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload the Windows artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 30

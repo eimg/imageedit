@@ -6,11 +6,13 @@ app menu. Windows uses File → Exit. The product
 takes cues from GIMP, with native menus, a docked, resizable, and foldable
 toolbox, a Layers panel, and a tabbed canvas. File commands belong in the menu.
 The workspace favors canvas space and has no top toolbar.
-Windows is not release-ready: the current GPUI backend stores menu definitions
-without displaying them, and this app has no Windows menu bar yet. See the
-Windows status in README.md before treating a cross-check as runtime support.
-For the requested Windows menu adapter and GitHub build work, start with
-[docs/WINDOWS_HANDOFF.md](docs/WINDOWS_HANDOFF.md).
+Windows is not release-ready or runtime-verified. A Windows-only `muda` adapter
+builds a native menu bar from the shared GPUI menu tree, and
+`.github/workflows/windows.yml` produces an x64 release test ZIP. The adapter
+still needs manual review on Windows; do not treat the cross-check or CI build
+as runtime support. See the Windows status in README.md.
+[docs/WINDOWS_HANDOFF.md](docs/WINDOWS_HANDOFF.md) records the original
+requirements for this work.
 
 Use the user's current request to scope work. This guide records the current
 architecture and editing contracts; [README.md](README.md) describes using the
@@ -251,6 +253,12 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   Modifier-change events are handled on the workspace focus path so Clone
   Stamp's source cursor repaints on Option/Alt press and release without a
   pointer move or a polling timer.
+- `src/windows_menu.rs` converts the shared GPUI menu tree into a `muda`
+  native Windows menu bar, attaches it to the Win32 HWND, keeps native owners
+  and item handles on the UI thread, syncs action availability after frames,
+  and forwards activations to GPUI actions after Win32 callbacks return.
+  `.github/workflows/windows.yml` builds and tests the x64 MSVC release ZIP,
+  setting `GPUI_FXC_PATH` from the installed Windows SDK.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
   app icon and `macos/AppIcon.icns` is its packaged form.
 - `src/macos.rs` applies the same icon to the running Dock entry, including

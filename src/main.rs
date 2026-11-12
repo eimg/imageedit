@@ -18,6 +18,8 @@ mod project;
 mod selection;
 mod text;
 mod transform;
+#[cfg(target_os = "windows")]
+mod windows_menu;
 mod workspace;
 
 use std::path::PathBuf;
@@ -53,6 +55,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         macos::set_dock_icon();
         commands::register(cx);
+        #[cfg(target_os = "windows")]
+        windows_menu::start(cx);
         let paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if let Err(error) = open_paths(paths, cx) {
             eprintln!("Could not start Lime: {error:#}");
@@ -93,7 +97,12 @@ fn ensure_workspace(cx: &mut App) -> Result<WindowHandle<Workspace>> {
             }),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| Workspace::new(window, cx)),
+        |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            #[cfg(target_os = "windows")]
+            windows_menu::attach(window, cx);
+            workspace
+        },
     )
 }
 
