@@ -5,14 +5,16 @@
 //! window's HWND, keeps their native owners alive on the UI thread, and routes
 //! activation back to GPUI actions after the Win32 callback has returned.
 
+mod appearance;
+
 use std::{cell::RefCell, collections::HashSet};
 
 use anyhow::{Context as _, Result};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{Action, App, Keymap, Keystroke, OwnedMenu, OwnedMenuItem, Window};
 use muda::{
-    Menu as NativeMenu, MenuEvent, MenuId, MenuItem as NativeMenuItem, PredefinedMenuItem,
-    Submenu as NativeSubmenu,
+    Menu as NativeMenu, MenuEvent, MenuId, MenuItem as NativeMenuItem, MenuTheme,
+    PredefinedMenuItem, Submenu as NativeSubmenu,
     accelerator::{Key, KeyAccelerator, Modifiers, NamedKey},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -23,7 +25,8 @@ use windows_sys::Win32::{
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
             DefWindowProcW, MSG, PostMessageW, TranslateMessage, WM_EXITMENULOOP, WM_INITMENUPOPUP,
-            WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_THEMECHANGED,
         },
     },
 };
@@ -39,6 +42,7 @@ thread_local! {
 enum MenuRequest {
     Activate(MenuId),
     Refresh,
+    Appearance,
 }
 
 struct AttachedMenus {
@@ -49,6 +53,7 @@ struct AttachedMenus {
     enabled: Vec<Option<bool>>,
     mnemonics: Vec<usize>,
     sync_pending: bool,
+    theme: MenuTheme,
 }
 
 impl AttachedMenus {
@@ -73,6 +78,7 @@ pub(crate) fn configure_renderer() {
     // non-client painting. This must run before Application::new reads the flag.
     // SAFETY: this is Windows-only and called first in main, before GPUI starts.
     unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
+    appearance::configure_app();
 }
 
 #[derive(Debug)]
@@ -176,6 +182,7 @@ pub(crate) fn start(cx: &mut App) {
                     request_sync(cx);
                     Ok(())
                 }
+                MenuRequest::Appearance => sync_appearance(),
             }) {
                 eprintln!("Could not run a Windows menu command: {error:#}");
             }
@@ -192,6 +199,7 @@ pub(crate) fn attach(window: &mut Window, cx: &mut App) {
 
 fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     let hwnd = window_hwnd(window)?;
+    let theme = appearance::for_window(hwnd);
     let menus = cx
         .get_menus()
         .context("no application menus were registered")?;
@@ -208,7 +216,7 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     // children stay owned by ATTACHED on this UI thread for the window's
     // lifetime. The native subclass installed by muda is removed in `detach`.
     unsafe {
-        menu.init_for_hwnd(hwnd)
+        menu.init_for_hwnd_with_theme(hwnd, theme)
             .context("muda could not attach the menu bar to the window")?;
         if SetWindowSubclass(
             hwnd as HWND,
@@ -222,6 +230,10 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
         }
     }
 
+    if let Err(error) = appearance::compact_dropdowns(hwnd) {
+        eprintln!("Could not remove the empty native menu gutter: {error:#}");
+    }
+
     let enabled = vec![None; plan.commands.len()];
     ATTACHED.with(|attached| {
         *attached.borrow_mut() = Some(AttachedMenus {
@@ -232,6 +244,7 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
             enabled,
             mnemonics,
             sync_pending: false,
+            theme,
         });
     });
 
@@ -298,6 +311,13 @@ unsafe extern "system" fn keyboard_subclass(
 ) -> LRESULT {
     if message == WM_NCDESTROY {
         unsafe { RemoveWindowSubclass(hwnd, Some(keyboard_subclass), KEYBOARD_SUBCLASS_ID) };
+    }
+    if matches!(message, WM_SETTINGCHANGE | WM_THEMECHANGED) {
+        REQUESTS.with(|requests| {
+            if let Some(sender) = requests.borrow().as_ref() {
+                let _ = sender.unbounded_send(MenuRequest::Appearance);
+            }
+        });
     }
     if matches!(message, WM_INITMENUPOPUP | WM_EXITMENULOOP) {
         // Updating GPUI synchronously from a native callback can re-enter an
@@ -413,6 +433,34 @@ pub(crate) fn request_sync(cx: &mut App) {
             sync_enabled(cx);
         });
     }
+}
+
+fn sync_appearance() -> Result<()> {
+    let current = ATTACHED.with(|attached| {
+        attached
+            .borrow()
+            .as_ref()
+            .map(|attached| (attached.hwnd, attached.menu.clone(), attached.theme))
+    });
+    let Some((hwnd, menu, previous)) = current else {
+        return Ok(());
+    };
+    let theme = appearance::for_window(hwnd);
+    if theme != previous {
+        // SAFETY: this menu is attached to hwnd; its owner is retained above.
+        unsafe { menu.set_theme_for_hwnd(hwnd, theme) }
+            .context("could not refresh the native menu theme")?;
+        ATTACHED.with(|attached| {
+            if let Some(attached) = attached
+                .borrow_mut()
+                .as_mut()
+                .filter(|attached| attached.hwnd == hwnd)
+            {
+                attached.theme = theme;
+            }
+        });
+    }
+    Ok(())
 }
 
 fn sync_enabled(cx: &mut App) {

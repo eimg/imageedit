@@ -260,6 +260,10 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   to GPUI actions after Win32 callbacks return. A native subclass routes Alt
   mnemonics and F10 before GPUI's text handling. Windows uses GPUI's HWND DirectX
   swap-chain path so native menu painting has an opaque backing surface.
+  `src/windows_menu/appearance.rs` requests dark native menus and removes the
+  unused checkmark gutter from text-only dropdowns. Its dynamically loaded theme
+  APIs are version-checked; unavailable support and high-contrast mode retain
+  system rendering. Restore the gutter if native checks or icons are introduced.
   `.github/workflows/windows.yml` builds and tests the x64 MSVC release ZIP,
   setting `GPUI_FXC_PATH` from the installed Windows SDK.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
