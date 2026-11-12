@@ -261,11 +261,25 @@ impl Workspace {
         })
         .detach();
         let numeric_entity = cx.weak_entity();
-        cx.intercept_keystrokes(move |_, _, cx| {
-            if numeric_entity
-                .update(cx, |workspace, _| workspace.numeric_edit.is_some())
-                .unwrap_or(false)
-            {
+        // A numeric field consumes keystrokes before key bindings and element
+        // listeners run. Stopping propagation here also skips `on_key_down`,
+        // so the edit must be applied in the interceptor itself.
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let handled = numeric_entity
+                .update(cx, |workspace, cx| {
+                    if workspace.numeric_edit.is_none() {
+                        return false;
+                    }
+                    if workspace.numeric_key(&event.keystroke, window, cx) {
+                        return true;
+                    }
+                    // Unhandled shortcuts such as Undo or Save act on the
+                    // committed value rather than a half-typed draft.
+                    workspace.commit_numeric_edit(window, cx);
+                    false
+                })
+                .unwrap_or(false);
+            if handled {
                 cx.stop_propagation();
             }
         })

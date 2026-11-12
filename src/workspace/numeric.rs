@@ -1,6 +1,6 @@
 use gpui::{
-    ClipboardItem, Context, CursorStyle, Div, KeyDownEvent, MouseButton, Window, div, prelude::*,
-    px, rgb,
+    ClipboardItem, Context, CursorStyle, Div, Keystroke, MouseButton, Window, div, prelude::*, px,
+    rgb,
 };
 
 use super::Workspace;
@@ -197,14 +197,13 @@ impl Workspace {
 
     pub(super) fn numeric_key(
         &mut self,
-        event: &KeyDownEvent,
+        key: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.numeric_edit.is_none() {
             return false;
         }
-        let key = &event.keystroke;
         if key.key == "escape" {
             self.cancel_numeric_edit(window, cx);
             return true;

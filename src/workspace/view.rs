@@ -71,10 +71,7 @@ impl Render for Workspace {
             .text_color(rgb(TEXT))
             .text_size(px(13.))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.numeric_key(event, window, cx) {
-                    return;
-                }
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.begin_space_pan(event, cx);
             }))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
