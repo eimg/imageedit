@@ -9,6 +9,8 @@ The workspace favors canvas space and has no top toolbar.
 Windows is not release-ready: the current GPUI backend stores menu definitions
 without displaying them, and this app has no Windows menu bar yet. See the
 Windows status in README.md before treating a cross-check as runtime support.
+For the requested Windows menu adapter and GitHub build work, start with
+[docs/WINDOWS_HANDOFF.md](docs/WINDOWS_HANDOFF.md).
 
 Use the user's current request to scope work. This guide records the current
 architecture and editing contracts; [README.md](README.md) describes using the
