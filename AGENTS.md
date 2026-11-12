@@ -68,13 +68,24 @@ current path, and the next Path click starts a new one. Stroke in the Paths tab
 paints the selected visible path onto the active layer with the foreground
 color, using a Pencil or Brush stroke and an adjustable size. Stroke Selection
 remains on the Edit menu. The contour stays in canvas coordinates, and the
-brush is not clipped to it. Text (`T`) adds an editable layer.
-Click sets its origin, or loads the active text layer. Typing, Return, and the
-text clipboard stay in that draft until Apply commits one undo step. Native
-Edit menu actions and Undo/Redo operate on the draft. Escape discards it.
-Modified text must be applied or discarded before changing tools, layers, tabs,
-or other content. Save/Export require visible edits to be applied or discarded;
-Close/Quit count pending edits as unsaved work. The layer stores the source, one font, a pixel size, and a color,
+brush is not clipped to it. Text (`T`) edits text in place with a caret.
+A click on empty canvas starts new text, a click on a visible text layer opens
+it, and a click inside the current text moves the caret. A click within
+a few screen points of a text box still edits that text. A dashed frame marks
+the text being edited, and the caret blinks. Typing, Return, the
+arrow keys, and the text clipboard edit the draft and show it on the canvas at
+once. Native Edit menu actions and Undo/Redo step through the typing first,
+then fall through to image history. There is no Apply or Discard: Escape,
+Cmd/Ctrl-Enter, a click outside the text, or changing tools, layers, tabs, or
+any image command commits a modified draft as one undo step, and a command
+that depends on the result runs after that commit lands. An empty new draft
+just closes. Save/Export commit typed text first and still require other
+visible previews to be applied or discarded; Close/Quit count pending edits as
+unsaved work. The text options pick the font from the installed families, the
+size, letter spacing in pixels, line spacing as a percent of the size, and the
+text color; new text inherits the last style and the foreground color. The
+layer stores the source, one font, a pixel size, letter and line spacing, and a
+color,
 plus the raster used for display and export. Opening a draft preserves those
 pixels until its source or style changes. Preview jobs coalesce changes and
 preserve layer opacity and stack order. A missing named font shows a substitution
@@ -155,7 +166,7 @@ contour. Stroke polylines follow that contour, including a hole. Mask
 transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
-  is stored in the version 5 project.
+  is stored in the version 6 project.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
@@ -165,12 +176,15 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/text.rs` rasterizes a layer's text with cosmic-text. One style covers
   the whole layer. The cached bitmap is what the canvas and export paint, and
   the project also stores the source so a machine with different fonts can
-  still open the pixels. `src/workspace/text_ui.rs` edits that draft.
-- `src/project.rs` reads and writes the version 5 project format and applies
+  still open the pixels. It also builds a caret map with a stop at every
+  character boundary for drawing the caret, hit testing, and Up/Down.
+  `src/workspace/text_ui.rs` edits that draft, commits it when the session
+  ends, and draws the font picker and style options.
+- `src/project.rs` reads and writes the version 6 project format and applies
   the same size limits in both directions. ImageEdit has not shipped, so older
   project versions are not supported. `fixtures/projects/` holds a golden
   project that the reader must keep opening. Regenerate it only when the
-  format intentionally changes. The current fixture is version 5.
+  format intentionally changes. The current fixture is version 6 (`v6-two-layers.imageedit`).
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it
@@ -195,8 +209,8 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
-- `src/workspace/numeric.rs` edits the selection radius, selection size, and
-  crop fields inline with a caret, text selection, live preview, and one history
+- `src/workspace/numeric.rs` edits the selection radius, selection size, crop
+  fields, and the text size and line spacing inline with a caret, text selection, live preview, and one history
   commit. Empty text restores the value that was present before editing.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool

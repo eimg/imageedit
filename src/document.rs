@@ -1011,7 +1011,7 @@ mod tests {
         let project = directory.path().join("layers.imageedit");
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/projects/v5-two-layers.imageedit"
+            "/fixtures/projects/v6-two-layers.imageedit"
         );
         std::fs::copy(fixture, &project).unwrap();
         let project_bytes = std::fs::read(&project).unwrap();

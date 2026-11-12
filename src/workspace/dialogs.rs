@@ -285,11 +285,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let initial = if swatch == super::text_ui::TEXT_SWATCH {
+            let Some(color) = self.text_color_value() else {
+                return;
+            };
+            color
+        } else {
+            self.colors[swatch]
+        };
         self.show_form(
             FormKind::Color {
                 swatch,
-                hex: Field::new(format!("{:06X}", self.colors[swatch])),
-                hsv: Hsv::from_rgb(self.colors[swatch]),
+                hex: Field::new(format!("{initial:06X}")),
+                hsv: Hsv::from_rgb(initial),
                 drag: None,
             },
             window,
@@ -454,7 +462,8 @@ impl Workspace {
         if self.dialog_open || self.form.is_some() {
             return;
         }
-        if !matches!(kind, FormKind::Color { .. }) && self.refuse_pending_text(cx) {
+        if !matches!(kind, FormKind::Color { .. }) && self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.show_form(kind, window, cx));
             return;
         }
         let focus = cx.focus_handle();
@@ -492,6 +501,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.adjustment_form(operation, window, cx);
+            });
+            return;
+        }
         if self.dialog_open || self.form.is_some() || !self.begin_adjustment(window, cx) {
             return;
         }
@@ -541,6 +556,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.filter_form(kind, window, cx));
+            return;
+        }
         if self.dialog_open || self.form.is_some() {
             return;
         }
@@ -605,9 +624,13 @@ impl Workspace {
                     return;
                 };
                 let swatch = *swatch;
-                self.set_color(swatch, color);
-                self.refresh_gradient(window, cx);
                 self.dismiss_form(window, cx);
+                if swatch == super::text_ui::TEXT_SWATCH {
+                    self.recolor_text(color, window, cx);
+                } else {
+                    self.set_color(swatch, color);
+                    self.refresh_gradient(window, cx);
+                }
             }
             FormKind::JpegQuality { quality } => {
                 let Some(quality) = quality.text.parse().ok().filter(|q| (1..=100).contains(q))
@@ -1498,10 +1521,10 @@ impl Workspace {
                                 .border_color(rgb(BORDER))
                                 .bg(rgb(color)),
                         );
-                    let title = if *swatch == 0 {
-                        "Foreground Color"
-                    } else {
-                        "Background Color"
+                    let title = match *swatch {
+                        0 => "Foreground Color",
+                        super::text_ui::TEXT_SWATCH => "Text Color",
+                        _ => "Background Color",
                     };
                     (
                         title,

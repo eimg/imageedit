@@ -141,6 +141,10 @@ impl Workspace {
     }
 
     pub(super) fn save(&mut self, mode: SaveMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.save(mode, window, cx));
+            return;
+        }
         if self.refuse_pending_file_edit(cx) {
             return;
         }
@@ -195,6 +199,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.export(format, jpeg_quality, window, cx);
+            });
+            return;
+        }
         if self.refuse_pending_file_edit(cx) {
             return;
         }

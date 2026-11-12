@@ -100,8 +100,16 @@ impl Render for Workspace {
                     let tool = action.0;
                     let changed = this.tool != tool;
                     let was_path = this.tool == Tool::Path;
-                    if changed && this.refuse_pending_text(cx) {
-                        return;
+                    // Typed text commits on its own; a transform tool starts once it lands.
+                    let committing = changed && this.finish_text(window, cx);
+                    if changed {
+                        this.font_list_open = false;
+                    }
+                    if committing && matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
+                        this.defer_after_text(|this, window, cx| {
+                            this.cancel_warp(window, cx);
+                            this.begin_warp(window, cx);
+                        });
                     }
                     if changed {
                         this.commit_numeric_edit(window, cx);
@@ -1212,6 +1220,11 @@ impl Workspace {
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
+                            text_caret: if self.tool == Tool::Text {
+                                self.text_caret()
+                            } else {
+                                None
+                            },
                         },
                     ))
                     .on_modifiers_changed(cx.listener(
@@ -1547,18 +1560,6 @@ impl Workspace {
                                             )
                                             .child(section_label("ALIGN"))
                                             .child(align_controls(enabled, cx))
-                                    })
-                                    .when(self.move_drag.is_some(), |panel| {
-                                        panel.child(
-                                            option_action("Cancel Move", false).w_full().on_click(
-                                                |_, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(CancelMove),
-                                                        cx,
-                                                    );
-                                                },
-                                            ),
-                                        )
                                     })
                             })
                             .when(self.tool == Tool::ScaleLayer, |panel| {
@@ -2454,6 +2455,7 @@ struct CanvasDecorations {
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
     path_handles: bool,
+    text_caret: Option<super::text_ui::TextCaret>,
 }
 
 fn image_preview(
@@ -2478,6 +2480,7 @@ fn image_preview(
         paths,
         active_path,
         path_handles,
+        text_caret,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
     let tile_sets = tab.document.canvas.tile_sets();
@@ -2601,6 +2604,9 @@ fn image_preview(
             }
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
+            }
+            if let Some(caret) = text_caret {
+                paint_text_caret(window, &geometry, width, height, visible, caret);
             }
             if let Some(frame) = scale_frame {
                 paint_scale_frame(window, &geometry, width, height, visible, frame);
@@ -3544,6 +3550,61 @@ fn paint_scale_frame(
             gpui::BorderStyle::Solid,
         ));
         paint_handles(window, geometry, width, height, rect);
+    });
+}
+
+// A thin caret with a dark rim so it reads over light and dark text.
+fn paint_text_caret(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    width: u32,
+    height: u32,
+    visible: Bounds<Pixels>,
+    caret: super::text_ui::TextCaret,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let project = |x: f32, y: f32| geometry.project(point(x / width as f32, y / height as f32));
+    window.with_content_mask(Some(ContentMask { bounds: visible }), |window| {
+        if let Some((x, y, w, h)) = caret.selection {
+            let bounds = Bounds::from_corners(project(x, y), project(x + w, y + h));
+            window.paint_quad(fill(bounds, rgba(0xacc6ff40)));
+        }
+        let (left, top, right, bottom) = caret.frame;
+        let frame = Bounds::from_corners(project(left, top), project(right, bottom));
+        let pad = px(4.);
+        let frame = Bounds::from_corners(
+            point(frame.left() - pad, frame.top() - pad),
+            point(frame.right() + pad, frame.bottom() + pad),
+        );
+        window.paint_quad(gpui::outline(
+            Bounds::from_corners(
+                point(frame.left() - px(1.), frame.top() - px(1.)),
+                point(frame.right() + px(1.), frame.bottom() + px(1.)),
+            ),
+            rgba(0x00000060),
+            gpui::BorderStyle::Solid,
+        ));
+        window.paint_quad(gpui::outline(
+            frame,
+            rgba(0xacc6ffc0),
+            gpui::BorderStyle::Dashed,
+        ));
+        if !caret.visible {
+            return;
+        }
+        let top = project(caret.x, caret.top);
+        let bottom = project(caret.x, caret.top + caret.height);
+        let length = (bottom.y - top.y).max(px(6.));
+        window.paint_quad(fill(
+            Bounds::new(point(top.x - px(1.5), top.y), size(px(3.), length)),
+            rgba(0x000000b0),
+        ));
+        window.paint_quad(fill(
+            Bounds::new(point(top.x - px(0.5), top.y), size(px(1.), length)),
+            rgba(0xffffffff),
+        ));
     });
 }
 

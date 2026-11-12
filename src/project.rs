@@ -15,7 +15,7 @@ use crate::document::{
 
 pub const EXTENSION: &str = "imageedit";
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 fn default_true() -> bool {
     true
@@ -81,6 +81,8 @@ struct TextEntry {
     family: String,
     size: f32,
     color: [u8; 4],
+    letter_spacing: f32,
+    line_spacing: f32,
     resolved_family: String,
     origin_x: i32,
     origin_y: i32,
@@ -189,6 +191,10 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
                 family: text.family,
                 size: text.size,
                 color: Rgba(text.color),
+                spacing: crate::text::Spacing {
+                    letter: text.letter_spacing,
+                    line: text.line_spacing,
+                },
                 resolved_family: text.resolved_family,
                 origin: (text.origin_x, text.origin_y),
             }),
@@ -248,6 +254,8 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                     family: text.family.clone(),
                     size: text.size,
                     color: text.color.0,
+                    letter_spacing: text.spacing.letter,
+                    line_spacing: text.spacing.line,
                     resolved_family: text.resolved_family.clone(),
                     origin_x: text.origin.0,
                     origin_y: text.origin.1,
@@ -339,7 +347,11 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
                     &text.source,
                     &text.family,
                     &text.resolved_family,
-                    text.size
+                    text.size,
+                    crate::text::Spacing {
+                        letter: text.letter_spacing,
+                        line: text.line_spacing,
+                    },
                 ),
                 "Layer \"{}\" has text that cannot be stored",
                 layer.name
@@ -403,9 +415,9 @@ mod tests {
 
     use super::*;
 
-    const V2_GOLDEN: &[u8] = include_bytes!(concat!(
+    const GOLDEN: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/projects/v5-two-layers.imageedit"
+        "/fixtures/projects/v6-two-layers.imageedit"
     ));
 
     fn read_bytes(bytes: &[u8]) -> Result<DocumentContent> {
@@ -502,7 +514,7 @@ mod tests {
         let content = two_layers();
         let bytes = write_bytes(&content).unwrap();
         assert_same(&read_bytes(&bytes).unwrap(), &content);
-        assert_same(&read_bytes(V2_GOLDEN).unwrap(), &content);
+        assert_same(&read_bytes(GOLDEN).unwrap(), &content);
         let mut with_paths = two_layers();
         let open = crate::paths::VectorPath {
             id: crate::paths::PathId(4),
@@ -572,6 +584,7 @@ mod tests {
             resolved_family: "sans-serif".into(),
             size: 32.0,
             color: Rgba([0, 0, 0, 255]),
+            spacing: crate::text::Spacing::default(),
             origin: (0, 0),
         });
         let mut full = DocumentContent::from_layers(4, 3, layers).unwrap();
@@ -588,9 +601,9 @@ mod tests {
         let valid = write_bytes(&two_layers()).unwrap();
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
-        let edits: [Edit; 25] = [
-            ("unknown version", &|m| m["version"] = json!(6)),
-            ("previous version", &|m| m["version"] = json!(4)),
+        let edits: [Edit; 27] = [
+            ("unknown version", &|m| m["version"] = json!(7)),
+            ("previous version", &|m| m["version"] = json!(5)),
             ("long layer name", &|m| {
                 m["layers"][0]["name"] = json!("x".repeat(65))
             }),
@@ -647,6 +660,7 @@ mod tests {
                 m["layers"][0]["text"] = json!({
                     "source": "A", "family": "sans-serif", "size": 0.0,
                     "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "letter_spacing": 0.0, "line_spacing": 1.2,
                     "origin_x": 0, "origin_y": 0
                 });
             }),
@@ -655,13 +669,30 @@ mod tests {
                     "source": "A".repeat(crate::text::MAX_TEXT_CHARS + 1),
                     "family": "sans-serif", "size": 16.0,
                     "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "letter_spacing": 0.0, "line_spacing": 1.2,
                     "origin_x": 0, "origin_y": 0
+                });
+            }),
+            ("letter spacing", &|m| {
+                m["layers"][0]["text"] = json!({
+                    "source": "A", "family": "sans-serif", "size": 16.0,
+                    "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "letter_spacing": 1000.0, "line_spacing": 1.2,
+                    "origin_x": 0, "origin_y": 0
+                });
+            }),
+            ("missing line spacing", &|m| {
+                m["layers"][0]["text"] = json!({
+                    "source": "A", "family": "sans-serif", "size": 16.0,
+                    "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "letter_spacing": 0.0, "origin_x": 0, "origin_y": 0
                 });
             }),
             ("unknown text field", &|m| {
                 m["layers"][0]["text"] = json!({
                     "source": "A", "family": "sans-serif", "size": 16.0,
                     "color": [0, 0, 0, 255], "resolved_family": "sans-serif",
+                    "letter_spacing": 0.0, "line_spacing": 1.2,
                     "origin_x": 0, "origin_y": 0, "weight": 700
                 });
             }),

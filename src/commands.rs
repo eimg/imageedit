@@ -79,8 +79,7 @@ actions!(
         StrokeSelection,
         BrushSizeDown,
         BrushSizeUp,
-        ApplyText,
-        CancelText,
+        FinishText,
         RasterizeText,
         TextCopy,
         TextCut,
@@ -508,8 +507,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new(&format!("{primary}-v"), TextPaste, Some("Text")),
         KeyBinding::new(&format!("{primary}-a"), TextSelectAll, Some("Text")),
         KeyBinding::new(&format!("{primary}-shift-v"), NoAction, Some("Text")),
-        KeyBinding::new(&format!("{primary}-enter"), ApplyText, Some("Text")),
-        KeyBinding::new("escape", CancelText, Some("Text")),
+        KeyBinding::new(&format!("{primary}-enter"), FinishText, Some("Text")),
+        KeyBinding::new("escape", FinishText, Some("Text")),
     ]);
 
     // Window actions run while GPUI has the active window borrowed.

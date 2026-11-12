@@ -108,7 +108,8 @@ the size to follow.
 
 ## 7. Text edits in place
 
-- Status: `open`
+- Status: `done`
+- 2026-11-12: Text is typed in place with a caret, and finishing the session commits it as one undo step, with no Apply step. Leaving the tool, layer, or tab, a click outside, Escape, or Save commits the draft. The options offer installed fonts, size, letter and line spacing, and a text color swatch; projects moved to version 6. Formatting, Clippy, locked tests, and `./scripts/bundle-macos.sh` passed.
 
 Text (`T`) keeps a draft until Apply Text, and a modified draft must be
 applied or discarded before changing tools, layers, tabs, or saving

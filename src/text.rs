@@ -8,10 +8,51 @@ pub const MAX_TEXT_CHARS: usize = 4_000;
 pub const MAX_FAMILY_CHARS: usize = 128;
 pub const MIN_PIXEL_SIZE: f32 = 1.0;
 pub const MAX_PIXEL_SIZE: f32 = 256.0;
+// Letter spacing is extra advance in canvas pixels after each glyph.
+pub const MIN_LETTER_SPACING: f32 = -64.0;
+pub const MAX_LETTER_SPACING: f32 = 256.0;
+// Line spacing is the distance between baselines as a multiple of the size.
+pub const MIN_LINE_SPACING: f32 = 0.5;
+pub const MAX_LINE_SPACING: f32 = 4.0;
+pub const DEFAULT_LINE_SPACING: f32 = 1.2;
 
 // GPUI can lay out a line, but rasterize_glyph is crate-private. cosmic-text
 // shapes with HarfRust and returns coverage through SwashCache.
 static FONTS: Mutex<Option<(cosmic_text::FontSystem, cosmic_text::SwashCache)>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spacing {
+    pub letter: f32,
+    pub line: f32,
+}
+
+impl Default for Spacing {
+    fn default() -> Self {
+        Self {
+            letter: 0.0,
+            line: DEFAULT_LINE_SPACING,
+        }
+    }
+}
+
+impl Spacing {
+    pub fn allowed(self) -> bool {
+        self.letter.is_finite()
+            && self.line.is_finite()
+            && (MIN_LETTER_SPACING..=MAX_LETTER_SPACING).contains(&self.letter)
+            && (MIN_LINE_SPACING..=MAX_LINE_SPACING).contains(&self.line)
+    }
+}
+
+/// Everything that decides how a text layer rasterizes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextSpec {
+    pub source: String,
+    pub family: String,
+    pub size: f32,
+    pub color: Rgba<u8>,
+    pub spacing: Spacing,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -19,6 +60,7 @@ pub struct TextStyle {
     pub family: String,
     pub size: f32,
     pub color: Rgba<u8>,
+    pub spacing: Spacing,
     pub resolved_family: String,
     // Layout origin inside the bitmap. The canvas anchor is layer offset plus this.
     pub origin: (i32, i32),
@@ -51,11 +93,12 @@ pub struct RenderedText {
 }
 
 impl RenderedText {
-    pub fn matches(&self, source: &str, family: &str, size: f32, color: Rgba<u8>) -> bool {
-        self.style.source == source
-            && self.style.family == family
-            && self.style.size == size
-            && self.style.color == color
+    pub fn matches(&self, spec: &TextSpec) -> bool {
+        self.style.source == spec.source
+            && self.style.family == spec.family
+            && self.style.size == spec.size
+            && self.style.color == spec.color
+            && self.style.spacing == spec.spacing
     }
 }
 
@@ -64,6 +107,7 @@ pub enum TextError {
     TooLong,
     Family,
     Size,
+    Spacing,
     TooLarge,
 }
 
@@ -73,6 +117,7 @@ impl TextError {
             Self::TooLong => "Text is limited to 4000 characters.",
             Self::Family => "The font name is too long.",
             Self::Size => "Text size must be between 1 and 256 pixels.",
+            Self::Spacing => "Text spacing is out of range.",
             Self::TooLarge => "The text is too large to rasterize.",
         }
     }
@@ -94,8 +139,15 @@ pub fn normalize_family(family: &str) -> String {
     }
 }
 
-pub fn fields_allowed(source: &str, family: &str, resolved: &str, size: f32) -> bool {
-    source.chars().count() <= MAX_TEXT_CHARS
+pub fn fields_allowed(
+    source: &str,
+    family: &str,
+    resolved: &str,
+    size: f32,
+    spacing: Spacing,
+) -> bool {
+    spacing.allowed()
+        && source.chars().count() <= MAX_TEXT_CHARS
         && source
             .chars()
             .all(|ch| ch == '\n' || ch == '\t' || !ch.is_control())
@@ -107,12 +159,28 @@ pub fn fields_allowed(source: &str, family: &str, resolved: &str, size: f32) -> 
         && (MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&size)
 }
 
+#[cfg(test)]
 pub fn render(
     source: &str,
     family: &str,
     pixel_size: f32,
     color: Rgba<u8>,
 ) -> Result<RenderedText, TextError> {
+    render_spec(&TextSpec {
+        source: source.to_owned(),
+        family: family.to_owned(),
+        size: pixel_size,
+        color,
+        spacing: Spacing::default(),
+    })
+}
+
+pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
+    let (source, pixel_size, color, spacing) =
+        (spec.source.as_str(), spec.size, spec.color, spec.spacing);
+    if !spacing.allowed() {
+        return Err(TextError::Spacing);
+    }
     if !pixel_size.is_finite() || !(MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&pixel_size) {
         return Err(TextError::Size);
     }
@@ -123,7 +191,7 @@ pub fn render(
     {
         return Err(TextError::TooLong);
     }
-    let family = normalize_family(family);
+    let family = normalize_family(&spec.family);
     if family.chars().count() > MAX_FAMILY_CHARS || family.chars().any(|ch| ch.is_control()) {
         return Err(TextError::Family);
     }
@@ -136,18 +204,12 @@ pub fn render(
                 family,
                 pixel_size,
                 color,
+                spacing,
                 resolved,
                 (0, 0),
             ));
         }
-        let metrics = cosmic_text::Metrics::new(pixel_size, (pixel_size * 1.2).max(pixel_size));
-        let mut buffer = cosmic_text::Buffer::new(font_system, metrics);
-        buffer.set_wrap(cosmic_text::Wrap::None);
-        buffer.set_size(None, None);
-        let named = family.clone();
-        let attrs = cosmic_text::Attrs::new().family(family_attr(&named));
-        buffer.set_text(source, &attrs, cosmic_text::Shaping::Advanced, None);
-        buffer.shape_until_scroll(font_system, false);
+        let mut buffer = layout(font_system, source, &family, pixel_size, spacing);
 
         let mut line_right = 0i32;
         let mut line_bottom = 0i32;
@@ -238,18 +300,171 @@ pub fn render(
             family,
             pixel_size,
             color,
+            spacing,
             resolved,
             (-left, -top),
         ))
     })
 }
 
+fn layout(
+    font_system: &mut cosmic_text::FontSystem,
+    source: &str,
+    family: &str,
+    pixel_size: f32,
+    spacing: Spacing,
+) -> cosmic_text::Buffer {
+    let metrics = cosmic_text::Metrics::new(pixel_size, line_height(pixel_size, spacing));
+    let mut buffer = cosmic_text::Buffer::new(font_system, metrics);
+    buffer.set_wrap(cosmic_text::Wrap::None);
+    buffer.set_size(None, None);
+    let attrs = cosmic_text::Attrs::new()
+        .family(family_attr(family))
+        .letter_spacing(spacing.letter / pixel_size);
+    buffer.set_text(source, &attrs, cosmic_text::Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+fn line_height(pixel_size: f32, spacing: Spacing) -> f32 {
+    (pixel_size * spacing.line).max(1.0)
+}
+
+/// A caret position in layout coordinates, where the text anchor is the origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    pub byte: usize,
+    pub line: usize,
+    pub x: f32,
+    pub top: f32,
+}
+
+/// Caret positions for every character boundary of one layout.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CaretMap {
+    pub spec: Option<TextSpec>,
+    pub stops: Vec<CaretStop>,
+    pub line_height: f32,
+}
+
+impl CaretMap {
+    pub fn matches(&self, spec: &TextSpec) -> bool {
+        self.spec.as_ref().is_some_and(|own| {
+            own.source == spec.source
+                && own.family == spec.family
+                && own.size == spec.size
+                && own.spacing == spec.spacing
+        })
+    }
+
+    /// The stop at a byte offset, or the nearest earlier one.
+    pub fn at(&self, byte: usize) -> Option<CaretStop> {
+        let index = self.stops.partition_point(|stop| stop.byte <= byte);
+        index.checked_sub(1).map(|index| self.stops[index])
+    }
+
+    /// The byte offset nearest to a layout point.
+    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        let last = self.stops.last()?;
+        let line = if self.line_height > 0.0 && y.is_finite() {
+            ((y / self.line_height).floor().max(0.0) as usize).min(last.line)
+        } else {
+            0
+        };
+        self.stops
+            .iter()
+            .filter(|stop| stop.line == line)
+            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+            .map(|stop| stop.byte)
+    }
+
+    /// The byte offset on the line above or below at the same x.
+    pub fn vertical(&self, byte: usize, down: bool) -> Option<usize> {
+        let current = self.at(byte)?;
+        let line = if down {
+            current.line.checked_add(1)?
+        } else {
+            current.line.checked_sub(1)?
+        };
+        self.stops
+            .iter()
+            .filter(|stop| stop.line == line)
+            .min_by(|a, b| (a.x - current.x).abs().total_cmp(&(b.x - current.x).abs()))
+            .map(|stop| stop.byte)
+    }
+}
+
+pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
+    if !spec.size.is_finite() || !(MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&spec.size) {
+        return Err(TextError::Size);
+    }
+    if !spec.spacing.allowed() {
+        return Err(TextError::Spacing);
+    }
+    let family = normalize_family(&spec.family);
+    let line_height = line_height(spec.size, spec.spacing);
+    let mut stops = Vec::with_capacity(spec.source.len() + 1);
+    with_fonts(|font_system, _| {
+        let buffer = layout(font_system, &spec.source, &family, spec.size, spec.spacing);
+        let mut start = 0;
+        for (line, text) in spec.source.split('\n').enumerate() {
+            let run = buffer.layout_runs().find(|run| run.line_i == line);
+            let top = run
+                .as_ref()
+                .map_or(line as f32 * line_height, |run| run.line_top);
+            for (index, _) in text
+                .char_indices()
+                .chain(std::iter::once((text.len(), ' ')))
+            {
+                let cursor = cosmic_text::Cursor::new(line, index);
+                let x = run
+                    .as_ref()
+                    .and_then(|run| run.cursor_position(&cursor))
+                    .unwrap_or(0.0);
+                stops.push(CaretStop {
+                    byte: start + index,
+                    line,
+                    x: if x.is_finite() { x } else { 0.0 },
+                    top: if top.is_finite() { top } else { 0.0 },
+                });
+            }
+            start += text.len() + 1;
+        }
+    });
+    Ok(CaretMap {
+        spec: Some(spec.clone()),
+        stops,
+        line_height,
+    })
+}
+
+/// Installed font families, sorted for a picker.
+pub fn families() -> Vec<String> {
+    let mut names = with_fonts(|font_system, _| {
+        font_system
+            .db()
+            .faces()
+            .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+            .filter(|name| {
+                !name.starts_with('.')
+                    && name.chars().count() <= MAX_FAMILY_CHARS
+                    && !name.chars().any(char::is_control)
+            })
+            .collect::<Vec<_>>()
+    });
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rendered(
     image: RgbaImage,
     source: &str,
     family: String,
     pixel_size: f32,
     color: Rgba<u8>,
+    spacing: Spacing,
     resolved: String,
     origin: (i32, i32),
 ) -> RenderedText {
@@ -260,6 +475,7 @@ fn rendered(
             family,
             size: pixel_size,
             color,
+            spacing,
             resolved_family: resolved,
             origin,
         },
@@ -411,6 +627,66 @@ mod tests {
         assert!(ink(&large.image) > ink(&small.image));
         assert!(max_alpha(&large.image) >= 200);
         assert!(!large.style.substituted());
+    }
+
+    fn spec(source: &str, spacing: Spacing) -> TextSpec {
+        TextSpec {
+            source: source.into(),
+            family: "sans-serif".into(),
+            size: 32.0,
+            color: Rgba([0, 0, 0, 255]),
+            spacing,
+        }
+    }
+
+    #[test]
+    fn letter_and_line_spacing_widen_and_heighten_the_bitmap() {
+        let plain = render_spec(&spec("AA\nAA", Spacing::default())).unwrap();
+        let tracked = render_spec(&spec(
+            "AA\nAA",
+            Spacing {
+                letter: 20.0,
+                ..Spacing::default()
+            },
+        ))
+        .unwrap();
+        let loose = render_spec(&spec(
+            "AA\nAA",
+            Spacing {
+                line: 3.0,
+                ..Spacing::default()
+            },
+        ))
+        .unwrap();
+        assert!(tracked.image.width() >= plain.image.width() + 15);
+        assert!(loose.image.height() >= plain.image.height() + 40);
+        assert_eq!(tracked.style.spacing.letter, 20.0);
+        assert!(matches!(
+            render_spec(&spec(
+                "A",
+                Spacing {
+                    letter: MAX_LETTER_SPACING + 1.0,
+                    ..Spacing::default()
+                }
+            )),
+            Err(TextError::Spacing)
+        ));
+    }
+
+    #[test]
+    fn caret_stops_cover_every_boundary_and_follow_lines() {
+        let map = caret_map(&spec("ab\nc上", Spacing::default())).unwrap();
+        let bytes: Vec<usize> = map.stops.iter().map(|stop| stop.byte).collect();
+        assert_eq!(bytes, vec![0, 1, 2, 3, 4, 7]);
+        assert_eq!(map.stops[0].x, 0.0);
+        assert!(map.stops[1].x > 0.0 && map.stops[2].x > map.stops[1].x);
+        assert_eq!(map.stops[3].line, 1);
+        assert!(map.stops[3].top > map.stops[0].top);
+        assert_eq!(map.at(5).unwrap().byte, 4);
+        assert_eq!(map.vertical(0, true), Some(3));
+        assert_eq!(map.hit(-10.0, 1.0), Some(0));
+        assert_eq!(map.hit(1000.0, map.line_height * 1.5), Some(7));
+        assert_eq!(map.vertical(0, false), None);
     }
 
     #[test]

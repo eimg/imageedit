@@ -28,8 +28,8 @@ and Finder integration. Run `cargo run --locked` for a debug build.
 - **File → Open** accepts ImageEdit projects, PNG, JPEG, and WebP. You can
   also drop files onto the canvas or use Finder’s **Open With** menu.
   Reopening the same file focuses its existing tab.
-- Apply or discard an active text, transform, gradient, or crop preview before
-  saving or exporting. Closing an image with a pending edit asks before discarding it.
+- Apply or discard an active transform, gradient, or crop preview before
+  saving or exporting. Text being typed is committed first. Closing an image with a pending edit asks before discarding it.
 - **Save** updates the current file. New canvases are saved as `.imageedit`
   projects. An opened PNG, JPEG, or WebP keeps saving to its own format while
   it is still a single plain layer without paths or editable text. **Save As** adopts the new filename and
@@ -137,13 +137,19 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   color. Choose Pencil or Brush and adjust the stroke size there. Edit → Stroke
   Path and Stroke Selection remain available, and a repeated endpoint does not
   add a dab.
-  **Text** (`T`) clicks an origin, or loads the active text layer. Type into
-  the draft. Return starts a new line, and the copy, cut, paste, and select-all
-  shortcuts and native Edit menu actions edit the text instead of the image.
-  Undo and Redo stay inside the draft. Apply commits one image undo step
-  and Escape discards the draft. Apply or discard modified text before switching
-  tools, layers, or tabs. Sans, serif, and monospace are the font
-  choices, with a pixel size from 1 to 256 and the foreground color. A missing
+  **Text** (`T`) types straight onto the canvas with a visible caret. Click
+  empty canvas to start new text, or click a text layer to edit it; a click
+  inside or just beside the text moves the caret. A dashed frame marks the
+  text being edited, and the caret blinks. Return starts a new line, the arrow keys
+  move the caret, and the copy, cut, paste, and select-all shortcuts and native
+  Edit menu actions edit the text instead of the image. Undo and Redo step
+  through the typing first, then the image history. There is no Apply step:
+  Escape, another tool, layer, or tab, a click outside the text, or any image
+  command commits the text as one undo step. The tool options choose the font
+  from the installed families (or Sans Serif, Serif, Monospace), the pixel size
+  from 1 to 256, letter spacing in pixels, line spacing as a percentage of the
+  size, and the text color. New text starts with the last style and the
+  foreground color. A missing
   named font shows a substitution notice. Reopening a text layer keeps its saved
   pixels until its words or style change. Previews render in the background and
   follow the layer's opacity and stack position. The layer keeps the words and

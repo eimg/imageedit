@@ -3324,6 +3324,7 @@ mod tests {
             resolved_family: "Fallback".into(),
             size: 24.0,
             color: Rgba([0, 0, 0, 255]),
+            spacing: crate::text::Spacing::default(),
             origin: (0, 0),
         });
         assert!(!content.is_plain_raster());
@@ -3332,7 +3333,13 @@ mod tests {
             image: layer.pixels.clone(),
             style: layer.text.clone().unwrap(),
         };
-        assert!(cached.matches("Cached text", "Missing Family", 24.0, Rgba([0, 0, 0, 255])));
+        assert!(cached.matches(&crate::text::TextSpec {
+            source: "Cached text".into(),
+            family: "Missing Family".into(),
+            size: 24.0,
+            color: Rgba([0, 0, 0, 255]),
+            spacing: crate::text::Spacing::default(),
+        }));
         assert_eq!(content.set_text(LayerId(0), (0, 0), cached), Dirty::None);
         assert!(content.rasterize_text(LayerId(0)));
         assert!(content.is_plain_raster());
@@ -3360,6 +3367,7 @@ mod tests {
             resolved_family: "sans-serif".into(),
             size: 24.0,
             color: Rgba([0, 0, 0, 255]),
+            spacing: crate::text::Spacing::default(),
             origin: (0, 0),
         });
         assert!(!content.can_merge_down(middle));

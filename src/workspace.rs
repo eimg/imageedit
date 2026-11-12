@@ -196,6 +196,15 @@ pub struct Workspace {
     text_dirty: bool,
     text_error: Option<crate::text::TextError>,
     text_overlay: Option<layers::MovePaint>,
+    // The tab whose committed text still shows the preview until its patch lands.
+    text_settled: Option<usize>,
+    text_continuation: Option<(usize, text_ui::TextContinuation)>,
+    text_defaults: text_ui::TextDefaults,
+    font_families: Option<Arc<Vec<String>>>,
+    font_loading: bool,
+    font_list_open: bool,
+    caret_shown_at: std::time::Instant,
+    caret_blinking: bool,
     pencil: crate::paint::Brush,
     copy_token: u64,
     paste_token: u64,
@@ -386,6 +395,14 @@ impl Workspace {
             text_dirty: false,
             text_error: None,
             text_overlay: None,
+            text_settled: None,
+            text_continuation: None,
+            text_defaults: text_ui::TextDefaults::default(),
+            font_families: None,
+            font_loading: false,
+            font_list_open: false,
+            caret_shown_at: std::time::Instant::now(),
+            caret_blinking: false,
             pencil: crate::paint::Brush {
                 diameter: 1,
                 ..Default::default()
@@ -472,10 +489,11 @@ impl Workspace {
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
-        if switched && self.refuse_pending_text(cx) {
-            return;
-        }
         if switched {
+            // A commit that starts here finishes on the tab it belongs to.
+            self.finish_text(window, cx);
+            self.drop_settled_text(window, cx);
+            self.text_continuation = None;
             self.dismiss_form(window, cx);
             self.clear_path_edit();
             self.clear_crop();
@@ -520,6 +538,8 @@ impl Workspace {
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
             self.cancel_text(window, cx);
+            self.drop_settled_text(window, cx);
+            self.text_continuation = None;
         }
         let removed = self.tabs.remove(index);
         drop_canvas(removed.document.canvas, window, cx);
@@ -603,7 +623,11 @@ impl Workspace {
         if self.tabs[index].busy() {
             return;
         }
-        if self.refuse_pending_text(cx) {
+        // Typed text lands as its own undo step before this change runs.
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.start_change(change, edit, window, cx);
+            });
             return;
         }
         self.dismiss_effect_form(window, cx);
@@ -659,8 +683,37 @@ impl Workspace {
         cx.notify();
     }
 
-    // Publishes a background result only if the tab has not changed since the job started.
     fn finish_change(
+        &mut self,
+        id: usize,
+        generation: u64,
+        change: Change,
+        result: Option<(
+            DocumentContent,
+            LayerId,
+            Selection,
+            crate::document::CanvasPatch,
+        )>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.text_settled == Some(id) {
+            self.drop_settled_text(window, cx);
+        }
+        self.publish_change(id, generation, change, result, window, cx);
+        if self
+            .text_continuation
+            .as_ref()
+            .is_some_and(|(tab, _)| *tab == id)
+            && let Some((_, then)) = self.text_continuation.take()
+            && self.active_tab().is_some_and(|tab| tab.id == id)
+        {
+            then(self, window, cx);
+        }
+    }
+
+    // Publishes a background result only if the tab has not changed since the job started.
+    fn publish_change(
         &mut self,
         id: usize,
         generation: u64,

@@ -60,9 +60,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.refuse_pending_text(cx) {
-            return false;
-        }
         if self.refuse_text_pixels(false, cx) {
             return false;
         }

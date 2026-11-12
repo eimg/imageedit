@@ -1,21 +1,71 @@
 use std::sync::Arc;
 
-use gpui::{ClipboardItem, Context, Div, KeyDownEvent, SharedString, Window, div, prelude::*, rgb};
+use gpui::{
+    ClipboardItem, Context, CursorStyle, Div, KeyDownEvent, SharedString, Window, div, prelude::*,
+    px, rgb,
+};
 
 use super::Workspace;
 use super::layers::MovePaint;
+use super::numeric::NumericField;
 use super::view::{
-    MUTED, action_row, choice_button, option_action, option_row, section_label, segmented,
-    step_button, stepper,
+    ACCENT, BORDER, CANVAS, HOVER, MUTED, SELECTED, TEXT, info_note, option_action, option_row,
+    section_label, step_button, stepper,
 };
 use crate::commands::{
-    ApplyText, CancelText, RasterizeText, Redo, TextCopy, TextCut, TextPaste, TextSelectAll, Undo,
+    FinishText, RasterizeText, Redo, TextCopy, TextCut, TextPaste, TextSelectAll, Undo,
 };
 use crate::document::{self, LayerId};
 use crate::preview::Dirty;
-use crate::text::{self, MAX_PIXEL_SIZE, MAX_TEXT_CHARS, MIN_PIXEL_SIZE, TextError};
+use crate::text::{
+    self, CaretMap, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE, MAX_TEXT_CHARS,
+    MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextError, TextSpec,
+};
 
-const DEFAULT_TEXT_SIZE: f32 = 32.0;
+/// The color dialog uses this swatch index for the text color.
+pub(super) const TEXT_SWATCH: usize = 2;
+
+// One caret phase. The caret is solid for a phase after each edit or move.
+const CARET_BLINK_MS: u128 = 530;
+
+const GENERIC_FAMILIES: [(&str, &str); 3] = [
+    ("Sans Serif", "sans-serif"),
+    ("Serif", "serif"),
+    ("Monospace", "monospace"),
+];
+
+/// The style the next new text starts with. Editing a draft updates it too.
+#[derive(Clone)]
+pub(super) struct TextDefaults {
+    family: String,
+    size: f32,
+    spacing: Spacing,
+}
+
+impl Default for TextDefaults {
+    fn default() -> Self {
+        Self {
+            family: "sans-serif".to_owned(),
+            size: 32.0,
+            spacing: Spacing::default(),
+        }
+    }
+}
+
+pub(super) type TextContinuation =
+    Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+
+/// A caret, and the box of selected text, in canvas pixels.
+#[derive(Clone, Copy)]
+pub(super) struct TextCaret {
+    pub x: f32,
+    pub top: f32,
+    pub height: f32,
+    pub selection: Option<(f32, f32, f32, f32)>,
+    // The box of the text being edited, so a click that starts new text is obvious.
+    pub frame: (f32, f32, f32, f32),
+    pub visible: bool,
+}
 
 #[derive(Clone)]
 pub(super) struct TextDraft {
@@ -32,7 +82,11 @@ pub(super) struct TextDraft {
     family: String,
     size: f32,
     color: image::Rgba<u8>,
+    spacing: Spacing,
     rendered: Arc<text::RenderedText>,
+    carets: Arc<CaretMap>,
+    // A click that opened this draft places the caret once the layout is known.
+    pending_hit: Option<(f32, f32)>,
     baseline: Arc<text::RenderedText>,
     baseline_anchor: (i32, i32),
     undo: Vec<TextEdit>,
@@ -47,15 +101,14 @@ struct TextEdit {
     family: String,
     size: f32,
     color: image::Rgba<u8>,
+    spacing: Spacing,
     anchor: (i32, i32),
 }
 
 struct TextPreviewInput {
     rendered: Arc<text::RenderedText>,
-    source: String,
-    family: String,
-    size: f32,
-    color: image::Rgba<u8>,
+    carets: Arc<CaretMap>,
+    spec: TextSpec,
     opacity: u8,
     layer: Option<LayerId>,
     above: LayerId,
@@ -63,13 +116,21 @@ struct TextPreviewInput {
 }
 
 impl TextDraft {
-    fn preview_input(&self) -> TextPreviewInput {
-        TextPreviewInput {
-            rendered: self.rendered.clone(),
+    fn spec(&self) -> TextSpec {
+        TextSpec {
             source: self.source.clone(),
             family: self.family.clone(),
             size: self.size,
             color: self.color,
+            spacing: self.spacing,
+        }
+    }
+
+    fn preview_input(&self) -> TextPreviewInput {
+        TextPreviewInput {
+            rendered: self.rendered.clone(),
+            carets: self.carets.clone(),
+            spec: self.spec(),
             opacity: self.opacity,
             layer: self.layer,
             above: self.above,
@@ -85,6 +146,7 @@ impl TextDraft {
             family: self.family.clone(),
             size: self.size,
             color: self.color,
+            spacing: self.spacing,
             anchor: self.anchor,
         }
     }
@@ -96,6 +158,7 @@ impl TextDraft {
         self.family = state.family;
         self.size = state.size;
         self.color = state.color;
+        self.spacing = state.spacing;
         self.anchor = state.anchor;
     }
 
@@ -130,28 +193,57 @@ impl TextDraft {
         if self.layer.is_none() {
             return !self.source.is_empty();
         }
-        self.anchor != self.baseline_anchor
-            || !self
-                .baseline
-                .matches(&self.source, &self.family, self.size, self.color)
+        self.anchor != self.baseline_anchor || !self.baseline.matches(&self.spec())
+    }
+
+    /// The layout box of the text in canvas pixels: left, top, right, bottom.
+    /// Empty text still gets a box one line tall so its frame is visible.
+    fn bounds(&self) -> (f32, f32, f32, f32) {
+        let (ax, ay) = (self.anchor.0 as f32, self.anchor.1 as f32);
+        let offset = self.rendered.style.offset_for(self.anchor);
+        let (width, height) = self.rendered.image.dimensions();
+        let mut left = (offset.0 as f32).min(ax);
+        let mut top = (offset.1 as f32).min(ay);
+        let mut right = offset.0 as f32 + width as f32;
+        let mut bottom = offset.1 as f32 + height as f32;
+        for stop in &self.carets.stops {
+            left = left.min(ax + stop.x);
+            right = right.max(ax + stop.x);
+            top = top.min(ay + stop.top);
+            bottom = bottom.max(ay + stop.top + self.carets.line_height);
+        }
+        bottom = bottom.max(ay + self.size * self.spacing.line);
+        if self.source.is_empty() {
+            right = right.max(ax + self.size * 0.5);
+        }
+        (left, top, right, bottom)
+    }
+
+    // A click within `pad` canvas pixels of the box still edits this text.
+    fn contains(&self, pixel: (i64, i64), pad: f32) -> bool {
+        let (left, top, right, bottom) = self.bounds();
+        let (x, y) = (pixel.0 as f32 + 0.5, pixel.1 as f32 + 0.5);
+        x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad
+    }
+
+    fn hit(&self, pixel: (i64, i64)) -> Option<usize> {
+        self.carets.hit(
+            pixel.0 as f32 + 0.5 - self.anchor.0 as f32,
+            pixel.1 as f32 + 0.5 - self.anchor.1 as f32,
+        )
     }
 }
 
 impl Workspace {
     pub(super) fn bind_text_actions(&self, root: Div, cx: &Context<Self>) -> Div {
         let drafting = self.text_draft.is_some();
-        let rasterize = !drafting
-            && self.active_tab().is_some_and(|tab| {
-                !tab.busy() && tab.document.content.layer_is_text(tab.active_layer)
-            });
-        root.when(self.can_apply_text(), |root| {
-            root.on_action(cx.listener(|this, _: &ApplyText, window, cx| {
-                this.apply_text(window, cx);
-            }))
-        })
-        .when(drafting, |root| {
-            root.on_action(cx.listener(|this, _: &CancelText, window, cx| {
-                this.cancel_text(window, cx);
+        let rasterize = self
+            .active_tab()
+            .is_some_and(|tab| !tab.busy() && tab.document.content.layer_is_text(tab.active_layer));
+        root.when(drafting, |root| {
+            root.on_action(cx.listener(|this, _: &FinishText, window, cx| {
+                this.finish_text(window, cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TextCopy, _, cx| {
                 this.copy_text(cx);
@@ -165,114 +257,420 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &TextSelectAll, _, cx| {
                 this.select_all_text(cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &Undo, window, cx| this.step_text_history(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Redo, window, cx| this.step_text_history(true, window, cx)),
+            )
         })
         .when(rasterize, |root| {
             root.on_action(cx.listener(|this, _: &RasterizeText, window, cx| {
                 this.rasterize_text_layer(window, cx);
             }))
         })
-        .when(
-            self.text_draft
-                .as_ref()
-                .is_some_and(|draft| !draft.undo.is_empty()),
-            |root| {
-                root.on_action(cx.listener(|this, _: &Undo, window, cx| {
-                    this.step_text_history(false, window, cx)
-                }))
-            },
-        )
-        .when(
-            self.text_draft
-                .as_ref()
-                .is_some_and(|draft| !draft.redo.is_empty()),
-            |root| {
-                root.on_action(cx.listener(|this, _: &Redo, window, cx| {
-                    this.step_text_history(true, window, cx)
-                }))
-            },
-        )
     }
 
     pub(super) fn text_options(&self, panel: Div, cx: &Context<Self>) -> Div {
-        let Some(draft) = &self.text_draft else {
-            return panel
-                .child("Click the canvas to place text. Typing stays in the text layer.")
-                .child(
-                    option_action("Rasterize Text", false)
-                        .w_full()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.rasterize_text_layer(window, cx);
-                        })),
-                );
-        };
-        let family = draft.family.clone();
-        let size = size_label(draft.size);
-        let source: SharedString = if draft.source.is_empty() {
-            "Type to enter text. Return starts a new line.".into()
-        } else if draft.selected {
-            format!("Selected: {}", draft.source.replace('\n', "↵")).into()
+        let draft = self.text_draft.as_ref();
+        let family = draft.map_or(self.text_defaults.family.clone(), |draft| {
+            draft.family.clone()
+        });
+        let spacing = draft.map_or(self.text_defaults.spacing, |draft| draft.spacing);
+        let color = draft.map_or_else(
+            || self.colors[0],
+            |draft| {
+                let [red, green, blue, _] = draft.color.0;
+                u32::from_be_bytes([0, red, green, blue])
+            },
+        );
+        let hint: SharedString = if draft.is_some() {
+            "Type on the canvas. Escape, another tool, or a click outside the text finishes it."
+                .into()
         } else {
-            draft.source.replace('\n', "↵").into()
+            "Click the canvas to add text, or click a text layer to edit it.".into()
         };
-        let substituted = draft.substitution.clone();
-        let can_apply = self.can_apply_text();
+        let substituted = draft.and_then(|draft| draft.substitution.clone());
+        let can_rasterize = self
+            .active_tab()
+            .is_some_and(|tab| !tab.busy() && tab.document.content.layer_is_text(tab.active_layer));
         panel
-            .child("Apply commits one undo step. Escape discards the draft.")
-            .child(div().text_color(rgb(MUTED)).text_ellipsis().child(source))
-            .when_some(substituted, |panel, message| panel.child(message))
+            .child(info_note(hint))
+            .when_some(substituted, |panel, message| {
+                panel.child(info_note(message))
+            })
             .child(section_label("FONT"))
-            .child(segmented([
-                family_button("Sans Serif", "sans-serif", &family, cx),
-                family_button("Serif", "serif", &family, cx),
-                family_button("Monospace", "monospace", &family, cx),
-            ]))
+            .child(self.font_picker(&family, cx))
             .child(option_row(
                 "Size",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(step_button("text-size-down", "−").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            let size = this.text_size() - 1.0;
+                            this.set_text_size(size, window, cx);
+                        },
+                    )))
+                    .child(self.numeric_chip(NumericField::TextSize, None, cx))
+                    .child(step_button("text-size-up", "+").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            let size = this.text_size() + 1.0;
+                            this.set_text_size(size, window, cx);
+                        },
+                    ))),
+            ))
+            .child(section_label("SPACING"))
+            .child(option_row(
+                "Letter",
                 stepper(
-                    size,
-                    step_button("text-size-down", "−").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.step_text_size(-1.0, window, cx);
-                        },
+                    format!("{:.0} px", spacing.letter),
+                    step_button("text-letter-down", "−").on_click(cx.listener(
+                        |this, _, window, cx| this.step_text_spacing(-1.0, 0.0, window, cx),
                     )),
-                    step_button("text-size-up", "+").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.step_text_size(1.0, window, cx);
-                        },
+                    step_button("text-letter-up", "+").on_click(cx.listener(
+                        |this, _, window, cx| this.step_text_spacing(1.0, 0.0, window, cx),
                     )),
                 ),
             ))
+            .child(option_row(
+                "Line %",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(step_button("text-line-down", "−").on_click(cx.listener(
+                        |this, _, window, cx| this.step_text_spacing(0.0, -0.1, window, cx),
+                    )))
+                    .child(self.numeric_chip(NumericField::TextLineSpacing, None, cx))
+                    .child(step_button("text-line-up", "+").on_click(cx.listener(
+                        |this, _, window, cx| this.step_text_spacing(0.0, 0.1, window, cx),
+                    ))),
+            ))
+            .child(section_label("COLOR"))
             .child(
-                option_action("Use Foreground", false)
-                    .w_full()
+                div()
+                    .id("text-color")
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(CANVAS))
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgb(HOVER)))
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(TEXT))
+                            .child(format!("#{color:06X}")),
+                    )
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.recolor_text(window, cx);
+                        let swatch = if this.text_draft.is_some() {
+                            TEXT_SWATCH
+                        } else {
+                            0
+                        };
+                        this.color_form(swatch, window, cx);
                     })),
             )
             .child(section_label("LAYER"))
-            .child(action_row([
-                option_action("Apply Text", can_apply)
-                    .when(can_apply, |button| {
-                        button.on_click(cx.listener(|this, _, window, cx| {
-                            this.apply_text(window, cx);
-                        }))
-                    })
-                    .when(!can_apply, |button| {
-                        button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
-                    }),
-                option_action("Discard Text", false).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.cancel_text(window, cx);
-                    },
-                )),
-            ]))
             .child(
                 option_action("Rasterize Text", false)
                     .w_full()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.rasterize_text_layer(window, cx);
-                    })),
+                    .when(!can_rasterize, |button| {
+                        button.opacity(0.45).cursor(CursorStyle::Arrow)
+                    })
+                    .when(can_rasterize, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.rasterize_text_layer(window, cx);
+                        }))
+                    }),
             )
+    }
+
+    fn font_picker(&self, family: &str, cx: &Context<Self>) -> Div {
+        let label = GENERIC_FAMILIES
+            .iter()
+            .find(|(_, name)| *name == family)
+            .map_or_else(|| family.to_owned(), |(label, _)| (*label).to_owned());
+        let open = self.font_list_open;
+        let button = div()
+            .id("text-font")
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if open { ACCENT } else { BORDER }))
+            .bg(rgb(CANVAS))
+            .cursor_pointer()
+            .hover(|button| button.bg(rgb(HOVER)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED))
+                    .child(if open { "▲" } else { "▼" }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.font_list_open = !this.font_list_open;
+                if this.font_list_open {
+                    this.load_font_families(window, cx);
+                }
+                cx.notify();
+            }));
+        let mut picker = div().flex().flex_col().gap_1().child(button);
+        if !open {
+            return picker;
+        }
+        let mut entries: Vec<(String, String)> = GENERIC_FAMILIES
+            .iter()
+            .map(|(label, name)| ((*label).to_owned(), (*name).to_owned()))
+            .collect();
+        if let Some(families) = &self.font_families {
+            entries.extend(families.iter().map(|name| (name.clone(), name.clone())));
+        }
+        let loading = self.font_families.is_none();
+        let current = family.to_owned();
+        picker = picker.child(
+            div()
+                .id("text-font-list")
+                .max_h(px(220.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .p_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(CANVAS))
+                .children(
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (label, name))| {
+                            let chosen = name.eq_ignore_ascii_case(&current);
+                            div()
+                                .id(("text-font-entry", index))
+                                .h(px(22.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .rounded_sm()
+                                .text_size(px(12.))
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_color(rgb(if chosen { TEXT } else { MUTED }))
+                                .when(chosen, |entry| entry.bg(rgb(SELECTED)))
+                                .cursor_pointer()
+                                .hover(|entry| entry.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.font_list_open = false;
+                                    this.set_text_family(name.clone(), window, cx);
+                                }))
+                        }),
+                )
+                .when(loading, |list| {
+                    list.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_2()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child("Loading installed fonts…"),
+                    )
+                }),
+        );
+        picker
+    }
+
+    fn load_font_families(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.font_families.is_some() || self.font_loading {
+            return;
+        }
+        self.font_loading = true;
+        let job = cx.background_executor().spawn(async { text::families() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let families = job.await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.font_loading = false;
+                workspace.font_families = Some(Arc::new(families));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn text_size(&self) -> f32 {
+        self.text_draft
+            .as_ref()
+            .map_or(self.text_defaults.size, |draft| draft.size)
+    }
+
+    pub(super) fn text_line_spacing(&self) -> f32 {
+        self.text_draft
+            .as_ref()
+            .map_or(self.text_defaults.spacing.line, |draft| draft.spacing.line)
+    }
+
+    pub(super) fn set_text_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let size = size.round().clamp(MIN_PIXEL_SIZE, MAX_PIXEL_SIZE);
+        self.text_defaults.size = size;
+        self.change_text(window, cx, |draft| {
+            if draft.size == size {
+                return false;
+            }
+            draft.size = size;
+            true
+        });
+    }
+
+    pub(super) fn set_text_line_spacing(
+        &mut self,
+        line: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line = ((line * 100.0).round() / 100.0).clamp(MIN_LINE_SPACING, MAX_LINE_SPACING);
+        let letter = self
+            .text_draft
+            .as_ref()
+            .map_or(self.text_defaults.spacing.letter, |draft| {
+                draft.spacing.letter
+            });
+        self.set_text_spacing(Spacing { letter, line }, window, cx);
+    }
+
+    fn step_text_spacing(
+        &mut self,
+        letter: f32,
+        line: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .text_draft
+            .as_ref()
+            .map_or(self.text_defaults.spacing, |draft| draft.spacing);
+        let next = Spacing {
+            letter: (current.letter + letter)
+                .round()
+                .clamp(MIN_LETTER_SPACING, MAX_LETTER_SPACING),
+            line: (((current.line + line) * 100.0).round() / 100.0)
+                .clamp(MIN_LINE_SPACING, MAX_LINE_SPACING),
+        };
+        self.set_text_spacing(next, window, cx);
+    }
+
+    fn set_text_spacing(&mut self, spacing: Spacing, window: &mut Window, cx: &mut Context<Self>) {
+        self.text_defaults.spacing = spacing;
+        self.change_text(window, cx, |draft| {
+            if draft.spacing == spacing {
+                return false;
+            }
+            draft.spacing = spacing;
+            true
+        });
+    }
+
+    fn set_text_family(&mut self, family: String, window: &mut Window, cx: &mut Context<Self>) {
+        let family = text::normalize_family(&family);
+        self.text_defaults.family = family.clone();
+        self.change_text(window, cx, |draft| {
+            if draft.family == family {
+                return false;
+            }
+            draft.family = family;
+            true
+        });
+    }
+
+    pub(super) fn recolor_text(&mut self, color: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(color) = self.active_tab().map(|tab| {
+            tab.document
+                .content
+                .mode()
+                .constrain(document::solid_color(color))
+        }) else {
+            return;
+        };
+        self.change_text(window, cx, |draft| {
+            if draft.color == color {
+                return false;
+            }
+            draft.color = color;
+            true
+        });
+    }
+
+    pub(super) fn text_color_value(&self) -> Option<u32> {
+        self.text_draft.as_ref().map(|draft| {
+            let [red, green, blue, _] = draft.color.0;
+            u32::from_be_bytes([0, red, green, blue])
+        })
+    }
+
+    /// The caret and any selected text, in canvas pixels, while typing.
+    pub(super) fn text_caret(&self) -> Option<TextCaret> {
+        let draft = self.text_draft.as_ref()?;
+        if self.active_tab().is_none_or(|tab| tab.id != draft.tab) {
+            return None;
+        }
+        let (ax, ay) = (draft.anchor.0 as f32, draft.anchor.1 as f32);
+        let line_height = if draft.carets.line_height > 0.0 {
+            draft.carets.line_height
+        } else {
+            draft.size * draft.spacing.line
+        };
+        let stop = draft.carets.at(draft.cursor);
+        let (x, top) = stop.map_or((0.0, 0.0), |stop| (stop.x, stop.top));
+        let selection = (draft.selected && !draft.source.is_empty()).then(|| {
+            let offset = draft.rendered.style.offset_for(draft.anchor);
+            let (width, height) = draft.rendered.image.dimensions();
+            (
+                offset.0 as f32,
+                offset.1 as f32,
+                width as f32,
+                height as f32,
+            )
+        });
+        let phase = self.caret_shown_at.elapsed().as_millis() / CARET_BLINK_MS;
+        Some(TextCaret {
+            x: ax + x,
+            top: ay + top,
+            height: line_height,
+            selection,
+            frame: draft.bounds(),
+            visible: phase.is_multiple_of(2),
+        })
     }
 
     pub(super) fn place_text(
@@ -282,72 +680,77 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(pixel) = self.unclamped_pointer_pixel(position, scale) else {
+            return;
+        };
+        // Clicks this many screen points from a text box still edit that text.
+        const SLOP: f32 = 12.0;
+        let pad = self
+            .active_tab()
+            .and_then(|tab| {
+                let geometry =
+                    super::canvas_tools::PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
+                let per_pixel = f32::from(geometry.bounds.size.width) / tab.document.width() as f32;
+                (per_pixel > 0.0).then(|| SLOP / per_pixel)
+            })
+            .unwrap_or(SLOP)
+            .max(2.0);
+        self.place_text_at(pixel, pad, window, cx);
+    }
+
+    fn place_text_at(
+        &mut self,
+        pixel: (i64, i64),
+        pad: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        let Some(active) = self.active_tab().map(|tab| tab.active_layer) else {
+        self.font_list_open = false;
+        // A click inside the text being typed moves the caret.
+        if let Some(draft) = self.text_draft.as_mut()
+            && draft.contains(pixel, pad)
+        {
+            if let Some(byte) = draft.hit(pixel) {
+                draft.cursor = byte;
+                draft.selected = false;
+            }
+            self.caret_shown_at = std::time::Instant::now();
+            cx.notify();
             return;
-        };
-        let existing = self.active_tab().and_then(|tab| {
-            let layer = tab.document.content.layer(active)?;
-            layer.text.clone().map(|style| {
-                (
-                    layer.offset,
-                    style,
-                    layer.visible,
-                    layer.pixels.clone(),
-                    layer.opacity,
-                )
-            })
-        });
-        if let Some((offset, style, visible, pixels, opacity)) = existing {
-            if !visible {
-                self.notice(
-                    "The active layer is hidden. Show it before editing text.",
-                    cx,
-                );
-                return;
+        }
+        // Anywhere else finishes that text first.
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.place_text_at(pixel, pad, window, cx)
+            });
+            return;
+        }
+        if let Some((id, offset, style, pixels, opacity)) = self.text_layer_at(pixel, pad) {
+            if let Some(index) = self.active {
+                self.tabs[index].active_layer = id;
             }
-            if self
-                .text_draft
-                .as_ref()
-                .is_some_and(|draft| draft.layer == Some(active))
-            {
-                return;
-            }
-            self.cancel_text(window, cx);
             let anchor = style.anchor(offset);
             self.open_draft(
-                Some(active),
+                Some(id),
                 anchor,
                 text::RenderedText {
                     image: pixels,
                     style,
                 },
                 opacity,
+                Some((
+                    pixel.0 as f32 + 0.5 - anchor.0 as f32,
+                    pixel.1 as f32 + 0.5 - anchor.1 as f32,
+                )),
                 window,
                 cx,
             );
             return;
         }
-        let Some(pixel) = self.unclamped_pointer_pixel(position, scale) else {
-            return;
-        };
         let anchor = (clamp_i32(pixel.0), clamp_i32(pixel.1));
-        if self
-            .text_draft
-            .as_ref()
-            .is_some_and(|draft| draft.layer.is_none())
-        {
-            self.change_text(window, cx, |draft| {
-                if draft.anchor == anchor {
-                    return false;
-                }
-                draft.anchor = anchor;
-                true
-            });
-            return;
-        }
         let color = self
             .active_tab()
             .map(|tab| {
@@ -357,7 +760,7 @@ impl Workspace {
                     .constrain(document::solid_color(self.colors[0]))
             })
             .unwrap_or(document::solid_color(self.colors[0]));
-        self.cancel_text(window, cx);
+        let defaults = self.text_defaults.clone();
         self.open_draft(
             None,
             anchor,
@@ -365,17 +768,62 @@ impl Workspace {
                 image: Arc::new(image::RgbaImage::new(1, 1)),
                 style: text::TextStyle {
                     source: String::new(),
-                    family: "sans-serif".to_owned(),
-                    size: DEFAULT_TEXT_SIZE,
+                    family: defaults.family.clone(),
+                    size: defaults.size,
                     color,
-                    resolved_family: "sans-serif".to_owned(),
+                    spacing: defaults.spacing,
+                    resolved_family: defaults.family,
                     origin: (0, 0),
                 },
             },
             255,
+            None,
             window,
             cx,
         );
+    }
+
+    // The topmost visible text layer under the pointer.
+    #[allow(clippy::type_complexity)]
+    fn text_layer_at(
+        &self,
+        pixel: (i64, i64),
+        pad: f32,
+    ) -> Option<(
+        LayerId,
+        (i32, i32),
+        text::TextStyle,
+        Arc<image::RgbaImage>,
+        u8,
+    )> {
+        let tab = self.active_tab()?;
+        // Distance from the pointer to each visible text layer's box, topmost first.
+        // A click inside a box wins; otherwise the nearest box within `pad`.
+        let (x, y) = (pixel.0 as f32 + 0.5, pixel.1 as f32 + 0.5);
+        let layer = tab
+            .document
+            .content
+            .layers()
+            .iter()
+            .rev()
+            .filter(|layer| layer.visible && layer.text.is_some())
+            .map(|layer| {
+                let (width, height) = layer.pixels.dimensions();
+                let (left, top) = (layer.offset.0 as f32, layer.offset.1 as f32);
+                let dx = (left - x).max(x - (left + width as f32)).max(0.0);
+                let dy = (top - y).max(y - (top + height as f32)).max(0.0);
+                (layer, dx.max(dy))
+            })
+            .filter(|(_, distance)| *distance <= pad)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(layer, _)| layer)?;
+        Some((
+            layer.id,
+            layer.offset,
+            layer.text.clone()?,
+            layer.pixels.clone(),
+            layer.opacity,
+        ))
     }
 
     pub(super) fn type_text(
@@ -421,32 +869,47 @@ impl Workspace {
                 draft.source.replace_range(draft.cursor..end, "");
                 true
             }),
-            "left" | "home" => self.change_text(window, cx, |draft| {
-                draft.cursor = if draft.selected || key.key == "home" {
-                    0
-                } else {
-                    draft.source[..draft.cursor]
-                        .chars()
-                        .next_back()
-                        .map_or(draft.cursor, |ch| draft.cursor - ch.len_utf8())
-                };
-                draft.selected = false;
-                false
+            "left" | "home" => self.move_caret(cx, |draft| {
+                if draft.selected {
+                    return 0;
+                }
+                if key.key == "home" {
+                    return draft.source[..draft.cursor]
+                        .rfind('\n')
+                        .map_or(0, |at| at + 1);
+                }
+                draft.source[..draft.cursor]
+                    .chars()
+                    .next_back()
+                    .map_or(draft.cursor, |ch| draft.cursor - ch.len_utf8())
             }),
-            "right" | "end" => self.change_text(window, cx, |draft| {
-                draft.cursor = if draft.selected || key.key == "end" {
-                    draft.source.len()
-                } else {
-                    draft.source[draft.cursor..]
-                        .chars()
-                        .next()
-                        .map_or(draft.cursor, |ch| draft.cursor + ch.len_utf8())
-                };
-                draft.selected = false;
-                false
+            "right" | "end" => self.move_caret(cx, |draft| {
+                if draft.selected {
+                    return draft.source.len();
+                }
+                if key.key == "end" {
+                    return draft.source[draft.cursor..]
+                        .find('\n')
+                        .map_or(draft.source.len(), |at| draft.cursor + at);
+                }
+                draft.source[draft.cursor..]
+                    .chars()
+                    .next()
+                    .map_or(draft.cursor, |ch| draft.cursor + ch.len_utf8())
             }),
+            "up" | "down" => {
+                let down = key.key == "down";
+                self.move_caret(cx, |draft| {
+                    draft
+                        .carets
+                        .matches(&draft.spec())
+                        .then(|| draft.carets.vertical(draft.cursor, down))
+                        .flatten()
+                        .unwrap_or(draft.cursor)
+                });
+            }
             "enter" => self.insert_text("\n", window, cx),
-            "escape" | "tab" | "up" | "down" => {}
+            "escape" | "tab" => {}
             _ => {
                 if let Some(text) = key.key_char.as_deref() {
                     self.insert_text(text, window, cx);
@@ -455,70 +918,78 @@ impl Workspace {
         }
     }
 
-    pub(super) fn apply_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_apply_text() {
-            self.notice("Finish updating the text draft before applying it.", cx);
-            return;
+    fn move_caret(&mut self, cx: &mut Context<Self>, target: impl FnOnce(&TextDraft) -> usize) {
+        self.caret_shown_at = std::time::Instant::now();
+        if let Some(draft) = self.text_draft.as_mut() {
+            let byte = target(draft).min(draft.source.len());
+            if draft.source.is_char_boundary(byte) {
+                draft.cursor = byte;
+            }
+            draft.selected = false;
         }
-        let Some(draft) = self.text_draft.clone() else {
-            self.notice("Click the canvas to place text.", cx);
-            return;
+        cx.notify();
+    }
+
+    /// Ends the text session. A modified draft is written to its layer as one
+    /// undo step; an unchanged or empty one just closes. Returns true when the
+    /// commit job started, so the tab is busy until it lands.
+    pub(super) fn finish_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(draft) = self.text_draft.as_ref() else {
+            return false;
         };
-        if draft.layer.is_none() && draft.source.trim().is_empty() {
-            self.notice("Enter some text before applying.", cx);
-            return;
+        let Some(tab) = self.active_tab() else {
+            self.cancel_text(window, cx);
+            return false;
+        };
+        if tab.busy() {
+            return false;
         }
-        if self.active_tab().is_none_or(|tab| tab.busy()) {
-            return;
-        }
-        if let Some(id) = draft.layer {
-            if self.active_tab().is_some_and(|tab| {
-                tab.document
-                    .content
-                    .layer(id)
-                    .is_some_and(|layer| !layer.visible)
-            }) {
-                self.notice(
-                    "The active layer is hidden. Show it before editing text.",
-                    cx,
-                );
-                return;
-            }
-        } else if self
-            .active_tab()
-            .is_some_and(|tab| !tab.document.content.can_add_layer())
+        let current = tab.id == draft.tab && tab.history.generation() == draft.generation;
+        if !current || !draft.changed() || (draft.layer.is_none() && draft.source.trim().is_empty())
         {
-            self.notice("This image cannot take another layer.", cx);
-            return;
+            self.cancel_text(window, cx);
+            return false;
         }
-        let fits = self.active_document().is_some_and(|document| {
-            if let Some(layer) = draft.layer {
-                document
-                    .content
-                    .accepts_replacement(layer, draft.rendered.image.dimensions())
-            } else {
-                document
-                    .content
-                    .room_for(0, 0, &draft.rendered.image)
-                    .is_ok()
-            }
+        let layer_hidden = draft.layer.is_some_and(|id| {
+            tab.document
+                .content
+                .layer(id)
+                .is_none_or(|layer| !layer.visible)
         });
-        if !fits {
-            self.notice("The text does not fit in the layer stack.", cx);
-            return;
+        if layer_hidden {
+            self.cancel_text(window, cx);
+            self.notice("The text layer is hidden, so the edit was not kept.", cx);
+            return false;
         }
-        let above = self.active_tab().map(|tab| tab.active_layer);
+        if draft.layer.is_none() && !tab.document.content.can_add_layer() {
+            self.cancel_text(window, cx);
+            self.notice("This image cannot take another layer.", cx);
+            return false;
+        }
+        let Some(draft) = self.text_draft.take() else {
+            return false;
+        };
+        let id = draft.tab;
+        let spec = draft.spec();
         let layer = draft.layer;
         let anchor = draft.anchor;
-        let rendered = Arc::unwrap_or_clone(draft.rendered);
-        self.cancel_text(window, cx);
+        let above = draft.above;
+        let rendered = draft.rendered;
+        // The preview stays on the canvas until the committed pixels replace it.
+        self.text_settled = self.text_overlay.is_some().then_some(id);
         self.edit_content(
             move |content, active, _| {
+                let rendered = if rendered.matches(&spec) {
+                    Arc::unwrap_or_clone(rendered)
+                } else {
+                    match text::render_spec(&spec) {
+                        Ok(rendered) => rendered,
+                        Err(_) => return Dirty::None,
+                    }
+                };
                 if let Some(id) = layer {
                     content.set_text(id, anchor, rendered)
-                } else if let Some(id) =
-                    content.insert_text_layer(above.unwrap_or(*active), anchor, rendered)
-                {
+                } else if let Some(id) = content.insert_text_layer(above, anchor, rendered) {
                     *active = id;
                     Dirty::Canvas
                 } else {
@@ -528,27 +999,61 @@ impl Workspace {
             window,
             cx,
         );
+        let started = self.active_tab().is_some_and(|tab| tab.busy());
+        // Any preview still rendering belongs to the closed draft.
+        self.text_generation = self.text_generation.wrapping_add(1);
+        self.text_dirty = false;
+        self.text_error = None;
+        if !started {
+            self.drop_settled_text(window, cx);
+        }
+        cx.notify();
+        started
     }
 
+    /// Runs `then` after the text commit that `finish_text` just started.
+    pub(super) fn defer_after_text(
+        &mut self,
+        then: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) {
+        if let Some(id) = self.active_tab().map(|tab| tab.id) {
+            self.text_continuation = Some((id, Box::new(then)));
+        }
+    }
+
+    pub(super) fn drop_settled_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_settled.take().is_some()
+            && self.text_draft.is_none()
+            && let Some(overlay) = self.text_overlay.take()
+        {
+            super::drop_images(overlay.into_images(), window, cx);
+        }
+    }
+
+    /// Closes the draft without writing it.
     pub(super) fn cancel_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.text_draft.is_none() && self.text_overlay.is_none() {
+        if self.text_draft.is_none() && (self.text_overlay.is_none() || self.text_settled.is_some())
+        {
             return;
         }
         self.text_generation = self.text_generation.wrapping_add(1);
         self.text_dirty = false;
         self.text_error = None;
         self.text_draft = None;
-        if let Some(overlay) = self.text_overlay.take() {
+        if self.text_settled.is_none()
+            && let Some(overlay) = self.text_overlay.take()
+        {
             super::drop_images(overlay.into_images(), window, cx);
         }
         cx.notify();
     }
 
     pub(super) fn rasterize_text_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.text_draft.is_some() {
-            self.notice("Apply the text before rasterizing it.", cx);
+        if self.finish_text(window, cx) {
+            self.defer_after_text(|this, window, cx| this.rasterize_text_layer(window, cx));
             return;
         }
+        self.cancel_text(window, cx);
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
@@ -589,30 +1094,8 @@ impl Workspace {
         blocked
     }
 
-    pub(super) fn can_apply_text(&self) -> bool {
-        self.text_error.is_none()
-            && self.text_draft.as_ref().is_some_and(|draft| {
-                self.active_tab().is_some_and(|tab| {
-                    tab.id == draft.tab
-                        && tab.history.generation() == draft.generation
-                        && !tab.busy()
-                }) && (draft.layer.is_some() || !draft.source.trim().is_empty())
-                    && draft
-                        .rendered
-                        .matches(&draft.source, &draft.family, draft.size, draft.color)
-            })
-    }
-
     pub(super) fn has_pending_text(&self) -> bool {
         self.text_draft.as_ref().is_some_and(TextDraft::changed)
-    }
-
-    pub(super) fn refuse_pending_text(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.has_pending_text() {
-            return false;
-        }
-        self.notice("Apply the text or press Escape to discard it before changing tools, layers, or images.", cx);
-        true
     }
 
     fn step_text_history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -622,15 +1105,28 @@ impl Workspace {
             .is_some_and(|draft| draft.step_history(redo))
         {
             self.request_text_preview(window, cx);
+            return;
         }
+        // Past the typing history, Undo and Redo act on the document.
+        if self.finish_text(window, cx) {
+            return;
+        }
+        let change = if redo {
+            super::Change::Redo
+        } else {
+            super::Change::Undo
+        };
+        self.step_history(change, window, cx);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_draft(
         &mut self,
         layer: Option<LayerId>,
         anchor: (i32, i32),
         rendered: text::RenderedText,
         opacity: u8,
+        pending_hit: Option<(f32, f32)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -652,13 +1148,55 @@ impl Workspace {
             family: rendered.style.family.clone(),
             size: rendered.style.size,
             color: rendered.style.color,
+            spacing: rendered.style.spacing,
             baseline: rendered.clone(),
             baseline_anchor: anchor,
             rendered,
+            carets: Arc::new(CaretMap::default()),
+            pending_hit,
             undo: Vec::new(),
             redo: Vec::new(),
         });
+        self.caret_shown_at = std::time::Instant::now();
+        self.start_caret_blink(window, cx);
         self.request_text_preview(window, cx);
+    }
+
+    // Repaints at each caret phase change while a draft is open.
+    fn start_caret_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.caret_blinking {
+            return;
+        }
+        self.caret_blinking = true;
+        cx.spawn_in(window, async move |workspace, cx| {
+            loop {
+                let wait = workspace
+                    .update(cx, |workspace, _| {
+                        let elapsed = workspace.caret_shown_at.elapsed().as_millis();
+                        (CARET_BLINK_MS - elapsed % CARET_BLINK_MS) as u64
+                    })
+                    .unwrap_or(CARET_BLINK_MS as u64);
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(wait + 1))
+                    .await;
+                let open = workspace
+                    .update(cx, |workspace, cx| {
+                        if workspace.text_draft.is_none() {
+                            workspace.caret_blinking = false;
+                            return false;
+                        }
+                        if workspace.tool == crate::commands::Tool::Text {
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !open {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn change_text(
@@ -667,6 +1205,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         mutate: impl FnOnce(&mut TextDraft) -> bool,
     ) {
+        self.caret_shown_at = std::time::Instant::now();
         let changed = self.text_draft.as_mut().is_some_and(|draft| {
             let previous = draft.state();
             if !mutate(draft) {
@@ -706,35 +1245,6 @@ impl Workspace {
             }
             draft.source.insert_str(draft.cursor, &cleaned);
             draft.cursor += cleaned.len();
-            true
-        });
-    }
-
-    fn step_text_size(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.change_text(window, cx, |draft| {
-            let next = (draft.size + delta).clamp(MIN_PIXEL_SIZE, MAX_PIXEL_SIZE);
-            if (next - draft.size).abs() < f32::EPSILON {
-                return false;
-            }
-            draft.size = next;
-            true
-        });
-    }
-
-    fn recolor_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(color) = self.active_tab().map(|tab| {
-            tab.document
-                .content
-                .mode()
-                .constrain(document::solid_color(self.colors[0]))
-        }) else {
-            return;
-        };
-        self.change_text(window, cx, |draft| {
-            if draft.color == color {
-                return false;
-            }
-            draft.color = color;
             true
         });
     }
@@ -807,16 +1317,16 @@ impl Workspace {
         self.text_busy = true;
         let token = self.text_generation;
         let job = cx.background_executor().spawn(async move {
-            let rendered =
-                if draft
-                    .rendered
-                    .matches(&draft.source, &draft.family, draft.size, draft.color)
-                {
-                    Ok(draft.rendered)
-                } else {
-                    text::render(&draft.source, &draft.family, draft.size, draft.color)
-                        .map(Arc::new)
-                }?;
+            let rendered = if draft.rendered.matches(&draft.spec) {
+                draft.rendered
+            } else {
+                Arc::new(text::render_spec(&draft.spec)?)
+            };
+            let carets = if draft.carets.matches(&draft.spec) {
+                draft.carets
+            } else {
+                Arc::new(text::caret_map(&draft.spec)?)
+            };
             let substitution = text::substitution(&rendered.style);
             let shown = super::layers::with_layer_opacity(&rendered.image, draft.opacity);
             let sprite = document::preview_render(&shown);
@@ -837,22 +1347,28 @@ impl Workspace {
                 offset: rendered.style.offset_for(draft.anchor),
                 size: rendered.image.dimensions(),
             };
-            Ok::<_, TextError>((rendered, substitution, overlay))
+            Ok::<_, TextError>((rendered, carets, substitution, overlay))
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
                 workspace.text_busy = false;
                 if workspace.text_generation != token || workspace.text_draft.is_none() {
-                    if let Ok((_, _, overlay)) = result {
+                    if let Ok((_, _, _, overlay)) = result {
                         super::drop_images(overlay.into_images(), window, cx);
                     }
                 } else {
                     match result {
-                        Ok((rendered, substitution, overlay)) => {
+                        Ok((rendered, carets, substitution, overlay)) => {
                             let draft = workspace.text_draft.as_mut().unwrap();
                             draft.rendered = rendered;
+                            draft.carets = carets;
                             draft.substitution = substitution;
+                            if let Some((x, y)) = draft.pending_hit.take()
+                                && let Some(byte) = draft.carets.hit(x, y)
+                            {
+                                draft.cursor = byte;
+                            }
                             if let Some(existing) = workspace.text_overlay.as_mut() {
                                 let previous =
                                     std::mem::replace(&mut existing.sprite, overlay.sprite);
@@ -884,32 +1400,6 @@ impl Workspace {
     }
 }
 
-fn family_button(
-    label: &'static str,
-    family: &'static str,
-    current: &str,
-    cx: &Context<Workspace>,
-) -> gpui::Stateful<Div> {
-    let chosen = current == family;
-    choice_button(label, chosen).on_click(cx.listener(move |this, _, window, cx| {
-        this.change_text(window, cx, |draft| {
-            if draft.family == family {
-                return false;
-            }
-            draft.family = family.to_owned();
-            true
-        });
-    }))
-}
-
-fn size_label(size: f32) -> String {
-    if size.fract() == 0.0 {
-        format!("{size:.0} px")
-    } else {
-        format!("{size:.1} px")
-    }
-}
-
 fn clean_text(text: &str) -> String {
     text.chars()
         .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
@@ -932,6 +1422,7 @@ mod tests {
                 family: "sans-serif".into(),
                 size: 24.0,
                 color: image::Rgba([0, 0, 0, 255]),
+                spacing: Spacing::default(),
                 resolved_family: "sans-serif".into(),
                 origin: (0, 0),
             },
@@ -950,9 +1441,12 @@ mod tests {
             family: "sans-serif".into(),
             size: 24.0,
             color: rendered.style.color,
+            spacing: Spacing::default(),
             baseline: rendered.clone(),
             baseline_anchor: (2, 3),
             rendered,
+            carets: Arc::new(CaretMap::default()),
+            pending_hit: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -968,6 +1462,7 @@ mod tests {
         draft.cursor = draft.source.len();
         draft.family = "serif".into();
         draft.anchor = (10, 20);
+        draft.spacing.letter = 3.0;
         draft.record(initial);
         assert!(draft.changed());
         assert!(draft.step_history(false));
@@ -975,11 +1470,13 @@ mod tests {
         assert!(draft.source.is_char_boundary(draft.cursor));
         assert_eq!(draft.anchor, (2, 3));
         assert_eq!(draft.family, "sans-serif");
+        assert_eq!(draft.spacing, Spacing::default());
         assert!(!draft.changed());
         assert!(draft.step_history(true));
         assert_eq!(draft.source, "café 上!");
         assert_eq!(draft.anchor, (10, 20));
         assert_eq!(draft.family, "serif");
+        assert_eq!(draft.spacing.letter, 3.0);
         assert!(Arc::ptr_eq(&pixels, &draft.rendered.image));
         assert!(draft.step_history(false));
         let previous = draft.state();
@@ -995,12 +1492,15 @@ mod tests {
     }
 
     #[test]
-    fn pending_text_detects_source_and_anchor_changes_but_not_selection() {
+    fn pending_text_detects_source_spacing_and_anchor_changes_but_not_selection() {
         let mut existing = draft(Some(LayerId(1)));
         existing.selected = true;
         existing.cursor = 0;
         assert!(!existing.changed());
         existing.anchor.0 += 1;
+        assert!(existing.changed());
+        existing.anchor.0 -= 1;
+        existing.spacing.line = 2.0;
         assert!(existing.changed());
         let mut new = draft(None);
         assert!(new.changed());
@@ -1008,5 +1508,23 @@ mod tests {
         assert!(!new.changed());
         new.source.push('上');
         assert!(new.changed());
+    }
+
+    #[test]
+    fn a_click_inside_the_text_box_hits_a_caret_stop() {
+        let mut draft = draft(None);
+        draft.source = "ab\ncd".into();
+        draft.carets = Arc::new(text::caret_map(&draft.spec()).expect("the sample text lays out"));
+        assert!(draft.contains((2, 3), 0.0));
+        assert!(!draft.contains((2000, 3000), 4.0));
+        // A click just past the box edits it only within the slop.
+        let (_, _, right, _) = draft.bounds();
+        let beside = (right as i64 + 6, 5);
+        assert!(!draft.contains(beside, 2.0));
+        assert!(draft.contains(beside, 8.0));
+        // The second line starts after the newline.
+        let line = draft.carets.line_height;
+        let byte = draft.hit((2, 3 + line as i64 + 1)).unwrap();
+        assert_eq!(byte, 3);
     }
 }

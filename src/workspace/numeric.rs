@@ -8,6 +8,7 @@ use super::view::{ACCENT, BORDER, CANVAS, MUTED};
 use crate::document::CropRect;
 use crate::preview::PixelRect;
 use crate::selection::Selection;
+use crate::text::{MAX_LINE_SPACING, MAX_PIXEL_SIZE, MIN_LINE_SPACING, MIN_PIXEL_SIZE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NumericField {
@@ -18,6 +19,8 @@ pub(super) enum NumericField {
     CropY,
     CropWidth,
     CropHeight,
+    TextSize,
+    TextLineSpacing,
 }
 
 impl NumericField {
@@ -30,6 +33,8 @@ impl NumericField {
             Self::CropY => 4,
             Self::CropWidth => 5,
             Self::CropHeight => 6,
+            Self::TextSize => 7,
+            Self::TextLineSpacing => 8,
         }
     }
 
@@ -41,7 +46,10 @@ impl NumericField {
     }
 
     pub(super) fn is_selection(self) -> bool {
-        !self.is_crop()
+        matches!(
+            self,
+            Self::SelectionRadius | Self::SelectionWidth | Self::SelectionHeight
+        )
     }
 }
 
@@ -164,6 +172,10 @@ impl Workspace {
             NumericField::CropY => crop.map(|crop| crop.y),
             NumericField::CropWidth => crop.map(|crop| crop.width),
             NumericField::CropHeight => crop.map(|crop| crop.height),
+            NumericField::TextSize => Some(self.text_size().round() as u32),
+            NumericField::TextLineSpacing => {
+                Some((self.text_line_spacing() * 100.0).round() as u32)
+            }
         }
     }
 
@@ -237,7 +249,7 @@ impl Workspace {
                         edit.cursor = 0;
                         edit.selected = false;
                     }
-                    self.apply_numeric_fields(cx);
+                    self.apply_numeric_fields(window, cx);
                 }
                 "v" => {
                     let text = cx
@@ -247,7 +259,7 @@ impl Workspace {
                     if let Some(edit) = self.numeric_edit.as_mut() {
                         edit.insert_digits(&text);
                     }
-                    self.apply_numeric_fields(cx);
+                    self.apply_numeric_fields(window, cx);
                 }
                 _ => return false,
             }
@@ -291,14 +303,14 @@ impl Workspace {
             }
         }
         if changed {
-            self.apply_numeric_fields(cx);
+            self.apply_numeric_fields(window, cx);
         } else {
             cx.notify();
         }
         true
     }
 
-    pub(super) fn apply_numeric_fields(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn apply_numeric_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((field, text, original, original_crop)) = self.numeric_edit.as_ref().map(|edit| {
             (
                 edit.field,
@@ -310,11 +322,23 @@ impl Workspace {
             return;
         };
         let Some(value) = parse_numeric(&text) else {
-            self.restore_numeric_values(field, original, original_crop);
+            self.restore_numeric_values(field, original, original_crop, window, cx);
             cx.notify();
             return;
         };
         match field {
+            NumericField::TextSize => {
+                // Sizes below the minimum are mid-typing; wait for more digits.
+                if (MIN_PIXEL_SIZE as u32..=MAX_PIXEL_SIZE as u32).contains(&value) {
+                    self.set_text_size(value as f32, window, cx);
+                }
+            }
+            NumericField::TextLineSpacing => {
+                let line = value as f32 / 100.0;
+                if (MIN_LINE_SPACING..=MAX_LINE_SPACING).contains(&line) {
+                    self.set_text_line_spacing(line, window, cx);
+                }
+            }
             NumericField::SelectionRadius => {
                 let Some(rect) = self.selection_shape_rect() else {
                     return;
@@ -326,7 +350,7 @@ impl Workspace {
             }
             NumericField::SelectionWidth | NumericField::SelectionHeight => {
                 if value == 0 {
-                    self.restore_numeric_values(field, original, original_crop);
+                    self.restore_numeric_values(field, original, original_crop, window, cx);
                     cx.notify();
                     return;
                 }
@@ -365,7 +389,7 @@ impl Workspace {
             }
             NumericField::CropWidth | NumericField::CropHeight => {
                 if value == 0 {
-                    self.restore_numeric_values(field, original, original_crop);
+                    self.restore_numeric_values(field, original, original_crop, window, cx);
                     cx.notify();
                     return;
                 }
@@ -392,7 +416,7 @@ impl Workspace {
             return;
         };
         if parse_numeric(&edit.text).is_none() {
-            self.restore_numeric_edit(&edit);
+            self.restore_numeric_edit(&edit, window, cx);
         } else if edit.field.is_selection()
             && let Some(selection) = self.selection_preview.take()
         {
@@ -405,13 +429,18 @@ impl Workspace {
         let Some(edit) = self.numeric_edit.take() else {
             return;
         };
-        self.restore_numeric_edit(&edit);
+        self.restore_numeric_edit(&edit, window, cx);
         self.focus.focus(window);
         cx.notify();
     }
 
-    fn restore_numeric_edit(&mut self, edit: &NumericEdit) {
-        self.restore_numeric_values(edit.field, edit.original, edit.original_crop);
+    fn restore_numeric_edit(
+        &mut self,
+        edit: &NumericEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_numeric_values(edit.field, edit.original, edit.original_crop, window, cx);
     }
 
     fn restore_numeric_values(
@@ -419,8 +448,14 @@ impl Workspace {
         field: NumericField,
         original: u32,
         original_crop: Option<CropRect>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         match field {
+            NumericField::TextSize => self.set_text_size(original as f32, window, cx),
+            NumericField::TextLineSpacing => {
+                self.set_text_line_spacing(original as f32 / 100.0, window, cx)
+            }
             NumericField::SelectionRadius => {
                 self.selection_radius = original;
                 self.selection_preview = None;

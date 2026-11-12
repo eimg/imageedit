@@ -4,7 +4,14 @@ Open product feedback is queued in [FEEDBACK.md](FEEDBACK.md). Work the first op
 
 Baseline assessed at commit `5c4cfcf` on `main`. This document records proposed behavior and historical acceptance criteria. Treat it as planning guidance; prefer correctness and a coherent editing experience when a planned detail no longer fits the app.
 
-## Latest handoff · Review
+## Latest handoff · Text in place (feedback item 7)
+
+- Text has no Apply or Discard. The draft still keeps per-keystroke undo, and `finish_text` commits a modified draft as one image step when the session ends: Escape, Cmd/Ctrl-Enter, a click outside the text, another tool, layer, or tab, Save/Export, or any command that goes through `start_change`. A command that needs the committed state is stored with `defer_after_text` and runs from `finish_change` once that tab's commit lands. The preview stays on the canvas (`text_settled`) until the committed patch replaces it.
+- The caret comes from a `CaretMap` built in the preview job; clicks hit-test it and Up/Down use it. The options pick the font from the installed families, the size and line spacing through inline numeric fields, letter spacing with a stepper, and the color through the color dialog.
+- Text styles add letter and line spacing, so projects are version 6 and the golden fixture is `fixtures/projects/v6-two-layers.imageedit`.
+- Formatting, Clippy, and locked tests passed. Gestures were not driven.
+
+## Previous handoff · Review
 
 The review of the integrated editor is on `main`, starting from the release check (`333657c`).
 
