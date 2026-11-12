@@ -427,34 +427,17 @@ impl Menus {
                 0
             };
         if entry.bar {
-            unsafe {
-                DrawTextW(
-                    draw.hDC,
-                    entry.label.as_ptr(),
-                    entry.label.len() as i32,
-                    &mut rect,
-                    flags | DT_CENTER,
-                )
-            };
+            draw_text(draw.hDC, &entry.label, &mut rect, flags | DT_CENTER);
         } else {
             rect.left += scaled(34, self.dpi);
             rect.right -= scaled(22, self.dpi);
-            unsafe {
-                DrawTextW(
-                    draw.hDC,
-                    entry.label.as_ptr(),
-                    entry.label.len() as i32,
-                    &mut rect,
-                    flags,
-                );
-                DrawTextW(
-                    draw.hDC,
-                    entry.accelerator.as_ptr(),
-                    entry.accelerator.len() as i32,
-                    &mut rect,
-                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
-                );
-            }
+            draw_text(draw.hDC, &entry.label, &mut rect, flags);
+            draw_text(
+                draw.hDC,
+                &entry.accelerator,
+                &mut rect,
+                DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
+            );
             if let Some(icon) = entry.icon {
                 self.draw_icon(draw, icon, color);
             }
@@ -615,17 +598,26 @@ fn item_info(menu: HMENU, position: u32, mask: u32) -> Result<MENUITEMINFOW> {
     Ok(info)
 }
 
+/// DrawTextW may inspect the first character even when cchText is zero.
+/// Empty Rust slices have a dangling, non-readable pointer, so they must never
+/// reach that API. Use this guard for both measuring and painting menu text.
+fn draw_text(dc: HDC, text: &[u16], rect: &mut RECT, format: DRAW_TEXT_FORMAT) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    // SAFETY: text has readable UTF-16 storage for the supplied character count.
+    // DT_MODIFYSTRING is never used, so GDI cannot write into this shared slice.
+    unsafe { DrawTextW(dc, text.as_ptr(), text.len() as i32, rect, format) }
+}
+
 fn text_width(dc: HDC, text: &[u16], literal: bool) -> i32 {
     let mut rect = RECT::default();
-    unsafe {
-        DrawTextW(
-            dc,
-            text.as_ptr(),
-            text.len() as i32,
-            &mut rect,
-            DT_CALCRECT | DT_SINGLELINE | if literal { DT_NOPREFIX } else { 0 },
-        )
-    };
+    draw_text(
+        dc,
+        text,
+        &mut rect,
+        DT_CALCRECT | DT_SINGLELINE | if literal { DT_NOPREFIX } else { 0 },
+    );
     rect.right - rect.left
 }
 
@@ -699,6 +691,25 @@ fn bitmap(icon: &str, pixels: u32, color: u32) -> Result<GdiObject> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_shortcuts_do_not_pass_empty_storage_to_gdi() {
+        // No DC is needed because empty text must not enter GDI at all. Both
+        // menu-bar labels and commands commonly have no accelerator string.
+        assert_eq!(text_width(ptr::null_mut(), &[], false), 0);
+        assert_eq!(text_width(ptr::null_mut(), &[], true), 0);
+        let mut rect = RECT {
+            left: 1,
+            top: 2,
+            right: 100,
+            bottom: 30,
+        };
+        assert_eq!(draw_text(ptr::null_mut(), &[], &mut rect, DT_SINGLELINE), 0);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (1, 2, 100, 30)
+        );
+    }
 
     #[test]
     fn menu_geometry_scales_and_leaves_room_for_shortcuts() {
