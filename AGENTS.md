@@ -266,7 +266,11 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   mode retain system rendering. `src/windows_menu/drawing.rs` uses Win32 owner
   drawing to match `src/theme.rs` for the menu bar, popup backgrounds, highlights,
   separators, text, and disabled icons. Windows still owns navigation, submenu
-  placement, and activation. Drawing data exposes MSAAMENUINFO names to assistive
+  placement, and activation. `src/windows_menu/drawing/popup.rs` finishes native
+  popup borders and submenu chevrons after Windows paints them. Its per-popup
+  subclasses are limited to our menu drawing DC and owner thread, coalesce
+  selection redraws without polling, and detach for system rendering/teardown.
+  Drawing data exposes MSAAMENUINFO names to assistive
   technology. Preserve original native styles/data/bitmaps for fallback and
   teardown, and release adapter/drawing borrows before synchronous native redraws.
   `src/menu_icons.rs` selects icons by action and rasterizes the toolbox SVGs for

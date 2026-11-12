@@ -5,6 +5,8 @@
 //! https://learn.microsoft.com/windows/win32/menurc/using-menus#creating-owner-drawn-menu-items
 //! https://learn.microsoft.com/windows/win32/winauto/exposing-owner-drawn-menu-items
 
+mod popup;
+
 use std::{collections::HashMap, mem, ptr};
 
 use anyhow::{Context as _, Result};
@@ -91,6 +93,7 @@ pub(super) struct Menus {
     icons: HashMap<(&'static str, u32), GdiObject>,
     dpi: u32,
     active: bool,
+    popups: popup::Popups,
 }
 
 impl Menus {
@@ -110,6 +113,7 @@ impl Menus {
             icons: HashMap::new(),
             dpi,
             active: false,
+            popups: popup::Popups::default(),
         };
         let root = unsafe { GetMenu(hwnd) };
         anyhow::ensure!(!root.is_null(), "the native menu bar is missing");
@@ -202,6 +206,7 @@ impl Menus {
     /// Caller must redraw the menu bar after releasing its borrow of Menus:
     /// DrawMenuBar synchronously sends our measurement/drawing messages.
     pub(super) fn refresh(&mut self, active: bool) -> Result<()> {
+        self.popups.clear();
         if self.active {
             self.restore();
             self.active = false;
@@ -386,6 +391,9 @@ impl Menus {
             return;
         };
         let entry = &self.entries[index];
+        if !entry.bar {
+            self.popups.remember(draw.hDC, self.hwnd, entry.menu);
+        }
         let selected = draw.itemState & ODS_SELECTED != 0;
         let hot = draw.itemState & ODS_HOTLIGHT != 0;
         let disabled = draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0;
@@ -441,8 +449,7 @@ impl Menus {
             if let Some(icon) = entry.icon {
                 self.draw_icon(draw, icon, color);
             }
-            // Win32 draws the submenu arrow after WM_DRAWITEM; reserve its
-            // right-hand column instead of drawing a second arrow over it.
+            // Popup finishing replaces the system arrow after native drawing.
         }
     }
 
@@ -525,6 +532,7 @@ impl Menus {
 impl Drop for Menus {
     fn drop(&mut self) {
         // The adapter drops us before detaching/destroying the native menu.
+        self.popups.clear();
         if self.active {
             self.restore();
         }
