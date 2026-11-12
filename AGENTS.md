@@ -8,8 +8,7 @@ app menu. Windows uses File → Exit. The product
 takes cues from GIMP, with native menus, a docked, resizable, and foldable
 toolbox, a Layers panel, and a tabbed canvas. File commands belong in the menu.
 The workspace favors canvas space and has no top toolbar.
-Windows has been manually reviewed by the maintainer and approved for the
-1.0.0 release. A Windows-only `muda` adapter builds a native menu bar from the
+Windows has been manually reviewed by the maintainer and approved for release. A Windows-only `muda` adapter builds a native menu bar from the
 shared GPUI menu tree, and `.github/workflows/windows.yml` produces an x64
 portable ZIP. Releases distribute the EXE without an installer or file
 associations. The macOS DMG is currently Apple silicon only. See README.md
