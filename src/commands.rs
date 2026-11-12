@@ -1157,7 +1157,7 @@ mod tests {
             .find_map(|line| line.strip_prefix("version = \""))
             .expect("Cargo.toml has a package version")
             .trim_end_matches('"');
-        let plist = include_str!("../macos/Info.plist");
+        let plist = include_str!("../macos/Info.plist").replace("\r\n", "\n");
         assert!(
             plist.contains(&format!(
                 "<key>CFBundleShortVersionString</key>\n    <string>{version}</string>"
