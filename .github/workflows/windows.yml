@@ -103,8 +103,8 @@ jobs:
           Target: $env:RUST_TARGET
 
           This is a portable program. Extract the ZIP and run Lime.exe; there is
-          no installer. The native menu bar and editing flows still need a manual
-          review in Windows.
+          no installer. Release downloads are available at:
+          https://github.com/eimg/lime/releases
 
           Requirements:
           - 64-bit Windows 10 or later with DirectX.
@@ -113,8 +113,8 @@ jobs:
 
           Known limitations:
           - No code signing or .lime / Open With file association yet.
-          - Windows menus are built from the shared action tree and type-checked
-            in CI, but they have not been runtime-verified by the maintainer.
+          - Native menu appearance may vary with Windows theme and accessibility
+            settings.
           "@ | Set-Content -Path (Join-Path $out "READ-ME.txt") -Encoding utf8
 
           Compress-Archive -Path (Join-Path $out "*") -DestinationPath $zip -Force

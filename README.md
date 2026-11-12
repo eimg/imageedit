@@ -19,16 +19,12 @@ and a workspace that keeps the canvas in focus.
 
 ## Download
 
-[Releases](https://github.com/eimg/lime/releases) ·
-[Windows test builds](https://github.com/eimg/lime/actions/workflows/windows.yml)
+**Lime 1.0.0** · [Release notes](https://github.com/eimg/lime/releases/tag/v1.0.0)
 
-There is no published release yet. Successful Windows builds include a
-downloadable test package.
-
-| Platform | Package | Install |
+| Platform | Download | Install |
 | --- | --- | --- |
-| macOS | DMG | Open the disk image and drag Lime to Applications. |
-| Windows x64 | Portable ZIP | Extract the ZIP and run `Lime.exe`. No installer. |
+| macOS (Apple silicon) | [DMG](https://github.com/eimg/lime/releases/download/v1.0.0/Lime-1.0.0.dmg) | Open the disk image and drag Lime to Applications. |
+| Windows x64 | [EXE](https://github.com/eimg/lime/releases/download/v1.0.0/Lime-1.0.0-windows-x64.exe) | Download and run. No installer. |
 
 Windows needs Windows 10 or later, DirectX, and the Microsoft Visual C++
 2015–2022 x64 runtime if it is not already installed. Windows builds are unsigned;
