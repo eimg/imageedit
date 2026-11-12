@@ -1,3 +1,4 @@
+use crate::preview::PixelRect;
 use crate::selection::Selection;
 use crate::transform::{Mirror, Turn};
 
@@ -105,6 +106,266 @@ pub fn selection(paths: &[VectorPath], width: u32, height: u32) -> Selection {
     Selection::polygons(&rings, width, height)
 }
 
+const KAPPA: f64 = 0.552_284_749_830_793_6;
+
+pub fn outlines_from_selection(selection: &Selection, width: u32, height: u32) -> Vec<Vec<Anchor>> {
+    let one = |anchors: Vec<Anchor>| {
+        if anchors.len() >= 3 {
+            vec![anchors]
+        } else {
+            Vec::new()
+        }
+    };
+    match selection {
+        Selection::Unrestricted | Selection::Empty => Vec::new(),
+        Selection::Full => one(rectangle_anchors(PixelRect::new(0, 0, width, height))),
+        Selection::Rect(rect) => one(rectangle_anchors(*rect)),
+        Selection::Ellipse(ellipse) => one(ellipse_anchors(ellipse.rect())),
+        Selection::RoundedRect(shape) => one(rounded_rect_anchors(shape.rect(), shape.radius())),
+        Selection::Inverse(hole) => inverse_anchors(*hole, width, height),
+        Selection::Mask(_) => polyline_outlines(selection, width, height),
+    }
+}
+
+fn rectangle_anchors(rect: PixelRect) -> Vec<Anchor> {
+    if rect.width == 0 || rect.height == 0 {
+        return Vec::new();
+    }
+    let (left, top) = (rect.x as f64, rect.y as f64);
+    let (right, bottom) = (rect.right() as f64, rect.bottom() as f64);
+    vec![
+        Anchor::corner(AnchorId(0), (left, top)),
+        Anchor::corner(AnchorId(0), (right, top)),
+        Anchor::corner(AnchorId(0), (right, bottom)),
+        Anchor::corner(AnchorId(0), (left, bottom)),
+    ]
+}
+
+fn ellipse_anchors(rect: PixelRect) -> Vec<Anchor> {
+    if rect.width == 0 || rect.height == 0 {
+        return Vec::new();
+    }
+    let (left, top) = (rect.x as f64, rect.y as f64);
+    let (right, bottom) = (rect.right() as f64, rect.bottom() as f64);
+    let (cx, cy) = ((left + right) * 0.5, (top + bottom) * 0.5);
+    let (kx, ky) = ((right - left) * 0.5 * KAPPA, (bottom - top) * 0.5 * KAPPA);
+    vec![
+        curved_anchor((cx, top), (cx - kx, top), (cx + kx, top)),
+        curved_anchor((right, cy), (right, cy - ky), (right, cy + ky)),
+        curved_anchor((cx, bottom), (cx + kx, bottom), (cx - kx, bottom)),
+        curved_anchor((left, cy), (left, cy + ky), (left, cy - ky)),
+    ]
+}
+
+fn rounded_rect_anchors(rect: PixelRect, radius: u32) -> Vec<Anchor> {
+    if rect.width == 0 || rect.height == 0 {
+        return Vec::new();
+    }
+    let radius = radius.min(rect.width.min(rect.height) / 2);
+    if radius == 0 {
+        return rectangle_anchors(rect);
+    }
+    let (left, top) = (rect.x as f64, rect.y as f64);
+    let (right, bottom) = (rect.right() as f64, rect.bottom() as f64);
+    let r = f64::from(radius);
+    let k = r * KAPPA;
+    vec![
+        curved_anchor((left + r, top), (left + r - k, top), (left + r, top)),
+        curved_anchor((right - r, top), (right - r, top), (right - r + k, top)),
+        curved_anchor((right, top + r), (right, top + r - k), (right, top + r)),
+        curved_anchor(
+            (right, bottom - r),
+            (right, bottom - r),
+            (right, bottom - r + k),
+        ),
+        curved_anchor(
+            (right - r, bottom),
+            (right - r + k, bottom),
+            (right - r, bottom),
+        ),
+        curved_anchor(
+            (left + r, bottom),
+            (left + r, bottom),
+            (left + r - k, bottom),
+        ),
+        curved_anchor(
+            (left, bottom - r),
+            (left, bottom - r + k),
+            (left, bottom - r),
+        ),
+        curved_anchor((left, top + r), (left, top + r), (left, top + r - k)),
+    ]
+}
+
+fn inverse_anchors(hole: PixelRect, width: u32, height: u32) -> Vec<Vec<Anchor>> {
+    let right = i64::from(width);
+    let bottom = i64::from(height);
+    if hole.x > 0 && hole.y > 0 && hole.right() < right && hole.bottom() < bottom {
+        let outer = rectangle_anchors(PixelRect::new(0, 0, width, height));
+        let mut inner = rectangle_anchors(hole);
+        inner.reverse();
+        if outer.len() >= 3 && inner.len() >= 3 {
+            return vec![outer, inner];
+        }
+    }
+    polyline_outlines(&Selection::Inverse(hole), width, height)
+}
+
+fn polyline_outlines(selection: &Selection, width: u32, height: u32) -> Vec<Vec<Anchor>> {
+    selection
+        .stroke_polylines(width, height)
+        .into_iter()
+        .filter_map(|points| polyline_anchors(&points))
+        .take(MAX_PATHS)
+        .collect()
+}
+
+fn curved_anchor(point: (f64, f64), handle_in: (f64, f64), handle_out: (f64, f64)) -> Anchor {
+    Anchor {
+        id: AnchorId(0),
+        point,
+        handle_in,
+        handle_out,
+    }
+}
+
+fn polyline_anchors(points: &[(f64, f64)]) -> Option<Vec<Anchor>> {
+    let mut points = points.to_vec();
+    if points
+        .first()
+        .is_some_and(|first| points.last().is_some_and(|last| near(*first, *last)))
+    {
+        points.pop();
+    }
+    points.dedup_by(|next, previous| near(*next, *previous));
+    points = remove_collinear(points);
+    if points.len() < 3 {
+        return None;
+    }
+    let points = simplify_closed(&points);
+    Some(
+        points
+            .into_iter()
+            .map(|point| Anchor::corner(AnchorId(0), point))
+            .collect(),
+    )
+}
+
+fn remove_collinear(mut points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    loop {
+        if points.len() <= 3 {
+            return points;
+        }
+        let mut kept = Vec::with_capacity(points.len());
+        let mut removed = false;
+        for index in 0..points.len() {
+            let previous = points[(index + points.len() - 1) % points.len()];
+            let current = points[index];
+            let next = points[(index + 1) % points.len()];
+            let (ax, ay) = (current.0 - previous.0, current.1 - previous.1);
+            let (bx, by) = (next.0 - current.0, next.1 - current.1);
+            let cross = ax * by - ay * bx;
+            let forward = ax * bx + ay * by >= 0.0;
+            if cross.abs() <= 1e-9 && forward {
+                removed = true;
+            } else {
+                kept.push(current);
+            }
+        }
+        if !removed || kept.len() < 3 {
+            return points;
+        }
+        points = kept;
+    }
+}
+
+fn simplify_closed(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if points.len() <= MAX_ANCHORS {
+        return points.to_vec();
+    }
+    let mut tolerance = 0.5;
+    for _ in 0..20 {
+        let simplified = simplify_closed_at(points, tolerance);
+        if simplified.len() >= 3 && simplified.len() <= MAX_ANCHORS {
+            return simplified;
+        }
+        tolerance *= 2.0;
+    }
+    let step = points.len() as f64 / MAX_ANCHORS as f64;
+    (0..MAX_ANCHORS)
+        .map(|index| points[(index as f64 * step) as usize])
+        .collect()
+}
+
+fn simplify_closed_at(points: &[(f64, f64)], tolerance: f64) -> Vec<(f64, f64)> {
+    if points.len() <= 3 {
+        return points.to_vec();
+    }
+    let anchor = points[0];
+    let far = points
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by(|(_, left), (_, right)| {
+            distance(anchor, **left)
+                .partial_cmp(&distance(anchor, **right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map_or(0, |(index, _)| index);
+    if far == 0 {
+        return points.to_vec();
+    }
+    let mut left = simplify_open(&points[..=far], tolerance);
+    let mut closing = points[far..].to_vec();
+    closing.push(points[0]);
+    let right = simplify_open(&closing, tolerance);
+    left.pop();
+    left.extend(right.into_iter().skip(1));
+    left.pop();
+    left
+}
+
+fn simplify_open(points: &[(f64, f64)], tolerance: f64) -> Vec<(f64, f64)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut pending = vec![(0, points.len() - 1)];
+    while let Some((first, last)) = pending.pop() {
+        let start = points[first];
+        let end = points[last];
+        let mut split = 0;
+        let mut farthest = 0.0;
+        for (index, point) in points.iter().enumerate().take(last).skip(first + 1) {
+            let span = distance_to_chord(*point, start, end);
+            if span > farthest {
+                farthest = span;
+                split = index;
+            }
+        }
+        if farthest > tolerance && split > first && split < last {
+            keep[split] = true;
+            pending.push((first, split));
+            pending.push((split, last));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(point, keep)| keep.then_some(*point))
+        .collect()
+}
+
+fn near(left: (f64, f64), right: (f64, f64)) -> bool {
+    (left.0 - right.0).abs() <= 1e-9 && (left.1 - right.1).abs() <= 1e-9
+}
+
+fn distance(left: (f64, f64), right: (f64, f64)) -> f64 {
+    (left.0 - right.0).hypot(left.1 - right.1)
+}
+
 pub fn turn_point(point: (f64, f64), canvas: (u32, u32), turn: Turn) -> (f64, f64) {
     let (x, y) = point;
     let (width, height) = (f64::from(canvas.0), f64::from(canvas.1));
@@ -210,6 +471,98 @@ mod tests {
             closed: true,
             anchors,
         }
+    }
+
+    fn paths_from_outlines(outlines: Vec<Vec<Anchor>>) -> Vec<VectorPath> {
+        let mut anchor = 1;
+        outlines
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut anchors)| {
+                for item in &mut anchors {
+                    item.id = AnchorId(anchor);
+                    anchor += 1;
+                }
+                VectorPath {
+                    id: PathId(index as u64 + 1),
+                    visible: true,
+                    closed: true,
+                    anchors,
+                }
+            })
+            .collect()
+    }
+
+    fn assert_same_coverage(actual: &Selection, expected: &Selection, width: u32, height: u32) {
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(
+                    actual.covers(i64::from(x), i64::from(y), width, height),
+                    expected.covers(i64::from(x), i64::from(y), width, height),
+                    "coverage differs at {x}, {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selection_outlines_round_trip_rectangles_ellipses_and_holes() {
+        let (width, height) = (16, 12);
+        let rectangle = Selection::rectangle((2, 2), (9, 8), width, height);
+        let paths = paths_from_outlines(outlines_from_selection(&rectangle, width, height));
+        assert_eq!(selection(&paths, width, height), rectangle);
+
+        let ellipse = Selection::ellipse_rect(PixelRect::new(2, 1, 9, 8), width, height);
+        let paths = paths_from_outlines(outlines_from_selection(&ellipse, width, height));
+        assert_eq!(paths[0].anchors.len(), 4);
+        assert_same_coverage(&selection(&paths, width, height), &ellipse, width, height);
+
+        let rounded = Selection::rounded_rect_rect(PixelRect::new(2, 1, 9, 8), 3, width, height);
+        let paths = paths_from_outlines(outlines_from_selection(&rounded, width, height));
+        assert_eq!(paths[0].anchors.len(), 8);
+        assert_same_coverage(&selection(&paths, width, height), &rounded, width, height);
+
+        let inverse = Selection::rectangle((4, 3), (9, 7), width, height).invert(width, height);
+        let paths = paths_from_outlines(outlines_from_selection(&inverse, width, height));
+        assert_eq!(paths.len(), 2);
+        assert_same_coverage(&selection(&paths, width, height), &inverse, width, height);
+
+        let edge_inverse =
+            Selection::rectangle((0, 3), (5, 8), width, height).invert(width, height);
+        let paths = paths_from_outlines(outlines_from_selection(&edge_inverse, width, height));
+        assert_same_coverage(
+            &selection(&paths, width, height),
+            &edge_inverse,
+            width,
+            height,
+        );
+
+        use crate::selection::SelectionOp;
+        let donut = Selection::rectangle((2, 2), (13, 10), width, height).combine(
+            Selection::rectangle((5, 4), (10, 8), width, height),
+            SelectionOp::Subtract,
+            width,
+            height,
+        );
+        let paths = paths_from_outlines(outlines_from_selection(&donut, width, height));
+        assert!(paths.len() >= 2);
+        assert_same_coverage(&selection(&paths, width, height), &donut, width, height);
+    }
+
+    #[test]
+    fn complex_selection_outlines_stay_within_the_anchor_limit() {
+        let points: Vec<(f64, f64)> = (0..180)
+            .map(|index| {
+                let angle = index as f64 / 180.0 * std::f64::consts::TAU;
+                let radius = 24.0 + (index as f64 * 0.7).sin() * 4.0;
+                (32.0 + angle.cos() * radius, 32.0 + angle.sin() * radius)
+            })
+            .collect();
+        let selection = Selection::polygons(&[&points], 64, 64);
+        let outlines = outlines_from_selection(&selection, 64, 64);
+        assert_eq!(outlines.len(), 1);
+        assert!(outlines[0].len() <= MAX_ANCHORS);
+        assert!(selection.covers(32, 32, 64, 64));
     }
 
     #[test]

@@ -307,6 +307,42 @@ impl DocumentContent {
         max.checked_add(1).map(crate::paths::AnchorId)
     }
 
+    pub fn paths_from_selection(&self, selection: &Selection) -> Vec<crate::paths::VectorPath> {
+        let (width, height) = self.size();
+        let outlines = crate::paths::outlines_from_selection(selection, width, height);
+        let mut next_path = self.next_path_id();
+        let mut next_anchor = self.next_anchor_id();
+        let mut paths = Vec::new();
+        for mut anchors in outlines {
+            if self.paths.len() + paths.len() >= crate::paths::MAX_PATHS {
+                break;
+            }
+            let Some(id) = next_path else {
+                break;
+            };
+            next_path = id.0.checked_add(1).map(crate::paths::PathId);
+            let mut complete = true;
+            for anchor in &mut anchors {
+                let Some(anchor_id) = next_anchor else {
+                    complete = false;
+                    break;
+                };
+                next_anchor = anchor_id.0.checked_add(1).map(crate::paths::AnchorId);
+                anchor.id = anchor_id;
+            }
+            if !complete {
+                break;
+            }
+            paths.push(crate::paths::VectorPath {
+                id,
+                visible: true,
+                closed: true,
+                anchors,
+            });
+        }
+        paths
+    }
+
     fn map_paths(&mut self, mut map: impl FnMut((f64, f64)) -> (f64, f64)) {
         for path in &mut self.paths {
             for anchor in &mut path.anchors {
@@ -2995,6 +3031,38 @@ mod tests {
         assert_eq!(
             content.place_drop_shadow(id, spec),
             Err(FilterStop::TooLarge)
+        );
+    }
+
+    #[test]
+    fn selection_paths_use_fresh_ids_and_become_active() {
+        use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
+
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(12, 10));
+        assert!(content.upsert_path(VectorPath {
+            id: PathId(4),
+            visible: true,
+            closed: false,
+            anchors: vec![
+                Anchor::corner(AnchorId(7), (0.0, 0.0)),
+                Anchor::corner(AnchorId(8), (1.0, 1.0)),
+            ],
+        }));
+        let selection = Selection::rectangle((2, 2), (8, 7), 12, 10);
+        let paths = content.paths_from_selection(&selection);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].id, PathId(5));
+        assert!(paths[0].anchors.iter().all(|anchor| anchor.id.0 > 8));
+        for path in paths {
+            assert!(content.upsert_path(path));
+        }
+        assert_eq!(content.paths().len(), 2);
+        assert_eq!(content.active_path_id(), Some(PathId(5)));
+        assert!(content.paths_from_selection(&Selection::Empty).is_empty());
+        assert!(
+            content
+                .paths_from_selection(&Selection::Unrestricted)
+                .is_empty()
         );
     }
 

@@ -57,9 +57,11 @@ beneath the source from its blurred silhouette. A zero radius or amount does
 not create a history entry. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
 first anchor closes the path. Path to Selection fills every closed path with
-nonzero winding. Image transforms, scale, canvas size, and crop move those
-paths with the image. A Paths tab beside Layers lists every path, selects one,
-toggles its visibility, or deletes it. Escape or switching tools stops the
+nonzero winding. Selection to Path creates closed paths from the current
+selection. Selection ants paint above path outlines so an overlapping path
+cannot hide the selection; path handles remain above both. Image transforms,
+scale, canvas size, and crop move those paths with the image. A Paths tab beside Layers lists every path, selects one, toggles its
+visibility, or deletes it. Escape or switching tools stops the
 current path, and the next Path click starts a new one. Stroke in the Paths tab
 paints the selected visible path onto the active layer with the foreground
 color, using a Pencil or Brush stroke and an adjustable size. Stroke Selection
@@ -85,7 +87,9 @@ back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
 paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. Transparent pixels show a checker on the canvas and in each layer
-thumbnail. It also supports a grid and center guides. Save and Save As handle
+thumbnail. A thumbnail keeps the layer's aspect ratio, and its finer checker
+fills only that area rather than the square row slot. It also supports a grid
+and center guides. Save and Save As handle
 ImageEdit projects,
 PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
@@ -123,9 +127,11 @@ document is a single plain layer without paths or editable text.
   premultiplied color. `src/workspace/filter_ui.rs` shows the reduced preview for
   the latest slider position. Apply writes the layer, or inserts the shadow
   beneath it, in the background.
-- `src/paths.rs` stores cubic paths in canvas coordinates, flattens them, and
-  fills closed paths with nonzero winding. `src/workspace/path_ui.rs` edits
-  anchors and handles. A drag commits when the pointer is released.
+- `src/paths.rs` stores cubic paths in canvas coordinates, flattens them, fills
+  closed paths with nonzero winding, and builds path outlines from simple and
+  mask selections. `src/workspace/path_ui.rs` edits anchors and handles and
+  converts between paths and selections. A drag commits when the pointer is
+  released.
   `src/workspace/stroke_ui.rs` strokes the active path or the selection contour.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.
@@ -178,8 +184,9 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
-  drag coalescing, and the Move preview. The preview is display-only until
-  the pointer is released. Move's crosshair has a four-arrow badge, and
+  drag coalescing, and the Move preview. Layer thumbnails keep the layer's
+  aspect ratio and draw their checker only inside that area. The preview is
+  display-only until the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options align the layer to canvas edges or center it with icon
   buttons. The Layer menu has the fit and content-crop commands.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,

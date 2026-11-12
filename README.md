@@ -127,9 +127,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   it, use the eye to show or hide it, or use the trash button to delete it.
   Escape or switching tools stops the current path, and the next Path click
   starts a new one instead of extending the last node. **Select → Path to
-  Selection** fills every visible closed path. Overlapping contours use nonzero
-  winding, so a reversed contour cancels the area it shares. Open paths do not
-  fill. Undo restores the previous anchors. Image transforms, scaling, canvas
+  Selection** fills every visible closed path. **Selection to Path**, just below
+  it in the Paths tab, creates closed paths from the current selection. Overlapping
+  contours use nonzero winding, so a reversed contour cancels the area it shares.
+  Open paths do not fill. Undo restores the previous anchors. Image transforms, scaling, canvas
   size, and crop move the paths with the image. **Stroke** in the Paths tab
   paints the selected visible path onto the active layer with the foreground
   color. Choose Pencil or Brush and adjust the stroke size there. Edit → Stroke
@@ -192,8 +193,10 @@ and Finder integration. Run `cargo run --locked` for a debug build.
   history uses too much memory.
 - The **Layers** panel lists layers top to bottom with thumbnails. A
   transparency checker shows through clear pixels there and on the canvas.
-  Click a layer to select it, double-click to rename it, or use the eye button to hide
-  it. Drag a row to reorder. The opacity slider and the Layer menu cover New,
+  Each thumbnail keeps the layer's proportions, and its checker fills only the
+  layer's own area, not the square slot around it. Click a layer to select it,
+  double-click to rename it, or use the eye button to hide it. Drag a row to
+  reorder. The opacity slider and the Layer menu cover New,
   Duplicate, Rename, Merge Down, Delete, Raise and Lower. New Layer can start
   transparent or filled with the foreground or background color. Merge Down
   stays disabled when either layer is hidden.

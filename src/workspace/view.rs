@@ -2559,6 +2559,14 @@ fn image_preview(
             if let Some(bounds) = layer_bounds {
                 paint_layer_bounds(window, &geometry, width, height, visible, bounds);
             }
+            paint_paths(
+                window,
+                &geometry,
+                viewport,
+                (width, height),
+                &paths,
+                active_path,
+            );
             paint_contours(window, &geometry, width, height, visible, &contours);
             paint_segments(
                 window,
@@ -2569,15 +2577,16 @@ fn image_preview(
                 selection.outline_edges(),
             );
             paint_free_outline(window, &geometry, viewport, &free_path, polygon);
-            paint_paths(
-                window,
-                &geometry,
-                viewport,
-                (width, height),
-                &paths,
-                active_path,
-                path_handles,
-            );
+            if path_handles {
+                paint_path_handles(
+                    window,
+                    &geometry,
+                    viewport,
+                    (width, height),
+                    &paths,
+                    active_path,
+                );
+            }
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
             }
@@ -2934,7 +2943,6 @@ fn paint_paths(
     canvas: (u32, u32),
     paths: &[crate::paths::VectorPath],
     active: Option<crate::paths::PathId>,
-    handles: bool,
 ) {
     let (width, height) = canvas;
     if paths.is_empty() || width == 0 || height == 0 {
@@ -2966,9 +2974,31 @@ fn paint_paths(
                     window.paint_path(outline, color);
                 }
             }
-            if !handles {
-                continue;
-            }
+        }
+    });
+}
+
+fn paint_path_handles(
+    window: &mut Window,
+    geometry: &PreviewGeometry,
+    viewport: Bounds<Pixels>,
+    canvas: (u32, u32),
+    paths: &[crate::paths::VectorPath],
+    active: Option<crate::paths::PathId>,
+) {
+    let (width, height) = canvas;
+    if paths.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    let project = |at: (f64, f64)| {
+        geometry.project(point(
+            (at.0 / f64::from(width)) as f32,
+            (at.1 / f64::from(height)) as f32,
+        ))
+    };
+    window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+        for path in paths {
+            let current = Some(path.id) == active;
             for anchor in &path.anchors {
                 let center = project(anchor.point);
                 if anchor.handle_in != anchor.point {

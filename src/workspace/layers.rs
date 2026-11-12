@@ -73,19 +73,62 @@ impl Render for DraggedLayer {
     }
 }
 
-fn thumbnail_checker() -> Div {
-    div()
-        .absolute()
-        .size_full()
-        .flex()
-        .flex_wrap()
-        .children((0..16).map(|index| {
-            let light = (index % 4 + index / 4) % 2 == 1;
-            div()
-                .w(px(8.5))
-                .h(px(8.5))
-                .bg(rgb(if light { CHECKER_LIGHT } else { CHECKER_DARK }))
-        }))
+const THUMBNAIL_EDGE: f32 = 34.;
+const THUMBNAIL_CHECKER: f32 = 4.25;
+
+fn thumbnail_size((width, height): (u32, u32)) -> (f32, f32) {
+    let edge = width.max(height).max(1) as f32;
+    let scale = THUMBNAIL_EDGE / edge;
+    (
+        (width as f32 * scale).max(1.),
+        (height as f32 * scale).max(1.),
+    )
+}
+
+fn thumbnail_checker() -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        |bounds, _, window, _| {
+            window.paint_quad(quad(
+                bounds,
+                px(0.),
+                rgb(CHECKER_DARK),
+                px(0.),
+                rgb(0),
+                BorderStyle::Solid,
+            ));
+            let columns = (f32::from(bounds.size.width) / THUMBNAIL_CHECKER).ceil() as i32;
+            let rows = (f32::from(bounds.size.height) / THUMBNAIL_CHECKER).ceil() as i32;
+            for y in 0..rows {
+                for x in 0..columns {
+                    if (x + y) % 2 != 0 {
+                        continue;
+                    }
+                    let cell = Bounds::new(
+                        bounds.origin
+                            + point(
+                                px(x as f32 * THUMBNAIL_CHECKER),
+                                px(y as f32 * THUMBNAIL_CHECKER),
+                            ),
+                        size(px(THUMBNAIL_CHECKER), px(THUMBNAIL_CHECKER)),
+                    )
+                    .intersect(&bounds);
+                    if !cell.is_empty() {
+                        window.paint_quad(quad(
+                            cell,
+                            px(0.),
+                            rgb(CHECKER_LIGHT),
+                            px(0.),
+                            rgb(0),
+                            BorderStyle::Solid,
+                        ));
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 pub(super) fn opacity_percent(opacity: u8) -> u32 {
@@ -359,6 +402,7 @@ impl Workspace {
                 name.clone()
             };
             let thumbnail = tab.document.canvas.thumbnail(id).cloned();
+            let (thumbnail_width, thumbnail_height) = thumbnail_size(layer.pixels.dimensions());
             div()
                 .id(("layer", id.0 as usize))
                 .flex()
@@ -392,20 +436,28 @@ impl Workspace {
                 )
                 .child(
                     div()
-                        .relative()
-                        .size(px(34.))
+                        .size(px(THUMBNAIL_EDGE))
                         .flex_shrink_0()
-                        .rounded_sm()
-                        .overflow_hidden()
-                        .child(thumbnail_checker())
-                        .when_some(thumbnail, |frame, image| {
-                            frame.child(
-                                img(image)
-                                    .absolute()
-                                    .size_full()
-                                    .object_fit(ObjectFit::Contain),
-                            )
-                        }),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .relative()
+                                .w(px(thumbnail_width))
+                                .h(px(thumbnail_height))
+                                .rounded_sm()
+                                .overflow_hidden()
+                                .child(thumbnail_checker())
+                                .when_some(thumbnail, |frame, image| {
+                                    frame.child(
+                                        img(image)
+                                            .absolute()
+                                            .size_full()
+                                            .object_fit(ObjectFit::Fill),
+                                    )
+                                }),
+                        ),
                 )
                 .child(
                     div()
@@ -902,6 +954,14 @@ fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_sizes_keep_the_layer_aspect_ratio() {
+        assert_eq!(thumbnail_size((4, 4)), (34., 34.));
+        assert_eq!(thumbnail_size((8, 4)), (34., 17.));
+        assert_eq!(thumbnail_size((4, 8)), (17., 34.));
+        assert_eq!(thumbnail_size((0, 0)), (1., 1.));
+    }
 
     #[test]
     fn opacity_percent_round_trips_every_percent() {

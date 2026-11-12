@@ -8,7 +8,7 @@ use super::view::{
     DISABLED, HOVER, MUTED, SELECTED, TEXT, choice_button, icon, option_action, option_row,
     section_label, segmented, step_button, stepper,
 };
-use crate::commands::PathToSelection;
+use crate::commands::{PathToSelection, SelectionToPath};
 use crate::paths::{self, Anchor, AnchorId, PathId, VectorPath};
 use crate::preview::Dirty;
 
@@ -62,9 +62,22 @@ impl Workspace {
                     .iter()
                     .any(|path| path.closed && path.anchors.len() >= 3)
         });
+        let selection = self.active_tab().is_some_and(|tab| {
+            !tab.busy()
+                && tab.document.content.paths().len() < crate::paths::MAX_PATHS
+                && !matches!(
+                    tab.selection,
+                    crate::selection::Selection::Unrestricted | crate::selection::Selection::Empty
+                )
+        });
         root.when(available, |root| {
             root.on_action(cx.listener(|this, _: &PathToSelection, window, cx| {
                 this.path_to_selection(window, cx);
+            }))
+        })
+        .when(selection, |root| {
+            root.on_action(cx.listener(|this, _: &SelectionToPath, window, cx| {
+                this.selection_to_path(window, cx);
             }))
         })
     }
@@ -159,6 +172,14 @@ impl Workspace {
                 && self.brush.opacity > 0
         });
         let style = self.path_stroke_style;
+        let selection = tab.is_some_and(|tab| {
+            !tab.busy()
+                && tab.document.content.paths().len() < crate::paths::MAX_PATHS
+                && !matches!(
+                    tab.selection,
+                    crate::selection::Selection::Unrestricted | crate::selection::Selection::Empty
+                )
+        });
         panel
             .child("Click to add an anchor. Drag to pull its handles. Click the first anchor to close.")
             .child(div().flex().flex_col().gap_1().children(rows))
@@ -171,6 +192,18 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.path_to_selection(window, cx);
                     })),
+            )
+            .child(
+                option_action("Selection to Path", false)
+                    .w_full()
+                    .when(selection, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.selection_to_path(window, cx);
+                        }))
+                    })
+                    .when(!selection, |button| {
+                        button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
+                    }),
             )
             .child(section_label("STROKE"))
             .child(segmented([
@@ -593,6 +626,38 @@ impl Workspace {
         self.edit_content(
             move |content, _, _| {
                 if content.delete_anchor(path_id, anchor_id) {
+                    Dirty::Unpainted
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn selection_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_none_or(|tab| {
+            tab.busy()
+                || tab.document.content.paths().len() >= crate::paths::MAX_PATHS
+                || matches!(
+                    tab.selection,
+                    crate::selection::Selection::Unrestricted | crate::selection::Selection::Empty
+                )
+        }) {
+            return;
+        }
+        self.edit_content(
+            |content, _, selection| {
+                let paths = content.paths_from_selection(selection);
+                let mut changed = false;
+                for path in paths {
+                    if !content.upsert_path(path) {
+                        break;
+                    }
+                    changed = true;
+                }
+                if changed {
                     Dirty::Unpainted
                 } else {
                     Dirty::None

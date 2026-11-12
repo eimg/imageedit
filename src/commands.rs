@@ -71,6 +71,7 @@ actions!(
         Sharpen,
         DropShadow,
         PathToSelection,
+        SelectionToPath,
         ClosePath,
         CancelPath,
         DeletePathAnchor,
@@ -601,6 +602,7 @@ fn application_menus(macos: bool) -> Vec<Menu> {
                 MenuItem::action("Shrink…", ShrinkSelection),
                 MenuItem::separator(),
                 MenuItem::action("Path to Selection", PathToSelection),
+                MenuItem::action("Selection to Path", SelectionToPath),
             ],
         ),
         menu(
@@ -914,6 +916,7 @@ mod tests {
             "Grow…",
             "Shrink…",
             "Path to Selection",
+            "Selection to Path",
             "menu:View",
             "menu:Zoom",
             "Zoom In",
