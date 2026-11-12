@@ -261,10 +261,17 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   to GPUI actions after Win32 callbacks return. A native subclass routes Alt
   mnemonics and F10 before GPUI's text handling. Windows uses GPUI's HWND DirectX
   swap-chain path so native menu painting has an opaque backing surface.
-  `src/windows_menu/appearance.rs` requests dark native menus and removes the
-  unused checkmark gutter from text-only dropdowns. Its dynamically loaded theme
-  APIs are version-checked; unavailable support and high-contrast mode retain
-  system rendering. Restore the gutter if native checks or icons are introduced.
+  `src/windows_menu/appearance.rs` requests dark native menus. Its dynamically
+  loaded theme APIs are version-checked; unavailable support and high-contrast
+  mode retain system rendering. `src/windows_menu/drawing.rs` uses Win32 owner
+  drawing to match `src/theme.rs` for the menu bar, popup backgrounds, highlights,
+  separators, text, and disabled icons. Windows still owns navigation, submenu
+  placement, and activation. Drawing data exposes MSAAMENUINFO names to assistive
+  technology. Preserve original native styles/data/bitmaps for fallback and
+  teardown, and release adapter/drawing borrows before synchronous native redraws.
+  `src/menu_icons.rs` selects icons by action and rasterizes the toolbox SVGs for
+  native menus. Icon columns align plain entries with illustrated entries.
+  macOS uses 2x template images so AppKit owns their appearance and tint.
   `.github/workflows/windows.yml` builds and tests the x64 MSVC release ZIP,
   setting `GPUI_FXC_PATH` from the installed Windows SDK.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable

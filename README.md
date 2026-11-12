@@ -1,7 +1,7 @@
 # Lime
 
-**Lite Image Editor** for macOS and Windows. Layered editing, native menus,
-and a workspace that keeps the canvas in focus.
+**Lite Image Editor** for macOS and Windows. Layered editing, native menus with
+tool and command icons, and a workspace that keeps the canvas in focus.
 
 ![Lime editing a night skyline, with its toolbox, text controls, and Paths panel](lime-screenshot.jpg)
 

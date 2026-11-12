@@ -588,6 +588,8 @@ pub fn register(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
 
     cx.set_menus(application_menus(cfg!(target_os = "macos")));
+    #[cfg(target_os = "macos")]
+    crate::macos::set_menu_icons();
 }
 
 fn bind_tool_shortcuts(cx: &mut App) {

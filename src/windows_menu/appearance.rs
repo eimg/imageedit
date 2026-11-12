@@ -13,10 +13,7 @@ use windows_sys::Win32::{
     },
     UI::{
         Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
-        WindowsAndMessaging::{
-            GetMenu, GetMenuInfo, MENUINFO, MIM_APPLYTOSUBMENUS, MIM_STYLE, MNS_NOCHECK,
-            SPI_GETHIGHCONTRAST, SetMenuInfo, SystemParametersInfoW,
-        },
+        WindowsAndMessaging::{SPI_GETHIGHCONTRAST, SystemParametersInfoW},
     },
 };
 
@@ -151,30 +148,17 @@ pub(super) fn for_window(hwnd: isize) -> MenuTheme {
     }
 }
 
-pub(super) fn compact_dropdowns(hwnd: isize) -> anyhow::Result<()> {
-    // SAFETY: the adapter owns this live window and its attached menu tree.
-    // Its items are text-only, without icons or checks. Restore that column if
-    // checkable/icon items are added to the canonical menu tree in the future.
-    unsafe {
-        let menu = GetMenu(hwnd as HWND);
-        anyhow::ensure!(!menu.is_null(), "the native menu bar is missing");
-        let mut info = MENUINFO {
-            cbSize: mem::size_of::<MENUINFO>() as u32,
-            fMask: MIM_STYLE,
-            ..Default::default()
+pub(super) fn icon_color() -> u32 {
+    if DARK_ENABLED.with(|enabled| enabled.get() == Some(true)) {
+        crate::theme::TEXT
+    } else {
+        let color = unsafe {
+            windows_sys::Win32::Graphics::Gdi::GetSysColor(
+                windows_sys::Win32::Graphics::Gdi::COLOR_MENUTEXT,
+            )
         };
-        anyhow::ensure!(
-            GetMenuInfo(menu, &mut info) != 0,
-            "could not read native menu style"
-        );
-        info.fMask |= MIM_APPLYTOSUBMENUS;
-        info.dwStyle |= MNS_NOCHECK;
-        anyhow::ensure!(
-            SetMenuInfo(menu, &info) != 0,
-            "could not compact native dropdown menus"
-        );
+        ((color & 0xff) << 16) | (color & 0xff00) | ((color >> 16) & 0xff)
     }
-    Ok(())
 }
 
 #[cfg(test)]

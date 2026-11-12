@@ -33,18 +33,10 @@ use super::numeric::NumericField;
 use super::tooltip::{help_icon, tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
 
-pub(super) const CHROME: u32 = 0x20242c;
-pub(super) const PANEL: u32 = 0x191d24;
-pub(super) const CANVAS: u32 = 0x11141a;
-pub(super) const CHECKER_DARK: u32 = 0x8d95a6;
-pub(super) const CHECKER_LIGHT: u32 = 0xd7dbe3;
-pub(super) const BORDER: u32 = 0x303640;
-pub(super) const TEXT: u32 = 0xe9edf4;
-pub(super) const MUTED: u32 = 0xa3adbd;
-pub(super) const DISABLED: u32 = 0x767f8d;
-pub(super) const HOVER: u32 = 0x2b323d;
-pub(super) const ACCENT: u32 = 0xacc6ff;
-pub(super) const SELECTED: u32 = 0x2c3a54;
+pub(super) use crate::theme::{
+    ACCENT, BORDER, CANVAS, CHECKER_DARK, CHECKER_LIGHT, CHROME, DISABLED, HOVER, MUTED, PANEL,
+    SELECTED, TEXT,
+};
 const HEADER_HEIGHT: f32 = 36.;
 pub(super) const TOOLBOX_DEFAULT_WIDTH: f32 = 220.;
 const TOOLBOX_MIN_WIDTH: f32 = 140.;

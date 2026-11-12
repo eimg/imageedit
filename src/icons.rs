@@ -10,6 +10,21 @@ impl AssetSource for Icons {
             .strip_prefix("cursor-outline/")
             .map_or((path, "1.6"), |path| (path, "4.0"));
         let drawing = match path {
+            "new" => {
+                r#"<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Zm0 0v6h6M8 15h8m-4-4v8"/>"#
+            }
+            "save" => r#"<path d="M4 3h13l4 4v14H3V3h1Zm3 0v6h10V3M7 21v-8h10v8"/>"#,
+            "export" => {
+                r#"<path d="M14 3h7v7m0-7L10 14M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>"#
+            }
+            "undo" => r#"<path d="M3 5v6h6M3 11l4-4a8 8 0 1 1 0 11"/>"#,
+            "redo" => r#"<path d="M21 5v6h-6m6 0-4-4a8 8 0 1 0 0 11"/>"#,
+            "cut" => {
+                r#"<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 12 12M8 16 20 4"/>"#
+            }
+            "paste" => {
+                r#"<path d="M9 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3M9 3h6v4H9zM8 12h8m-8 4h8"/>"#
+            }
             "image" => {
                 r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m3 17 5-5 3 3 4-5 6 7"/>"#
             }
@@ -54,7 +69,13 @@ impl AssetSource for Icons {
                 r#"<path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3"/>"#
             }
             "rotate" => r#"<path d="M4 11a8 8 0 1 1 2 6M4 5v6h6"/>"#,
+            "rotate-right" => r#"<path d="M20 11a8 8 0 1 0-2 6m2-12v6h-6"/>"#,
+            "rotate-half" => r#"<path d="M4 12a8 8 0 0 1 16 0M4 6v6h6m4 0h6v6"/>"#,
             "flip" => r#"<path d="M12 3v18M9 6l-6 12h6V6Zm6 0 6 12h-6V6Z"/>"#,
+            "flip-vertical" => r#"<path d="M3 12h18M6 9l12-6v6H6Zm0 6 12 6v-6H6Z"/>"#,
+            "align-center" => {
+                r#"<path d="M12 3v4m0 10v4M3 12h4m10 0h4"/><rect x="8" y="8" width="8" height="8" rx="1"/>"#
+            }
             "perspective" => {
                 r#"<path d="m5 7 13-3 2 16-14-2L5 7Z"/><circle cx="5" cy="7" r="1.4" fill="black"/><circle cx="18" cy="4" r="1.4" fill="black"/><circle cx="20" cy="20" r="1.4" fill="black"/><circle cx="6" cy="18" r="1.4" fill="black"/>"#
             }

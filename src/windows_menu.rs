@@ -6,15 +6,16 @@
 //! activation back to GPUI actions after the Win32 callback has returned.
 
 mod appearance;
+mod drawing;
 
-use std::{cell::RefCell, collections::HashSet};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use anyhow::{Context as _, Result};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{Action, App, Keymap, Keystroke, OwnedMenu, OwnedMenuItem, Window};
 use muda::{
-    Menu as NativeMenu, MenuEvent, MenuId, MenuItem as NativeMenuItem, MenuTheme,
-    PredefinedMenuItem, Submenu as NativeSubmenu,
+    Icon, IconMenuItem, Menu as NativeMenu, MenuEvent, MenuId, MenuItem as NativeMenuItem,
+    MenuTheme, PredefinedMenuItem, Submenu as NativeSubmenu,
     accelerator::{Key, KeyAccelerator, Modifiers, NamedKey},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -24,9 +25,9 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_F10, VK_MENU, VK_SHIFT},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            DefWindowProcW, MSG, PostMessageW, TranslateMessage, WM_EXITMENULOOP, WM_INITMENUPOPUP,
-            WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_THEMECHANGED,
+            DefWindowProcW, DrawMenuBar, MSG, PostMessageW, TranslateMessage, WM_DPICHANGED,
+            WM_EXITMENULOOP, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYUP, WM_NCACTIVATE, WM_NCDESTROY,
+            WM_NCPAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED,
         },
     },
 };
@@ -49,15 +50,33 @@ struct AttachedMenus {
     hwnd: isize,
     menu: NativeMenu,
     commands: Vec<Command>,
-    items: Vec<NativeMenuItem>,
+    items: Vec<CommandItem>,
     enabled: Vec<Option<bool>>,
     mnemonics: Vec<usize>,
     sync_pending: bool,
-    theme: MenuTheme,
+    drawing: Option<Rc<RefCell<drawing::Menus>>>,
+}
+
+#[derive(Clone)]
+enum CommandItem {
+    Text(NativeMenuItem),
+    Icon(IconMenuItem),
+}
+
+impl CommandItem {
+    fn set_enabled(&self, enabled: bool) {
+        match self {
+            Self::Text(item) => item.set_enabled(enabled),
+            Self::Icon(item) => item.set_enabled(enabled),
+        }
+    }
 }
 
 impl AttachedMenus {
-    fn remove(self) {
+    fn remove(mut self) {
+        // Restore menu data/backgrounds before either the native menu or our
+        // retained drawing buffers are destroyed.
+        drop(self.drawing.take());
         // SAFETY: attachment and teardown run on the HWND's owning UI thread.
         // RemoveWindowSubclass also safely fails if Windows already destroyed it.
         unsafe {
@@ -199,7 +218,7 @@ pub(crate) fn attach(window: &mut Window, cx: &mut App) {
 
 fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     let hwnd = window_hwnd(window)?;
-    let theme = appearance::for_window(hwnd);
+    appearance::for_window(hwnd);
     let menus = cx
         .get_menus()
         .context("no application menus were registered")?;
@@ -216,7 +235,10 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
     // children stay owned by ATTACHED on this UI thread for the window's
     // lifetime. The native subclass installed by muda is removed in `detach`.
     unsafe {
-        menu.init_for_hwnd_with_theme(hwnd, theme)
+        // Our owner drawing supplies the bar colors as well as popup colors.
+        // Disable muda's separate fixed-color UAH bar painter to avoid it
+        // painting over the same items. High contrast uses system rendering.
+        menu.init_for_hwnd_with_theme(hwnd, MenuTheme::Light)
             .context("muda could not attach the menu bar to the window")?;
         if SetWindowSubclass(
             hwnd as HWND,
@@ -230,10 +252,13 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
         }
     }
 
-    if let Err(error) = appearance::compact_dropdowns(hwnd) {
-        eprintln!("Could not remove the empty native menu gutter: {error:#}");
-    }
-
+    let drawing = match drawing::Menus::new(hwnd, &plan) {
+        Ok(drawing) => Some(Rc::new(RefCell::new(drawing))),
+        Err(error) => {
+            eprintln!("Could not prepare menu drawing: {error:#}");
+            None
+        }
+    };
     let enabled = vec![None; plan.commands.len()];
     ATTACHED.with(|attached| {
         *attached.borrow_mut() = Some(AttachedMenus {
@@ -244,10 +269,13 @@ fn try_attach(window: &mut Window, cx: &mut App) -> Result<()> {
             enabled,
             mnemonics,
             sync_pending: false,
-            theme,
+            drawing,
         });
     });
 
+    if let Err(error) = sync_appearance() {
+        eprintln!("Could not configure menu appearance: {error:#}");
+    }
     request_sync(cx);
     Ok(())
 }
@@ -309,10 +337,25 @@ unsafe extern "system" fn keyboard_subclass(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    // Clone only the drawing owner before calling Win32/GDI; never hold the
+    // adapter's RefCell borrow across native callbacks or GPUI action dispatch.
+    let drawing = ATTACHED.with(|attached| {
+        attached.try_borrow().ok().and_then(|attached| {
+            attached
+                .as_ref()
+                .and_then(|attached| attached.drawing.clone())
+        })
+    });
+    if let Some(drawing) = drawing
+        && let Ok(mut drawing) = drawing.try_borrow_mut()
+        && let Some(result) = unsafe { drawing.handle(message, wparam, lparam) }
+    {
+        return result;
+    }
     if message == WM_NCDESTROY {
         unsafe { RemoveWindowSubclass(hwnd, Some(keyboard_subclass), KEYBOARD_SUBCLASS_ID) };
     }
-    if matches!(message, WM_SETTINGCHANGE | WM_THEMECHANGED) {
+    if matches!(message, WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DPICHANGED) {
         REQUESTS.with(|requests| {
             if let Some(sender) = requests.borrow().as_ref() {
                 let _ = sender.unbounded_send(MenuRequest::Appearance);
@@ -391,7 +434,22 @@ unsafe extern "system" fn keyboard_subclass(
             KeyRoute::Forward => {}
         }
     }
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    if matches!(message, WM_NCPAINT | WM_NCACTIVATE) {
+        let drawing = ATTACHED.with(|attached| {
+            attached.try_borrow().ok().and_then(|attached| {
+                attached
+                    .as_ref()
+                    .and_then(|attached| attached.drawing.clone())
+            })
+        });
+        if let Some(drawing) = drawing
+            && let Ok(drawing) = drawing.try_borrow()
+        {
+            drawing.paint_frame_separator();
+        }
+    }
+    result
 }
 
 fn window_hwnd(window: &Window) -> Result<isize> {
@@ -437,29 +495,83 @@ pub(crate) fn request_sync(cx: &mut App) {
 
 fn sync_appearance() -> Result<()> {
     let current = ATTACHED.with(|attached| {
-        attached
-            .borrow()
-            .as_ref()
-            .map(|attached| (attached.hwnd, attached.menu.clone(), attached.theme))
+        attached.borrow().as_ref().map(|attached| {
+            (
+                attached.hwnd,
+                attached.menu.clone(),
+                attached.drawing.clone(),
+            )
+        })
     });
-    let Some((hwnd, menu, previous)) = current else {
+    let Some((hwnd, menu, drawing)) = current else {
         return Ok(());
     };
     let theme = appearance::for_window(hwnd);
-    if theme != previous {
-        // SAFETY: this menu is attached to hwnd; its owner is retained above.
-        unsafe { menu.set_theme_for_hwnd(hwnd, theme) }
-            .context("could not refresh the native menu theme")?;
-        ATTACHED.with(|attached| {
-            if let Some(attached) = attached
-                .borrow_mut()
-                .as_mut()
-                .filter(|attached| attached.hwnd == hwnd)
-            {
-                attached.theme = theme;
-            }
-        });
+    if let Some(drawing) = &drawing {
+        // Restore before changing muda-owned fallback icons. The old HBITMAPs
+        // must stop being referenced before muda replaces/frees them.
+        drawing.borrow_mut().refresh(false)?;
     }
+    let icons = ATTACHED.with(|attached| {
+        attached
+            .borrow()
+            .as_ref()
+            .map(|attached| {
+                attached
+                    .commands
+                    .iter()
+                    .zip(&attached.items)
+                    .filter_map(|(command, item)| {
+                        if let CommandItem::Icon(item) = item {
+                            crate::menu_icons::for_action(command.action.as_ref())
+                                .map(|name| (item.clone(), name))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let pixels =
+        unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd as HWND) }.max(96) / 6;
+    let color = appearance::icon_color();
+    for (item, icon) in icons {
+        let result = crate::menu_icons::rasterize(icon, pixels, color)
+            .and_then(|rgba| Ok(Icon::from_rgba(rgba, pixels, pixels)?));
+        match result {
+            Ok(icon) => item.set_icon(Some(icon)),
+            Err(error) => eprintln!("Could not refresh menu icon: {error:#}"),
+        }
+    }
+    let mut custom = false;
+    if let Some(drawing) = drawing {
+        let result = {
+            let mut drawing = drawing.borrow_mut();
+            drawing
+                .capture_bitmaps()
+                .and_then(|()| drawing.refresh(theme == MenuTheme::Dark))
+        };
+        match result {
+            Ok(()) => custom = theme == MenuTheme::Dark,
+            Err(error) => {
+                eprintln!("Could not refresh menu drawing: {error:#}");
+                // Drop restores any partially changed native items. Retain a
+                // working native menu even when a GDI allocation fails.
+                ATTACHED.with(|attached| {
+                    if let Some(attached) = attached.borrow_mut().as_mut() {
+                        attached.drawing = None;
+                    }
+                });
+            }
+        }
+    }
+    let native_theme = if custom { MenuTheme::Light } else { theme };
+    unsafe { menu.set_theme_for_hwnd(hwnd, native_theme) }
+        .context("could not refresh the native menu theme")?;
+    // Both calls may synchronously measure/draw the menu; no drawing or adapter
+    // borrow remains live here.
+    unsafe { DrawMenuBar(hwnd as HWND) };
     Ok(())
 }
 
@@ -475,19 +587,24 @@ fn sync_enabled(cx: &mut App) {
         return;
     };
 
-    ATTACHED.with(|attached| {
+    let updates = ATTACHED.with(|attached| {
         let mut attached = attached.borrow_mut();
         let Some(attached) = attached.as_mut() else {
-            return;
+            return Vec::new();
         };
+        let mut updates = Vec::new();
         for (index, enabled) in states.into_iter().enumerate() {
-            if attached.enabled[index] == Some(enabled) {
-                continue;
+            if attached.enabled[index] != Some(enabled) {
+                updates.push((attached.items[index].clone(), enabled));
+                attached.enabled[index] = Some(enabled);
             }
-            attached.items[index].set_enabled(enabled);
-            attached.enabled[index] = Some(enabled);
         }
+        updates
     });
+    for (item, enabled) in updates {
+        // muda redraws synchronously; drawing callbacks need to borrow ATTACHED.
+        item.set_enabled(enabled);
+    }
 }
 
 fn dispatch(cx: &mut App, id: &MenuId) -> Result<()> {
@@ -568,7 +685,7 @@ fn key_accelerator(keystroke: &Keystroke) -> Option<KeyAccelerator> {
     Some(KeyAccelerator::new(modifiers, key))
 }
 
-fn build_native_menus(plan: &MenuPlan) -> Result<(NativeMenu, Vec<NativeMenuItem>)> {
+fn build_native_menus(plan: &MenuPlan) -> Result<(NativeMenu, Vec<CommandItem>)> {
     let menu = NativeMenu::new();
     let mut top_level_mnemonics = HashSet::new();
     let mut items = Vec::with_capacity(plan.commands.len());
@@ -584,7 +701,7 @@ fn build_submenu(
     section: &MenuSection,
     plan: &MenuPlan,
     name_mnemonics: &mut HashSet<char>,
-    items: &mut Vec<NativeMenuItem>,
+    items: &mut Vec<CommandItem>,
 ) -> Result<NativeSubmenu> {
     let submenu = NativeSubmenu::new(mnemonic_label(&section.label, name_mnemonics), true);
     let mut item_mnemonics = HashSet::new();
@@ -599,19 +716,26 @@ fn build_submenu(
             }
             MenuNode::Command(index) => {
                 let command = &plan.commands[*index];
-                let item = NativeMenuItem::with_id(
-                    format!("{COMMAND_ID_PREFIX}{index}"),
-                    mnemonic_label(&command.label, &mut item_mnemonics),
-                    true,
-                    None,
-                );
-                if let Err(error) = item.set_key_accelerator(command.accelerator.clone()) {
-                    eprintln!(
-                        "Could not show the accelerator for {:?}: {error}",
-                        command.label
-                    );
-                }
-                submenu.append(&item)?;
+                let id = format!("{COMMAND_ID_PREFIX}{index}");
+                let label = mnemonic_label(&command.label, &mut item_mnemonics);
+                let icon = crate::menu_icons::for_action(command.action.as_ref())
+                    .map(|name| {
+                        let rgba =
+                            crate::menu_icons::rasterize(name, 16, appearance::icon_color())?;
+                        Ok::<_, anyhow::Error>(Icon::from_rgba(rgba, 16, 16)?)
+                    })
+                    .transpose()?;
+                let item = if let Some(icon) = icon {
+                    let item = IconMenuItem::with_id(id, label, true, Some(icon), None);
+                    item.set_key_accelerator(command.accelerator.clone())?;
+                    submenu.append(&item)?;
+                    CommandItem::Icon(item)
+                } else {
+                    let item = NativeMenuItem::with_id(id, label, true, None);
+                    item.set_key_accelerator(command.accelerator.clone())?;
+                    submenu.append(&item)?;
+                    CommandItem::Text(item)
+                };
                 debug_assert_eq!(items.len(), *index);
                 items.push(item);
             }

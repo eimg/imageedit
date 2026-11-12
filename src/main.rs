@@ -11,12 +11,14 @@ mod geometry;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
+mod menu_icons;
 mod paint;
 mod paths;
 mod preview;
 mod project;
 mod selection;
 mod text;
+mod theme;
 mod transform;
 #[cfg(target_os = "windows")]
 mod windows_menu;
