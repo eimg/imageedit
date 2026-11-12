@@ -443,7 +443,7 @@ mod tests {
                 .iter()
                 .filter(|item| matches!(item, MenuNode::Command(_)))
                 .count(),
-            7
+            8
         );
     }
 
