@@ -1968,6 +1968,17 @@ impl Workspace {
                                             super::paint_ui::BrushField::Flow,
                                             cx,
                                         )))
+                                        .when(self.tool != Tool::Pencil, |panel| {
+                                            use crate::paint::smoothing::Smoothing;
+                                            let selected = self.brush_smoothing();
+                                            panel.child(div().flex().flex_col().gap_1()
+                                                .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Smoothing"))
+                                                .child(segmented([
+                                                    ("Off", Smoothing::Off), ("Light", Smoothing::Light), ("Strong", Smoothing::Strong),
+                                                ].map(|(label, mode)| choice_button(label, selected == mode).on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_brush_smoothing(mode, cx);
+                                                })))).w_full()))
+                                        })
                                 },
                             ),
 

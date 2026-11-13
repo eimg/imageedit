@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use gpui::{Context, Pixels, Point, RenderImage, Window};
 use image::RgbaImage;
@@ -6,11 +6,13 @@ use image::RgbaImage;
 use super::Workspace;
 use crate::commands::Tool;
 use crate::document::{self, LayerId, solid_color};
+use crate::paint::smoothing::{self, Smoothing, StrokeSmoother};
 use crate::paint::{Stroke, StrokeKind, TileKey};
 use crate::preview::PixelRect;
 use crate::selection::Selection;
 
 pub(super) struct StrokeSession {
+    token: u64,
     layer: LayerId,
     offset: (i32, i32),
     source: Arc<RgbaImage>,
@@ -18,8 +20,15 @@ pub(super) struct StrokeSession {
     canvas: (u32, u32),
     stroke: Stroke,
     last_point: (f64, f64),
+    smoothing: Option<SmoothingSession>,
     clone_delta: Option<(i64, i64)>,
     patches: BTreeMap<TileKey, StrokePaint>,
+}
+
+struct SmoothingSession {
+    filter: StrokeSmoother,
+    started: Instant,
+    timer_pending: bool,
 }
 
 #[derive(Clone)]
@@ -104,6 +113,7 @@ pub(super) struct ClonePreview {
     point: (u32, u32),
     delta: Option<(i64, i64)>,
     bounds: PixelRect,
+    destination: Option<(f64, f64)>,
 }
 
 impl ClonePreview {
@@ -111,6 +121,7 @@ impl ClonePreview {
         if !destination.0.is_finite() || !destination.1.is_finite() {
             return None;
         }
+        let destination = self.destination.unwrap_or(destination);
         let (x, y) = self.delta.map_or(
             (i64::from(self.point.0), i64::from(self.point.1)),
             |(dx, dy)| {
@@ -134,6 +145,7 @@ pub(super) struct BrushSettings {
     sharpen: crate::paint::Brush,
     clone_stamp: crate::paint::Brush,
     pub(super) outline: crate::paint::Brush,
+    smoothing: [Smoothing; 5],
 }
 
 impl Default for BrushSettings {
@@ -149,11 +161,33 @@ impl Default for BrushSettings {
             sharpen: Default::default(),
             clone_stamp: Default::default(),
             outline: Default::default(),
+            smoothing: [Smoothing::Off; 5],
         }
     }
 }
 
 impl BrushSettings {
+    fn smoothing_index(tool: Tool) -> Option<usize> {
+        match tool {
+            Tool::Brush => Some(0),
+            Tool::Eraser => Some(1),
+            Tool::Blur => Some(2),
+            Tool::Sharpen => Some(3),
+            Tool::CloneStamp => Some(4),
+            _ => None,
+        }
+    }
+
+    fn smoothing(&self, tool: Tool) -> Smoothing {
+        Self::smoothing_index(tool).map_or(Smoothing::Off, |index| self.smoothing[index])
+    }
+
+    fn set_smoothing(&mut self, tool: Tool, mode: Smoothing) {
+        if let Some(index) = Self::smoothing_index(tool) {
+            self.smoothing[index] = mode;
+        }
+    }
+
     fn get(&self, tool: Tool) -> &crate::paint::Brush {
         match tool {
             Tool::Pencil => &self.pencil,
@@ -215,7 +249,28 @@ impl Workspace {
             point: source.point,
             delta,
             bounds: target.sample_bounds(),
+            destination: self
+                .stroke
+                .as_ref()
+                .filter(|stroke| stroke.smoothing.is_some())
+                .map(|stroke| {
+                    (
+                        stroke.last_point.0 + f64::from(stroke.offset.0),
+                        stroke.last_point.1 + f64::from(stroke.offset.1),
+                    )
+                }),
         })
+    }
+
+    pub(super) fn brush_smoothing(&self) -> Smoothing {
+        self.brushes.smoothing(self.tool)
+    }
+
+    pub(super) fn set_brush_smoothing(&mut self, mode: Smoothing, cx: &mut Context<Self>) {
+        if self.stroke.is_none() {
+            self.brushes.set_smoothing(self.tool, mode);
+            cx.notify();
+        }
     }
 
     pub(super) fn set_clone_sampling(&mut self, sample_all: bool, cx: &mut Context<Self>) {
@@ -400,7 +455,10 @@ impl Workspace {
         if matches!(kind, StrokeKind::Clone { .. }) && self.clone_sample_all {
             stroke = stroke.with_clone_source(tab.document.canvas.pixels.clone(), offset);
         }
+        let smoothing = self.brush_smoothing();
+        let token = self.stroke_token.wrapping_add(1);
         let mut session = StrokeSession {
+            token,
             layer: id,
             offset,
             source,
@@ -408,6 +466,14 @@ impl Workspace {
             canvas,
             stroke,
             last_point: here,
+            smoothing: (smoothing != Smoothing::Off)
+                .then(|| StrokeSmoother::new(smoothing, here))
+                .flatten()
+                .map(|filter| SmoothingSession {
+                    filter,
+                    started: Instant::now(),
+                    timer_pending: false,
+                }),
             clone_delta: match kind {
                 StrokeKind::Clone { dx, dy } => Some((dx, dy)),
                 _ => None,
@@ -422,6 +488,7 @@ impl Workspace {
         }
         session.paint(here.0, here.1);
         session.last_point = here;
+        self.stroke_token = token;
         self.stroke = Some(session);
         self.refresh_stroke_patch(window, cx);
         if self.tool == Tool::CloneStamp {
@@ -453,12 +520,54 @@ impl Workspace {
             return;
         };
         let here = local_point(point, session.offset);
-        if (here.0 - session.last_point.0).hypot(here.1 - session.last_point.1) < 1e-3 {
+        if session.smoothing.is_none()
+            && (here.0 - session.last_point.0).hypot(here.1 - session.last_point.1) < 1e-3
+        {
             return;
         }
-        session.paint(here.0, here.1);
-        session.last_point = here;
+        session.input(here);
         self.refresh_stroke_patch(window, cx);
+        self.schedule_stroke_smoothing(window, cx);
+    }
+
+    fn schedule_stroke_smoothing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.stroke.as_mut() else {
+            return;
+        };
+        let Some(smoothing) = session.smoothing.as_mut() else {
+            return;
+        };
+        if smoothing.timer_pending || !smoothing.filter.pending() {
+            return;
+        }
+        smoothing.timer_pending = true;
+        let token = session.token;
+        cx.spawn_in(window, async move |workspace, cx| {
+            loop {
+                cx.background_executor().timer(smoothing::TICK).await;
+                let pending = workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        let Some(session) = workspace
+                            .stroke
+                            .as_mut()
+                            .filter(|session| session.token == token)
+                        else {
+                            return false;
+                        };
+                        let pending = session.advance_smoothing();
+                        workspace.refresh_stroke_patch(window, cx);
+                        if workspace.tool == Tool::CloneStamp {
+                            cx.notify();
+                        }
+                        pending
+                    })
+                    .unwrap_or(false);
+                if !pending {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub(super) fn finish_stroke(
@@ -480,12 +589,9 @@ impl Workspace {
             return;
         };
         if let Some(point) = point {
-            session.last_point = local_point(point, session.offset);
-            session.paint(session.last_point.0, session.last_point.1);
+            session.input(local_point(point, session.offset));
         }
-        session.stroke.finish(&session.source, |x, y| {
-            selection_coverage(&session.selection, session.offset, session.canvas, x, y)
-        });
+        session.finish_pixels();
         if !session.stroke.changed() {
             self.cancel_stroke(window, cx);
             return;
@@ -602,10 +708,67 @@ impl Workspace {
 }
 
 impl StrokeSession {
+    fn input(&mut self, point: (f64, f64)) {
+        let at = self
+            .smoothing
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |smoothing| {
+                smoothing.started.elapsed()
+            });
+        self.input_at(point, at);
+    }
+
+    fn input_at(&mut self, point: (f64, f64), at: std::time::Duration) {
+        if let Some(smoothing) = self.smoothing.as_mut() {
+            let points = smoothing.filter.input(point, at);
+            for (x, y) in points {
+                self.paint(x, y);
+            }
+        } else {
+            self.paint(point.0, point.1);
+        }
+    }
+
+    fn advance_smoothing(&mut self) -> bool {
+        let at = self
+            .smoothing
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |smoothing| {
+                smoothing.started.elapsed()
+            });
+        self.advance_smoothing_at(at)
+    }
+
+    fn advance_smoothing_at(&mut self, at: std::time::Duration) -> bool {
+        let Some(smoothing) = self.smoothing.as_mut() else {
+            return false;
+        };
+        let points = smoothing.filter.advance(at);
+        let pending = smoothing.filter.pending();
+        smoothing.timer_pending = pending;
+        for (x, y) in points {
+            self.paint(x, y);
+        }
+        pending
+    }
+
+    fn finish_pixels(&mut self) {
+        if let Some(smoothing) = self.smoothing.as_mut() {
+            let points = smoothing.filter.finish();
+            for (x, y) in points {
+                self.paint(x, y);
+            }
+        }
+        self.stroke.finish(&self.source, |x, y| {
+            selection_coverage(&self.selection, self.offset, self.canvas, x, y)
+        });
+    }
+
     fn paint(&mut self, x: f64, y: f64) {
         self.stroke.sample(x, y, &self.source, |px, py| {
             selection_coverage(&self.selection, self.offset, self.canvas, px, py)
         });
+        self.last_point = (x, y);
     }
 }
 
@@ -670,6 +833,221 @@ fn clone_kind(source: (u32, u32), offset: (i32, i32), here: (f64, f64)) -> Strok
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn smoothing_content() -> document::DocumentContent {
+        let pixels = RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([
+                if (x + y) % 2 == 0 { 220 } else { 30 },
+                (x * 5) as u8,
+                (y * 7) as u8,
+                60 + (x * 4) as u8,
+            ])
+        });
+        let mut content = document::DocumentContent::single_layer("paint".into(), pixels.clone());
+        content.place_layer(content.top_layer_id(), pixels, (2, 3));
+        content
+    }
+
+    fn smoothing_session(
+        content: &document::DocumentContent,
+        kind: StrokeKind,
+        mode: Smoothing,
+        selection: Selection,
+    ) -> StrokeSession {
+        let layer = content.layer(content.top_layer_id()).unwrap();
+        let here = (5.5, 6.5);
+        let mut session = StrokeSession {
+            token: 7,
+            layer: layer.id,
+            offset: layer.offset,
+            source: layer.pixels.clone(),
+            selection,
+            canvas: content.size(),
+            stroke: Stroke::new(
+                kind,
+                image::Rgba([240, 20, 50, 180]),
+                crate::paint::Brush {
+                    diameter: 8,
+                    spacing: 20,
+                    hardness: 60,
+                    opacity: 65,
+                    flow: 25,
+                    buildup: true,
+                },
+            )
+            .with_alpha_lock(layer.locks.alpha),
+            last_point: here,
+            smoothing: (mode != Smoothing::Off).then(|| SmoothingSession {
+                filter: StrokeSmoother::new(mode, here).unwrap(),
+                started: Instant::now(),
+                timer_pending: false,
+            }),
+            clone_delta: None,
+            patches: BTreeMap::new(),
+        };
+        session.paint(here.0, here.1);
+        session
+    }
+
+    #[test]
+    fn smoothing_modes_remain_independent_and_cannot_change_pencil_or_outline_strokes() {
+        let mut settings = BrushSettings::default();
+        let tools = [
+            Tool::Brush,
+            Tool::Eraser,
+            Tool::Blur,
+            Tool::Sharpen,
+            Tool::CloneStamp,
+        ];
+        for tool in tools {
+            assert_eq!(settings.smoothing(tool), Smoothing::Off);
+        }
+        settings.set_smoothing(Tool::Brush, Smoothing::Strong);
+        settings.set_smoothing(Tool::Eraser, Smoothing::Light);
+        assert_eq!(settings.smoothing(Tool::Brush), Smoothing::Strong);
+        assert_eq!(settings.smoothing(Tool::Eraser), Smoothing::Light);
+        for tool in [Tool::Blur, Tool::Sharpen, Tool::CloneStamp] {
+            assert_eq!(settings.smoothing(tool), Smoothing::Off);
+            settings.set_smoothing(tool, Smoothing::Light);
+            assert_eq!(settings.smoothing(tool), Smoothing::Light);
+        }
+        for tool in [Tool::Pencil, Tool::Path, Tool::Move] {
+            settings.set_smoothing(tool, Smoothing::Strong);
+            assert_eq!(settings.smoothing(tool), Smoothing::Off);
+        }
+    }
+
+    #[test]
+    fn smoothed_release_and_idle_catchup_match_preview_and_commit_for_all_paint_kinds() {
+        for kind in [
+            StrokeKind::Paint,
+            StrokeKind::Erase,
+            StrokeKind::Blur,
+            StrokeKind::Sharpen,
+            StrokeKind::Clone { dx: 2, dy: 1 },
+        ] {
+            for locked in [false, true] {
+                if locked && kind == StrokeKind::Erase {
+                    continue;
+                }
+                let mut content = smoothing_content();
+                let layer = content.top_layer_id();
+                content.set_layer_locks(
+                    layer,
+                    document::LayerLocks {
+                        alpha: locked,
+                        position: false,
+                    },
+                );
+                let source = content.layer(layer).unwrap().pixels.clone();
+                let (width, height) = content.size();
+                let selection =
+                    Selection::Rect(PixelRect::new(4, 4, 35, 23)).feather(2, width, height);
+                let mut released =
+                    smoothing_session(&content, kind, Smoothing::Strong, selection.clone());
+                let mut idle =
+                    smoothing_session(&content, kind, Smoothing::Strong, selection.clone());
+                let target = (31.5, 17.5);
+                released.input_at(target, Duration::ZERO);
+                idle.input_at(target, Duration::ZERO);
+                for tick in 1..=16 {
+                    idle.advance_smoothing_at(Duration::from_millis(tick * 8));
+                }
+                assert!(!idle.smoothing.as_ref().unwrap().timer_pending);
+                idle.finish_pixels();
+                released.finish_pixels();
+                assert_eq!(released.last_point, target);
+                assert!(!released.smoothing.as_ref().unwrap().filter.pending());
+                let immediate = crate::paint::apply_stroke(&source, &released.stroke)
+                    .unwrap()
+                    .0;
+                let settled = crate::paint::apply_stroke(&source, &idle.stroke).unwrap().0;
+                assert_eq!(immediate, settled, "{kind:?}, alpha lock {locked}");
+                let preview = content.composite_stroke_tile(
+                    layer,
+                    &released.stroke,
+                    PixelRect::new(0, 0, width, height),
+                );
+                assert_ne!(
+                    content.apply_stroke(layer, &released.stroke),
+                    crate::preview::Dirty::None
+                );
+                assert_eq!(&preview, content.composite().as_ref());
+                assert_eq!(content.layer(layer).unwrap().pixels.as_ref(), &immediate);
+                for (x, y, original) in source.enumerate_pixels() {
+                    let next = immediate.get_pixel(x, y);
+                    if selection.coverage(i64::from(x) + 2, i64::from(y) + 3, width, height) == 0 {
+                        assert_eq!(next, original);
+                    }
+                    if locked {
+                        assert_eq!(next[3], original[3]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_smoothing_keeps_the_raw_stroke_and_cancellation_does_not_write_source_pixels() {
+        let content = smoothing_content();
+        let source = content
+            .layer(content.top_layer_id())
+            .unwrap()
+            .pixels
+            .clone();
+        let original = source.as_ref().clone();
+        let mut raw = smoothing_session(
+            &content,
+            StrokeKind::Paint,
+            Smoothing::Off,
+            Selection::Unrestricted,
+        );
+        let mut reference = Stroke::new(
+            StrokeKind::Paint,
+            image::Rgba([240, 20, 50, 180]),
+            crate::paint::Brush {
+                diameter: 8,
+                spacing: 20,
+                hardness: 60,
+                opacity: 65,
+                flow: 25,
+                buildup: true,
+            },
+        );
+        let points = [(5.5, 6.5), (16.5, 10.5), (12.5, 21.5), (31.5, 17.5)];
+        for (index, point) in points.into_iter().enumerate() {
+            raw.input_at(point, Duration::from_millis(index as u64 * 8));
+            reference.sample(point.0, point.1, &source, |x, y| {
+                if x + 2 < 48 && y + 3 < 32 { 255 } else { 0 }
+            });
+        }
+        raw.finish_pixels();
+        reference.finish(
+            &source,
+            |x, y| if x + 2 < 48 && y + 3 < 32 { 255 } else { 0 },
+        );
+        assert!(raw.smoothing.is_none());
+        assert_eq!(
+            crate::paint::apply_stroke(&source, &raw.stroke).unwrap().0,
+            crate::paint::apply_stroke(&source, &reference).unwrap().0
+        );
+        let mut canceled = smoothing_session(
+            &content,
+            StrokeKind::Erase,
+            Smoothing::Strong,
+            Selection::Unrestricted,
+        );
+        canceled.input_at((30.5, 16.5), Duration::ZERO);
+        canceled.advance_smoothing_at(Duration::from_millis(8));
+        assert!(canceled.smoothing.as_ref().unwrap().filter.pending());
+        drop(canceled);
+        assert_eq!(source.as_ref(), &original);
+        assert!(Arc::ptr_eq(
+            &source,
+            &content.layer(content.top_layer_id()).unwrap().pixels
+        ));
+    }
 
     #[test]
     fn merged_clone_source_accepts_canvas_pixels_beyond_the_target_and_invalidates_changed_context()
@@ -738,6 +1116,7 @@ mod tests {
             point: (4, 2),
             delta: None,
             bounds: PixelRect::new(0, 0, 10, 8),
+            destination: None,
         };
         assert_eq!(fixed.source_at((1.9, 1.1)), Some((4.5, 2.5)));
         assert_eq!(fixed.source_at((2.9, 2.8)), Some((4.5, 2.5)));
@@ -749,10 +1128,16 @@ mod tests {
         assert_eq!(aligned.source_at((2.9, 2.8)), Some((5.5, 3.5)));
         assert_eq!(aligned.source_at((9., 2.)), None);
         assert_eq!(aligned.source_at((f64::NAN, 2.)), None);
+        let smoothed = ClonePreview {
+            destination: Some((1.9, 1.1)),
+            ..aligned
+        };
+        assert_eq!(smoothed.source_at((7.9, 5.1)), Some((4.5, 2.5)));
         let offset = ClonePreview {
             point: (0, 3),
             delta: Some((-3, 1)),
             bounds: PixelRect::new(-2, 1, 8, 5),
+            destination: None,
         };
         assert_eq!(offset.source_at((1.2, 2.2)), Some((-1.5, 3.5)));
         assert_eq!(offset.source_at((0.2, 2.2)), None);

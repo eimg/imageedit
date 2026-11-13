@@ -8,6 +8,8 @@ use image::{Rgba, RgbaImage};
 use crate::filters;
 use crate::preview::PixelRect;
 
+pub mod smoothing;
+
 pub const STROKE_TILE: u32 = 64;
 pub type TileKey = (u32, u32);
 

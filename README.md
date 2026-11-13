@@ -195,6 +195,17 @@ stroke applies another filter pass. Each paint and retouch tool remembers its
 own flow and buildup setting during the session. Path and selection outline
 strokes also limit overlapping dabs to their stroke opacity.
 
+Brush, Eraser, Blur, Sharpen, and Clone Stamp offer **Smoothing: Off / Light /
+Strong** in a full-width switch group directly below a regular Smoothing label. Off starts selected and
+follows the pointer directly. Light steadies small shakes; Strong gives a steadier trace with more lag. When the pointer
+stops, the trace catches up within about 64 ms for Light or 128 ms for Strong.
+Release reaches the exact pointer endpoint immediately and commits the whole
+stroke as one undo step. Escape discards the stroke and its remaining tail.
+Each tool remembers its own smoothing choice for the session. Pencil stays
+unsmoothed for precise pixel placement. Shift-click straight connectors and
+path/selection outline strokes keep their existing geometry. The Clone source
+indicator follows the position actually being painted while smoothing is active.
+
 With **Path** (`P`), click to place anchors or drag to pull their handles. Click
 the first anchor to close a path. **Alt-click a visible curve** to insert an
 anchor while preserving the curve; you can drag the newly inserted point before

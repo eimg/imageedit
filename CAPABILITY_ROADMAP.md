@@ -82,7 +82,7 @@ Implementation considerations for that pass:
       Clone Stamp, and outline strokes.
 - [x] Define stroke opacity separately from dab/flow buildup; expose incremental
       behavior deliberately rather than making spacing determine the meaning.
-- [ ] Optional stroke smoothing with bounded latency.
+- [x] Optional stroke smoothing with bounded latency.
 - [x] Predictable strength and repeat-pass behavior for Blur/Sharpen.
 - [x] Clone aligned/unaligned behavior and scoped source validation.
 - [x] Clone merged sampling and source-position/footprint preview.
@@ -979,7 +979,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 15 — grouped path anchor editing
 
-Implemented; committed at the start of Pass 16:
+Implemented; committed as `ea5da09` at the start of Pass 16:
 
 - Shift-click anchors to add/remove a selection within one path. This changes
   session selection only, without starting a drag, creating an anchor, closing
@@ -1030,3 +1030,58 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Cancel a live move and the very first newly drawn anchor. Switch paths, hide or
   delete one, change tabs/tools, and undo/redo. Confirm no stale group is editable.
   Save/reopen the geometry and check raster pixels are unchanged until Stroke.
+
+
+## Pass 16 — optional bounded stroke smoothing
+
+Implemented; committed at the start of Pass 17:
+
+- Brush, Eraser, Blur, Sharpen, and Clone Stamp offer Off/Light/Strong smoothing
+  in the existing brush options, in a full-width group below a regular mixed-case
+  Smoothing field label with tight spacing, so longer choices remain readable.
+  Each tool remembers its own session setting;
+  Off starts selected. Pencil and path/selection outline strokes remain raw.
+  Smoothing choices cannot change an active gesture's settings.
+- A constant-space, time-based low pass uses a 16/32 ms response for Light/Strong,
+  subdividing catch-up into eight-ms steps and reaching a stationary pointer
+  exactly after 64/128 ms. Duplicate coordinates never extend that deadline.
+  An enabled stroke wakes only while its tail is pending; there is no idle
+  frame polling, input queue, added dependency, or default-mode filter work.
+- Release feeds its final pointer coordinate, drains at most sixteen remaining
+  tail samples synchronously, and then finishes/commits through the existing
+  dirty-tile stroke path. There is no delayed edit after release. Escape,
+  context changes, focus cancellation, or a replaced stroke discard pending
+  work; timer callbacks validate a per-stroke token before updating pixels.
+- Off keeps the direct sampling path and existing raster output. Initial dabs,
+  Shift-click straight connectors, dab spacing, stroke opacity/flow, alpha locks,
+  selection coverage, and layer-local coordinates keep their existing contracts.
+  The Clone source marker follows the actual filtered destination while painting.
+- Invalid/nonfinite input and backward timestamps are rejected. Catch-up work
+  stays bounded even after a long UI pause or extreme finite coordinates.
+  Updated help, README, and AGENTS. No new toolbox tool, project format, package
+  version, release publishing, or housekeeping changes belong to this pass.
+
+Automatic validation: formatting, Clippy with warnings denied, all 364 tests,
+and both release benchmarks pass. Eight new regression tests cover timed response
+against an independent exponential reference, timer-density invariance, jitter
+reduction, exact bounded settling/release, duplicate/invalid/extreme inputs,
+independent per-tool modes, unchanged raw strokes, cancellation without source
+writes, and live-tail/release/preview/commit agreement for all five paint kinds
+with offset layers, soft selections, and alpha locks. The existing Clone marker
+test also checks the filtered destination. `dist/Lime.app` is rebuilt and its
+signature verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Compare Off, Light, and Strong for Brush, Eraser, Blur, Sharpen, and Clone Stamp
+  at Fit and high zoom after panning. Draw fast curves and small shakes, stop
+  without releasing, then release. Check finite catch-up, exact endpoints, and
+  independent remembered choices. Pencil and outline strokes should stay raw.
+- Try very short strokes, rapid release, repeated identical pointer positions,
+  and Shift-click straight connectors. Undo/redo each completed stroke in one
+  step, and check subsequent Shift-click starts at the exact last endpoint.
+- Paint on offset layers with soft selections, alpha lock, Buildup/Flow, and
+  different spacing. Check preview/commit agreement and Clone's source marker.
+- Cancel a live tail, immediately start another stroke, change tabs/layers/tools,
+  and lose/regain app focus. Confirm canceled work cannot resume or change the
+  new target. Changing smoothing alone should not dirty a document.

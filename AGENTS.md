@@ -135,6 +135,16 @@ Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
 pixels under the brush. Blur and Sharpen have no shortcut.
+Brush, Eraser, Blur, Sharpen, and Clone Stamp have independent session smoothing
+settings: Off (default), Light, and Strong, shown in a full-width segmented group
+below a regular mixed-case Smoothing field label with tight label/control spacing. Pencil and outline strokes stay
+unsmoothed. Light/Strong use time-based responses of 16/32 ms and finite settling
+windows of 64/128 ms. A short-lived eight-ms timer catches up when the pointer
+stops, sleeps when settled, and validates a per-stroke token before touching
+live pixels. Off bypasses the filter and timer. Release drains the remaining
+bounded tail synchronously to the exact endpoint before the ordinary single
+stroke commit; cancellation discards it. Shift-click connectors remain straight.
+The Clone source indicator uses the filtered destination during a smoothed stroke.
 The paint and retouch tools retain independent brush settings during the session;
 path and selection outlines share their own settings. Opacity limits each stroke
 relative to its starting pixels. A 16-bit coverage buffer per touched tile keeps
@@ -341,6 +351,11 @@ document is a single plain layer without paths, guides, or editable text.
   original pixels. Only changed pixel tiles invalidate the live preview.
   It also samples linear and radial gradients
   and strokes a polyline in one pass, skipping a repeated endpoint.
+  `src/paint/smoothing.rs` implements the bounded, constant-space timed stroke
+  filter. It rejects nonfinite inputs/backward timestamps, advances in at most
+  sixteen short tail segments, and drains the same curve on release. Duplicate
+  pointer coordinates do not postpone settling. `src/workspace/paint_ui.rs`
+  owns its per-stroke clock and token-checked wakeups, separately from dab spacing.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
   preview and owns the per-tool brush settings. Release commits dirty regions
   in one undo step. Its scoped CloneSource validates tab/layer geometry and
