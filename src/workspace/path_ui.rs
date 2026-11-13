@@ -10,7 +10,7 @@ use super::view::{
     section_label, segmented, step_button,
 };
 use crate::commands::{PathToSelection, SelectionToPath};
-use crate::paths::{self, Anchor, AnchorId, PathId, VectorPath};
+use crate::paths::{self, Anchor, AnchorId, HandleMode, PathId, VectorPath};
 use crate::preview::Dirty;
 
 const HIT_PIXELS: f32 = 8.0;
@@ -28,6 +28,7 @@ enum PathEdit {
     },
     MovePoint {
         anchor: AnchorId,
+        base: Anchor,
         grab: (f64, f64),
         down: (f64, f64),
     },
@@ -35,6 +36,7 @@ enum PathEdit {
         anchor: AnchorId,
         incoming: bool,
         grab: (f64, f64),
+        mode: HandleMode,
     },
 }
 
@@ -53,6 +55,73 @@ enum Target {
 }
 
 impl Workspace {
+    pub(super) fn path_edit_options(&self, cx: &Context<Self>) -> Div {
+        let enabled = self.path_gesture.is_none()
+            && self.active_tab().is_some_and(|tab| {
+                !tab.busy()
+                    && self.path_anchor.is_some_and(|(path, anchor)| {
+                        tab.document.content.active_path().is_some_and(|active| {
+                            active.id == path && active.visible && active.anchor(anchor).is_some()
+                        })
+                    })
+            });
+        div().flex().flex_col().gap_2()
+            .child(section_label("HANDLE DRAG"))
+            .child(segmented([
+                ("Independent", HandleMode::Independent), ("Aligned", HandleMode::Aligned), ("Symmetric", HandleMode::Symmetric),
+            ].map(|(label, mode)| choice_button(label, self.path_handle_mode == mode).on_click(cx.listener(move |this, _, _, cx| {
+                if this.path_gesture.is_none() { this.path_handle_mode = mode; cx.notify(); }
+            })))))
+            .child(section_label("SELECTED ANCHOR"))
+            .child(div().flex().gap_2().children([
+                ("Corner", false, "Collapse both handles at the selected anchor"),
+                ("Smooth", true, "Align handles, preserving their lengths or creating them from neighboring points"),
+            ].map(|(label, smooth, help)| option_action(label, false).flex_1().tooltip(tooltip(help))
+                .when(enabled, |button| button.on_click(cx.listener(move |this, _, window, cx| this.shape_selected_anchor(smooth, window, cx))))
+                .when(!enabled, |button| button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)))))
+    }
+
+    fn shape_selected_anchor(&mut self, smooth: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.path_gesture.is_some() || self.form.is_some() || self.dialog_open {
+            return;
+        }
+        let Some((id, anchor)) = self.path_anchor else {
+            return;
+        };
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            return;
+        };
+        let Some(mut path) = tab
+            .document
+            .content
+            .active_path()
+            .filter(|path| path.id == id && path.visible)
+            .cloned()
+        else {
+            return;
+        };
+        let changed = if smooth {
+            path.make_smooth(anchor)
+        } else {
+            path.make_corner(anchor)
+        };
+        if !changed {
+            return;
+        }
+        self.path_hold = Some(path.clone());
+        self.edit_content(
+            move |content, _, _| {
+                if content.upsert_path(path) {
+                    Dirty::Unpainted
+                } else {
+                    Dirty::None
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn bind_path_actions(&self, root: Div, cx: &Context<Self>) -> Div {
         let available = self.active_tab().is_some_and(|tab| {
             !tab.busy()
@@ -263,8 +332,12 @@ impl Workspace {
 
     fn select_path(&mut self, id: PathId, cx: &mut Context<Self>) {
         if let Some(index) = self.active
+            && !self.tabs[index].busy()
             && self.tabs[index].document.content.select_path(id)
         {
+            self.path_anchor = None;
+            self.path_gesture = None;
+            self.path_hold = None;
             self.tabs[index].notice = None;
             cx.notify();
         }
@@ -342,6 +415,7 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        insert: bool,
         cx: &mut Context<Self>,
     ) {
         if self.active_tab().is_none_or(|tab| tab.busy()) || self.path_gesture.is_some() {
@@ -377,12 +451,19 @@ impl Workspace {
                     anchor,
                     incoming,
                     grab: (at.0 - point.0, at.1 - point.1),
+                    mode: self.path_handle_mode,
                 },
-                Target::Anchor { anchor, at, .. } => PathEdit::MovePoint {
-                    anchor,
-                    grab: (at.0 - point.0, at.1 - point.1),
-                    down: point,
-                },
+                Target::Anchor { anchor, at, .. } => {
+                    let Some(base) = path.anchor(anchor).copied() else {
+                        return;
+                    };
+                    PathEdit::MovePoint {
+                        anchor,
+                        base,
+                        grab: (at.0 - point.0, at.1 - point.1),
+                        down: point,
+                    }
+                }
             };
             self.path_anchor = match &edit {
                 PathEdit::MovePoint { anchor, .. } | PathEdit::MoveHandle { anchor, .. } => {
@@ -394,6 +475,65 @@ impl Workspace {
                 baseline: Some(path.clone()),
                 path,
                 edit,
+            });
+            cx.notify();
+            return;
+        }
+        if insert {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let active = tab.document.content.active_path_id();
+            let radius = self.path_hit_radius(scale);
+            let mut nearest = None;
+            for path in tab
+                .document
+                .content
+                .paths()
+                .iter()
+                .filter(|path| path.visible && Some(path.id) == active)
+                .chain(
+                    tab.document
+                        .content
+                        .paths()
+                        .iter()
+                        .filter(|path| path.visible && Some(path.id) != active),
+                )
+            {
+                if let Some(hit) = path.nearest_segment(point, radius)
+                    && nearest.as_ref().is_none_or(
+                        |(_, best): &(&VectorPath, paths::SegmentHit)| hit.distance < best.distance,
+                    )
+                {
+                    nearest = Some((path, hit));
+                }
+            }
+            let Some((baseline, hit)) = nearest else {
+                self.notice("Alt-click a visible curve to insert an anchor.", cx);
+                return;
+            };
+            if baseline.anchors.len() >= paths::MAX_ANCHORS {
+                self.notice("This path has enough anchors.", cx);
+                return;
+            }
+            let Some(id) = tab.document.content.next_anchor_id() else {
+                return;
+            };
+            let baseline = baseline.clone();
+            let mut path = baseline.clone();
+            let Some(anchor) = path.split_segment(hit.segment, hit.t, id) else {
+                return;
+            };
+            self.path_anchor = Some((path.id, id));
+            self.path_gesture = Some(PathGesture {
+                baseline: Some(baseline),
+                path,
+                edit: PathEdit::MovePoint {
+                    anchor: id,
+                    base: anchor,
+                    grab: (anchor.point.0 - point.0, anchor.point.1 - point.1),
+                    down: point,
+                },
             });
             cx.notify();
             return;
@@ -472,15 +612,9 @@ impl Workspace {
                 anchor.handle_out = point;
                 anchor.handle_in = (origin.0 - delta.0, origin.1 - delta.1);
             }
-            PathEdit::MovePoint { anchor, grab, .. } => {
-                let Some(base) = gesture
-                    .baseline
-                    .as_ref()
-                    .and_then(|path| path.anchor(anchor))
-                    .copied()
-                else {
-                    return;
-                };
+            PathEdit::MovePoint {
+                anchor, base, grab, ..
+            } => {
                 let next = (point.0 + grab.0, point.1 + grab.1);
                 let delta = (next.0 - base.point.0, next.1 - base.point.1);
                 let Some(anchor) = gesture.path.anchor_mut(anchor) else {
@@ -494,16 +628,22 @@ impl Workspace {
                 anchor,
                 incoming,
                 grab,
+                mode,
             } => {
                 let next = (point.0 + grab.0, point.1 + grab.1);
                 let Some(anchor) = gesture.path.anchor_mut(anchor) else {
                     return;
                 };
-                if incoming {
-                    anchor.handle_in = next;
-                } else {
-                    anchor.handle_out = next;
-                }
+                let Some(base) = gesture
+                    .baseline
+                    .as_ref()
+                    .and_then(|path| path.anchor(anchor.id))
+                    .copied()
+                else {
+                    return;
+                };
+                *anchor = base;
+                anchor.move_handle(incoming, next, mode);
             }
         }
         cx.notify();
@@ -615,6 +755,9 @@ impl Workspace {
     }
 
     pub(super) fn delete_path_anchor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_none_or(|tab| tab.busy()) {
+            return;
+        }
         self.path_gesture = None;
         let Some(tab) = self.active_tab() else {
             return;
@@ -629,6 +772,7 @@ impl Workspace {
         } else {
             return;
         };
+        self.path_anchor = None;
         self.edit_content(
             move |content, _, _| {
                 if content.delete_anchor(path_id, anchor_id) {
@@ -771,5 +915,86 @@ impl Workspace {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Change, Tab, history::State};
+    use super::*;
+
+    fn publish(tab: &mut Tab, state: State, change: Change) -> bool {
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        tab.publish_change(
+            tab.history.generation(),
+            change,
+            Some((state.content, state.active_layer, state.selection, patch)),
+            1,
+        )
+        .0
+    }
+
+    #[test]
+    fn inserted_and_shaped_anchor_undo_redo_preserves_shared_pixels_and_saved_revision() {
+        let mut tab = super::super::tests::opacity_tab();
+        let original = VectorPath {
+            id: PathId(1),
+            visible: true,
+            closed: false,
+            anchors: vec![
+                Anchor {
+                    id: AnchorId(1),
+                    point: (0.2, 0.2),
+                    handle_in: (0.2, 0.2),
+                    handle_out: (0.2, 1.8),
+                },
+                Anchor {
+                    id: AnchorId(2),
+                    point: (1.8, 1.8),
+                    handle_in: (1.8, 0.2),
+                    handle_out: (1.8, 1.8),
+                },
+            ],
+        };
+        assert!(tab.document.content.upsert_path(original.clone()));
+        let image = tab.document.canvas.pixels.clone();
+        let layer = tab
+            .document
+            .content
+            .layer(tab.active_layer)
+            .unwrap()
+            .pixels
+            .clone();
+        let mut edited = original.clone();
+        let id = tab.document.content.next_anchor_id().unwrap();
+        edited.split_segment(0, 0.37, id).unwrap();
+        assert!(edited.make_corner(id));
+        assert!(edited.make_smooth(id));
+        let mut state = tab.state();
+        assert!(state.content.upsert_path(edited.clone()));
+        assert!(publish(&mut tab, state, Change::Edit));
+        assert!(tab.history.is_dirty());
+        assert!(std::sync::Arc::ptr_eq(&tab.document.canvas.pixels, &image));
+        assert!(std::sync::Arc::ptr_eq(
+            &tab.document.content.layer(tab.active_layer).unwrap().pixels,
+            &layer
+        ));
+        assert_eq!(tab.document.content.active_path().unwrap(), &edited);
+        let previous = tab.history.undo_target().unwrap().0.clone();
+        assert!(publish(&mut tab, previous, Change::Undo));
+        assert_eq!(tab.document.content.active_path().unwrap(), &original);
+        assert!(!tab.history.is_dirty());
+        let next = tab.history.redo_target().unwrap().0.clone();
+        assert!(publish(&mut tab, next, Change::Redo));
+        assert_eq!(tab.document.content.active_path().unwrap(), &edited);
+        assert!(tab.history.is_dirty());
+        assert!(std::sync::Arc::ptr_eq(&tab.document.canvas.pixels, &image));
     }
 }

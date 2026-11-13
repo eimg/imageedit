@@ -161,8 +161,9 @@ overwritten by Save.
 
 ## Paths and gradients
 
-- [ ] Explicit corner/smooth anchors and linked/independent handles.
-- [ ] Insert anchors on segments and select/move multiple anchors.
+- [x] Corner/Smooth anchor commands and independent/aligned/symmetric handle drags.
+- [x] Insert anchors on segments without changing the curve.
+- [ ] Select and move multiple anchors together.
 - [x] Editable intermediate gradient stops and Reverse.
 - [x] Reusable session gradient presets.
 - [ ] Persist a named gradient library across app launches.
@@ -855,7 +856,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 13 — gradient stops, direction, and session presets
 
-Implemented; committed at the start of Pass 14:
+Implemented; committed as `9fc37f1` at the start of Pass 14:
 
 - Gradient retains dynamic FG → BG / FG → Clear and adds Custom palettes with
   up to eight RGBA stops. Select a colored stop chip, use the existing RGB picker,
@@ -911,3 +912,66 @@ Manual interaction testing stays with the maintainer. Useful checks:
   duplicate saves do not fill another slot, and deletion leaves the preview intact.
 - Check Apply/Cancel access and independent Layers scrolling with eight stops in
   the options panel. Presets deliberately reset with a new workspace session.
+
+## Pass 14 — path anchor insertion and handle precision
+
+Implemented; committed at the start of Pass 15:
+
+- Alt-click a visible path segment to insert an anchor by de Casteljau subdivision
+  without changing the represented cubic. Existing anchor/handle hits take
+  priority. The new point can be dragged immediately within the same gesture;
+  release commits one path edit and Escape discards the draft. Closed paths can
+  split their closing segment without changing the first anchor or closed state.
+- Segment hit testing uses the existing eight-screen-point path slop, preserving
+  behavior through Fit, fixed zoom, and pan. Bounded subdivision prunes control
+  bounds; chord-projection inversion and Newton refinement locate the curve even
+  with stationary, nonuniform straight-cubic parameterizations. Anchor limits,
+  finite coordinates, fresh IDs, and non-endpoint split parameters are enforced.
+- Path options now expose selected-anchor Corner/Smooth actions. Corner collapses
+  both handles. Smooth aligns them while preserving existing handle lengths,
+  initializing missing handles from neighboring anchor distances. Degenerate and
+  identity actions do not create history. The selected anchor has a larger
+  outlined marker, including during a live insertion/drag preview.
+- Handle Drag offers Independent (the existing default), Aligned (rotate the
+  opposite handle while retaining its length), and Symmetric (mirror direction
+  and length). These are session editing preferences; selecting one alone does
+  not reshape an anchor. Newly created handles still begin symmetric. Each drag
+  uses its baseline anchor, avoiding repeated-update drift. Clicking a handle
+  without moving it never couples or reshapes the opposite handle.
+- Path-row switches clear stale anchor selection and refuse changes while a tab
+  is busy. Deleting an anchor clears its selection, and busy tabs reject deletion.
+  Geometry commands use the normal metadata/history path without rebuilding or
+  changing raster pixels. Saved geometry opens in the existing project format;
+  there is no new per-anchor mode metadata or format-version change.
+- Multi-anchor selection/movement remains planned as a separate increment.
+  Updated help, README, and AGENTS. No toolbox tool, dependency, package-version,
+  installer, icon, or publishing changes belong to this capability pass.
+
+Automatic validation: formatting, Clippy with warnings denied, all 344 capability
+snapshot tests, and both release benchmarks pass. Seven new regression tests
+cover exact open/closing cubic subdivision, hit-test geometry and stationary
+parameters, invalid/over-budget/large-finite edits, handle coupling, corner/smooth
+identity and endpoints, existing-format project round trips, and undo/redo with
+shared pixel buffers and saved-revision restoration. The shared workspace also
+passes formatting, Clippy, and all 349 tests. Release validation uses a temporary
+snapshot of the last complete build plus this pass, excluding concurrent
+housekeeping changes. Its separate app bundle is rebuilt and signed
+without overwriting the other agent's installer artifacts. No interactive or
+visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Alt-click straight, curved, crossing, and closing path segments at Fit and high
+  zoom, including after pan. Verify a click inserts on the curve without a jump,
+  a drag moves the inserted point, and one Undo restores the exact old path.
+  Try near existing anchors/handles and away from curves; normal drawing and
+  first-anchor closure should retain their existing gestures.
+- Select different anchors and exercise Corner/Smooth, including open endpoints,
+  unequal handles, collapsed handles, and repeated identity commands. Verify the
+  selected marker and that no raster pixels change until an explicit path stroke.
+- Drag incoming/outgoing handles in every Handle Drag mode, away and back to the
+  original point. Check opposite length/alignment, identity clicks, cancellation,
+  and one-step undo/redo. Confirm choosing a drag preference creates no history.
+- Switch paths/tabs/tools, hide/delete a path, and check selected-anchor controls
+  cannot edit a stale or hidden target. Save/reopen `.lime`, convert paths to
+  selections, and stroke them to confirm the edited geometry is retained.

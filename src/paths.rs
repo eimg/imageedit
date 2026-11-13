@@ -13,6 +13,21 @@ pub struct PathId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AnchorId(pub u64);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HandleMode {
+    #[default]
+    Independent,
+    Aligned,
+    Symmetric,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SegmentHit {
+    pub segment: usize,
+    pub t: f64,
+    pub distance: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Anchor {
     pub id: AnchorId,
@@ -34,6 +49,53 @@ impl Anchor {
     pub fn finite(self) -> bool {
         finite(self.point) && finite(self.handle_in) && finite(self.handle_out)
     }
+
+    pub fn move_handle(&mut self, incoming: bool, next: (f64, f64), mode: HandleMode) -> bool {
+        if !finite(next) {
+            return false;
+        }
+        if next
+            == if incoming {
+                self.handle_in
+            } else {
+                self.handle_out
+            }
+        {
+            return false;
+        }
+        let mut edited = *self;
+        let other = if incoming {
+            self.handle_out
+        } else {
+            self.handle_in
+        };
+        let delta = (next.0 - self.point.0, next.1 - self.point.1);
+        let length = delta.0.hypot(delta.1);
+        let opposite = match mode {
+            HandleMode::Independent => other,
+            HandleMode::Symmetric => (self.point.0 - delta.0, self.point.1 - delta.1),
+            HandleMode::Aligned if length > 1e-12 => {
+                let original = distance(other, self.point);
+                (
+                    self.point.0 - delta.0 / length * original,
+                    self.point.1 - delta.1 / length * original,
+                )
+            }
+            HandleMode::Aligned => other,
+        };
+        if incoming {
+            edited.handle_in = next;
+            edited.handle_out = opposite;
+        } else {
+            edited.handle_out = next;
+            edited.handle_in = opposite;
+        }
+        if !edited.finite() || edited == *self {
+            return false;
+        }
+        *self = edited;
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +113,144 @@ impl VectorPath {
 
     pub fn anchor_mut(&mut self, id: AnchorId) -> Option<&mut Anchor> {
         self.anchors.iter_mut().find(|anchor| anchor.id == id)
+    }
+
+    pub fn make_corner(&mut self, id: AnchorId) -> bool {
+        let Some(anchor) = self.anchor_mut(id) else {
+            return false;
+        };
+        let corner = Anchor::corner(id, anchor.point);
+        if *anchor == corner {
+            return false;
+        }
+        *anchor = corner;
+        true
+    }
+
+    pub fn make_smooth(&mut self, id: AnchorId) -> bool {
+        let Some(index) = self.anchors.iter().position(|anchor| anchor.id == id) else {
+            return false;
+        };
+        let anchor = self.anchors[index];
+        let previous = if index > 0 {
+            Some(self.anchors[index - 1].point)
+        } else if self.closed {
+            self.anchors.last().map(|anchor| anchor.point)
+        } else {
+            None
+        };
+        let next = self
+            .anchors
+            .get(index + 1)
+            .or_else(|| self.closed.then(|| &self.anchors[0]))
+            .map(|anchor| anchor.point);
+        let mut direction = (
+            anchor.handle_out.0 - anchor.handle_in.0,
+            anchor.handle_out.1 - anchor.handle_in.1,
+        );
+        if direction.0.hypot(direction.1) <= 1e-12 {
+            let from = previous.unwrap_or(anchor.point);
+            let to = next.unwrap_or(anchor.point);
+            direction = (to.0 - from.0, to.1 - from.1);
+        }
+        let length = direction.0.hypot(direction.1);
+        if !length.is_finite() || length <= 1e-12 {
+            return false;
+        }
+        let incoming = distance(anchor.handle_in, anchor.point);
+        let outgoing = distance(anchor.handle_out, anchor.point);
+        let incoming = if incoming > 1e-12 {
+            incoming
+        } else {
+            previous
+                .or(next)
+                .map_or(0., |point| distance(point, anchor.point) / 3.)
+        };
+        let outgoing = if outgoing > 1e-12 {
+            outgoing
+        } else {
+            next.or(previous)
+                .map_or(0., |point| distance(point, anchor.point) / 3.)
+        };
+        let direction = (direction.0 / length, direction.1 / length);
+        let edited = Anchor {
+            handle_in: (
+                anchor.point.0 - direction.0 * incoming,
+                anchor.point.1 - direction.1 * incoming,
+            ),
+            handle_out: (
+                anchor.point.0 + direction.0 * outgoing,
+                anchor.point.1 + direction.1 * outgoing,
+            ),
+            ..anchor
+        };
+        let tolerance = 1e-12 * (1. + incoming.max(outgoing));
+        if !edited.finite()
+            || (distance(edited.handle_in, anchor.handle_in) <= tolerance
+                && distance(edited.handle_out, anchor.handle_out) <= tolerance)
+        {
+            return false;
+        }
+        self.anchors[index] = edited;
+        true
+    }
+
+    pub fn split_segment(&mut self, segment: usize, t: f64, id: AnchorId) -> Option<Anchor> {
+        let count = self.anchors.len();
+        if !(2..MAX_ANCHORS).contains(&count)
+            || segment >= count - usize::from(!self.closed)
+            || !t.is_finite()
+            || !(1e-6..=1. - 1e-6).contains(&t)
+            || self.anchor(id).is_some()
+        {
+            return None;
+        }
+        let next = (segment + 1) % count;
+        let first = self.anchors[segment];
+        let last = self.anchors[next];
+        let (left, right) = split_cubic_at(
+            [first.point, first.handle_out, last.handle_in, last.point],
+            t,
+        );
+        let anchor = Anchor {
+            id,
+            point: left[3],
+            handle_in: left[2],
+            handle_out: right[1],
+        };
+        if !anchor.finite() || !finite(left[1]) || !finite(right[2]) {
+            return None;
+        }
+        self.anchors[segment].handle_out = left[1];
+        self.anchors[next].handle_in = right[2];
+        self.anchors.insert(segment + 1, anchor);
+        Some(anchor)
+    }
+
+    pub fn nearest_segment(&self, point: (f64, f64), radius: f64) -> Option<SegmentHit> {
+        if self.anchors.len() < 2 || !finite(point) || !radius.is_finite() || radius <= 0. {
+            return None;
+        }
+        let count = self.anchors.len() - usize::from(!self.closed);
+        let mut best = None;
+        let mut limit = radius;
+        for segment in 0..count {
+            let first = self.anchors[segment];
+            let last = self.anchors[(segment + 1) % self.anchors.len()];
+            let curve = [first.point, first.handle_out, last.handle_in, last.point];
+            if let Some((t, distance)) = nearest_cubic(curve, point, limit) {
+                if !(1e-6..=1. - 1e-6).contains(&t) {
+                    continue;
+                }
+                limit = distance;
+                best = Some(SegmentHit {
+                    segment,
+                    t,
+                    distance,
+                });
+            }
+        }
+        best
     }
 }
 
@@ -439,19 +639,365 @@ fn distance_to_chord(point: (f64, f64), start: (f64, f64), end: (f64, f64)) -> f
 type Cubic = [(f64, f64); 4];
 
 fn split_cubic(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64)) -> (Cubic, Cubic) {
-    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
-    let p01 = mid(p0, p1);
-    let p12 = mid(p1, p2);
-    let p23 = mid(p2, p3);
-    let p012 = mid(p01, p12);
-    let p123 = mid(p12, p23);
-    let p0123 = mid(p012, p123);
+    split_cubic_at([p0, p1, p2, p3], 0.5)
+}
+
+fn split_cubic_at([p0, p1, p2, p3]: Cubic, t: f64) -> (Cubic, Cubic) {
+    let lerp = |a: (f64, f64), b: (f64, f64)| ((1. - t) * a.0 + t * b.0, (1. - t) * a.1 + t * b.1);
+    let p01 = lerp(p0, p1);
+    let p12 = lerp(p1, p2);
+    let p23 = lerp(p2, p3);
+    let p012 = lerp(p01, p12);
+    let p123 = lerp(p12, p23);
+    let p0123 = lerp(p012, p123);
     ([p0, p01, p012, p0123], [p0123, p123, p23, p3])
+}
+
+fn nearest_cubic(curve: Cubic, point: (f64, f64), radius: f64) -> Option<(f64, f64)> {
+    if !curve.into_iter().all(finite) {
+        return None;
+    }
+    let mut stack = vec![(curve, 0., 1., MAX_DEPTH)];
+    let mut best = None;
+    let mut limit = radius;
+    while let Some((part, from, to, depth)) = stack.pop() {
+        let left = part.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        let right = part.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+        let top = part.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        let bottom = part.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        if distance(
+            point,
+            (point.0.clamp(left, right), point.1.clamp(top, bottom)),
+        ) > limit
+        {
+            continue;
+        }
+        let flat = distance_to_chord(part[1], part[0], part[3])
+            .max(distance_to_chord(part[2], part[0], part[3]));
+        if depth > 0 && flat > (radius / 8.).max(1e-5) {
+            let (left, right) = split_cubic(part[0], part[1], part[2], part[3]);
+            let middle = (from + to) * 0.5;
+            stack.push((right, middle, to, depth - 1));
+            stack.push((left, from, middle, depth - 1));
+            continue;
+        }
+        let delta = (part[3].0 - part[0].0, part[3].1 - part[0].1);
+        let length = delta.0 * delta.0 + delta.1 * delta.1;
+        let along = if length > 1e-12 {
+            (((point.0 - part[0].0) * delta.0 + (point.1 - part[0].1) * delta.1) / length)
+                .clamp(0., 1.)
+        } else {
+            0.5
+        };
+        // Even a straight cubic can have nonuniform or stationary parameter
+        // speed. Invert its chord projection before refining distance, so a
+        // zero derivative cannot trap Newton's method away from the click.
+        let mut local = along;
+        if length.is_finite() && length > 1e-12 {
+            let projected = |at: (f64, f64)| {
+                ((at.0 - part[0].0) * delta.0 + (at.1 - part[0].1) * delta.1) / length
+            };
+            let (p1, p2) = (projected(part[1]), projected(part[2]));
+            let (mut low, mut high) = (0., 1.);
+            for _ in 0..40 {
+                local = (low + high) * 0.5;
+                let projected = 3. * (1. - local).powi(2) * local * p1
+                    + 3. * (1. - local) * local * local * p2
+                    + local.powi(3);
+                if projected < along {
+                    low = local;
+                } else {
+                    high = local;
+                }
+            }
+        }
+        let projected_t = from + (to - from) * local;
+        let mut t = projected_t;
+        for _ in 0..8 {
+            let at = split_cubic_at(curve, t).0[3];
+            let d = |axis: usize| {
+                let p = curve.map(|point| if axis == 0 { point.0 } else { point.1 });
+                (
+                    3. * ((1. - t).powi(2) * (p[1] - p[0])
+                        + 2. * (1. - t) * t * (p[2] - p[1])
+                        + t * t * (p[3] - p[2])),
+                    6. * ((1. - t) * (p[2] - 2. * p[1] + p[0]) + t * (p[3] - 2. * p[2] + p[1])),
+                )
+            };
+            let (dx, ddx) = d(0);
+            let (dy, ddy) = d(1);
+            let denominator = dx * dx + dy * dy + (at.0 - point.0) * ddx + (at.1 - point.1) * ddy;
+            if !denominator.is_finite() || denominator.abs() <= 1e-12 {
+                break;
+            }
+            let next =
+                (t - ((at.0 - point.0) * dx + (at.1 - point.1) * dy) / denominator).clamp(from, to);
+            if !next.is_finite() {
+                break;
+            }
+            t = next;
+        }
+        for candidate in [from, projected_t, t, to] {
+            let distance = distance(point, split_cubic_at(curve, candidate).0[3]);
+            if distance.is_finite() && distance <= limit {
+                limit = distance;
+                best = Some((candidate, distance));
+            }
+        }
+    }
+    best
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn curve_path() -> VectorPath {
+        VectorPath {
+            id: PathId(1),
+            visible: true,
+            closed: false,
+            anchors: vec![
+                Anchor {
+                    id: AnchorId(1),
+                    point: (0., 0.),
+                    handle_in: (-2., 0.),
+                    handle_out: (0., 20.),
+                },
+                Anchor {
+                    id: AnchorId(2),
+                    point: (20., 0.),
+                    handle_in: (20., 20.),
+                    handle_out: (22., 0.),
+                },
+            ],
+        }
+    }
+
+    fn cubic_at(points: Cubic, t: f64) -> (f64, f64) {
+        let weights = [
+            (1. - t).powi(3),
+            3. * t * (1. - t).powi(2),
+            3. * t * t * (1. - t),
+            t.powi(3),
+        ];
+        points
+            .iter()
+            .zip(weights)
+            .fold((0., 0.), |sum, (point, weight)| {
+                (sum.0 + point.0 * weight, sum.1 + point.1 * weight)
+            })
+    }
+
+    #[test]
+    fn inserting_an_anchor_splits_the_cubic_without_changing_its_geometry_or_ids() {
+        let original = curve_path();
+        let first = original.anchors[0];
+        let last = original.anchors[1];
+        let curve = [first.point, first.handle_out, last.handle_in, last.point];
+        for t in [0.13, 0.37, 0.5, 0.91] {
+            let mut path = original.clone();
+            let added = path.split_segment(0, t, AnchorId(3)).unwrap();
+            assert_eq!(path.anchors.len(), 3);
+            assert_eq!(path.anchors[0].id, first.id);
+            assert_eq!(path.anchors[1], added);
+            assert_eq!(path.anchors[2].id, last.id);
+            assert_eq!(path.anchors[0].handle_in, first.handle_in);
+            assert_eq!(path.anchors[2].handle_out, last.handle_out);
+            for sample in 0..=100 {
+                let at = f64::from(sample) / 100.;
+                let (segment, u) = if at <= t {
+                    (0, at / t)
+                } else {
+                    (1, (at - t) / (1. - t))
+                };
+                let a = path.anchors[segment];
+                let b = path.anchors[segment + 1];
+                assert!(
+                    distance(
+                        cubic_at(curve, at),
+                        cubic_at([a.point, a.handle_out, b.handle_in, b.point], u)
+                    ) < 1e-10
+                );
+            }
+            assert!(!path.closed);
+        }
+        let mut closed = square(2, (0., 0.), 10., false);
+        let original = closed.clone();
+        let added = closed.split_segment(3, 0.5, AnchorId(99)).unwrap();
+        assert!(closed.closed);
+        assert_eq!(closed.anchors[0].id, original.anchors[0].id);
+        assert_eq!(closed.anchors[4], added);
+        assert_eq!(added.point, (0., 5.));
+        assert_eq!(selection(&[closed], 12, 12), selection(&[original], 12, 12));
+    }
+
+    #[test]
+    fn segment_hits_follow_cubic_geometry_and_only_include_real_open_or_closed_edges() {
+        let path = curve_path();
+        let curve = [
+            path.anchors[0].point,
+            path.anchors[0].handle_out,
+            path.anchors[1].handle_in,
+            path.anchors[1].point,
+        ];
+        for t in [0.1, 0.23, 0.5, 0.78, 0.9] {
+            let point = cubic_at(curve, t);
+            let hit = path.nearest_segment(point, 0.1).unwrap();
+            assert_eq!(hit.segment, 0);
+            assert!((hit.t - t).abs() < 1e-8);
+            assert!(hit.distance < 1e-7);
+        }
+        assert!(path.nearest_segment((10., 30.), 0.1).is_none());
+        let stationary = VectorPath {
+            anchors: vec![
+                Anchor {
+                    id: AnchorId(1),
+                    point: (0., 0.),
+                    handle_in: (0., 0.),
+                    handle_out: (10., 0.),
+                },
+                Anchor {
+                    id: AnchorId(2),
+                    point: (10., 0.),
+                    handle_in: (0., 0.),
+                    handle_out: (10., 0.),
+                },
+            ],
+            ..path.clone()
+        };
+        let hit = stationary.nearest_segment((5.1, 0.), 0.001).unwrap();
+        assert!(hit.distance < 1e-7);
+        for (point, radius) in [
+            ((f64::NAN, 2.), 1.),
+            ((1., 1.), 0.),
+            ((1., 1.), f64::INFINITY),
+        ] {
+            assert!(path.nearest_segment(point, radius).is_none());
+        }
+        let mut rectangle = square(2, (0., 0.), 10., false);
+        assert_eq!(rectangle.nearest_segment((0., 5.), 0.1).unwrap().segment, 3);
+        rectangle.closed = false;
+        assert!(rectangle.nearest_segment((0., 5.), 0.1).is_none());
+    }
+
+    #[test]
+    fn invalid_or_over_budget_insertions_leave_the_path_intact_and_large_finite_splits_stay_finite()
+    {
+        let original = curve_path();
+        for (segment, t, id) in [
+            (0, 0., AnchorId(3)),
+            (0, 1., AnchorId(3)),
+            (0, f64::NAN, AnchorId(3)),
+            (4, 0.5, AnchorId(3)),
+            (0, 0.5, AnchorId(1)),
+        ] {
+            let mut path = original.clone();
+            assert!(path.split_segment(segment, t, id).is_none());
+            assert_eq!(path, original);
+        }
+        let mut full = VectorPath {
+            anchors: (0..MAX_ANCHORS)
+                .map(|index| Anchor::corner(AnchorId(index as u64), (index as f64, 0.)))
+                .collect(),
+            ..original.clone()
+        };
+        let before = full.clone();
+        assert!(full.split_segment(0, 0.5, AnchorId(999)).is_none());
+        assert_eq!(full, before);
+        let mut huge = VectorPath {
+            anchors: vec![
+                Anchor::corner(AnchorId(1), (-1e308, 0.)),
+                Anchor::corner(AnchorId(2), (1e308, 0.)),
+            ],
+            ..original
+        };
+        assert!(huge.split_segment(0, 0.5, AnchorId(3)).unwrap().finite());
+        assert!(huge.anchors.iter().all(|anchor| anchor.finite()));
+    }
+
+    #[test]
+    fn handle_drag_modes_keep_opposite_lengths_or_mirror_them_without_nonfinite_edits() {
+        let original = Anchor {
+            id: AnchorId(1),
+            point: (4., 5.),
+            handle_in: (1., 5.),
+            handle_out: (6., 5.),
+        };
+        for (mode, expected) in [
+            (HandleMode::Independent, (1., 5.)),
+            (HandleMode::Aligned, (4., 2.)),
+            (HandleMode::Symmetric, (4., 1.)),
+        ] {
+            let mut anchor = original;
+            assert!(anchor.move_handle(false, (4., 9.), mode));
+            assert_eq!(anchor.handle_out, (4., 9.));
+            assert_eq!(anchor.handle_in, expected);
+            let before = anchor;
+            assert!(!anchor.move_handle(true, (f64::NAN, 5.), mode));
+            assert_eq!(anchor, before);
+        }
+        let mut collapsed = original;
+        collapsed.move_handle(false, original.point, HandleMode::Aligned);
+        assert_eq!(collapsed.handle_in, original.handle_in);
+        collapsed = original;
+        collapsed.move_handle(false, original.point, HandleMode::Symmetric);
+        assert_eq!(collapsed, Anchor::corner(original.id, original.point));
+        let mut unchanged = original;
+        assert!(!unchanged.move_handle(false, original.handle_out, HandleMode::Symmetric));
+        assert_eq!(unchanged, original);
+    }
+
+    #[test]
+    fn corner_and_smooth_commands_handle_endpoints_and_preserve_existing_handle_lengths() {
+        let mut path = square(2, (0., 0.), 10., false);
+        let id = path.anchors[1].id;
+        assert!(path.make_smooth(id));
+        let smooth = *path.anchor(id).unwrap();
+        assert!((distance(smooth.point, smooth.handle_in) - 10. / 3.).abs() < 1e-10);
+        assert!((distance(smooth.point, smooth.handle_out) - 10. / 3.).abs() < 1e-10);
+        assert!(!path.make_smooth(id));
+        assert!(path.make_corner(id));
+        assert_eq!(*path.anchor(id).unwrap(), Anchor::corner(id, smooth.point));
+        assert!(!path.make_corner(id));
+        let mut open = curve_path();
+        let first = open.anchors[0].id;
+        let incoming = distance(open.anchors[0].handle_in, open.anchors[0].point);
+        let outgoing = distance(open.anchors[0].handle_out, open.anchors[0].point);
+        assert!(open.make_smooth(first));
+        assert!(
+            (distance(open.anchors[0].handle_in, open.anchors[0].point) - incoming).abs() < 1e-10
+        );
+        assert!(
+            (distance(open.anchors[0].handle_out, open.anchors[0].point) - outgoing).abs() < 1e-10
+        );
+        assert!(!open.make_smooth(first));
+        let mut single = VectorPath {
+            anchors: vec![Anchor::corner(AnchorId(9), (1., 1.))],
+            ..open
+        };
+        assert!(!single.make_smooth(AnchorId(9)));
+    }
+
+    #[test]
+    fn edited_path_geometry_round_trips_in_the_existing_project_format() {
+        use image::RgbaImage;
+        let mut path = curve_path();
+        let added = path.split_segment(0, 0.37, AnchorId(3)).unwrap();
+        path.make_corner(added.id);
+        path.make_smooth(added.id);
+        let mut content =
+            crate::document::DocumentContent::single_layer("path".into(), RgbaImage::new(2, 2));
+        assert!(content.upsert_path(path.clone()));
+        let mut bytes = Vec::new();
+        crate::project::write(&mut bytes, &content).unwrap();
+        let manifest_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bytes[12..12 + manifest_size]).unwrap();
+        assert_eq!(manifest["version"], 6);
+        let reopened = crate::project::read(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(reopened.paths(), &[path]);
+    }
 
     fn square(id: u64, origin: (f64, f64), size: f64, reverse: bool) -> VectorPath {
         let (x, y) = origin;

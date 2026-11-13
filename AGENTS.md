@@ -188,7 +188,20 @@ Its dialog exposes the remembered color and Use Foreground; Reset restores
 built-in parameters and the current foreground color. Memory is not project data
 and is not undone with the document. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
-first anchor closes the path. Path to Selection fills every closed path with
+first anchor closes the path. Alt-clicking a visible curve inserts an anchor by exact cubic
+subdivision, including closing segments; existing anchor/handle hits take priority.
+The inserted point can be dragged within that same one-step gesture. Hit testing
+uses an eight-screen-point radius, bounded subdivision, and chord-projection/
+Newton refinement, including stationary collinear parameterizations. The selected
+anchor has a larger outlined marker. Corner collapses handles; Smooth aligns
+them and preserves existing lengths, initializing missing handles from neighbors.
+Independent (default), Aligned, and Symmetric are session handle-drag preferences;
+they preserve the opposite handle, its length, or mirror its length respectively.
+Newly placed handles retain symmetric creation. Linked drags use the baseline
+anchor each frame to avoid drift. A click without movement does not couple
+handles; repeated identity shaping creates no history. Geometry, not new anchor
+mode metadata, persists in the existing project format. Multiple anchor selection
+remains planned. Path to Selection fills every closed path with
 nonzero winding. Selection to Path creates closed paths from the current
 selection. Selection ants paint above path outlines so an overlapping path
 cannot hide the selection; path handles remain above both. Image transforms,
@@ -357,7 +370,11 @@ document is a single plain layer without paths, guides, or editable text.
   closed paths with nonzero winding, and builds path outlines from simple and
   mask selections. `src/workspace/path_ui.rs` edits anchors and handles and
   converts between paths and selections. A drag commits when the pointer is
-  released.
+  released. Cubic splitting preserves the curve and original anchor IDs, enforces
+  limits, and uses finite weighted interpolation. Path rows clear stale anchor
+  selection on a successful switch and refuse changes while a tab is busy.
+  Handle shaping/splitting stays in path metadata, sharing pixel/preview buffers
+  through undo/redo; Corner/Smooth actions use the same background commit path.
   `src/workspace/stroke_ui.rs` strokes the active path or the selection contour.
 - `src/preview.rs` owns the 256 px tile cache, the one-pixel sampling apron
   and the Fit level choice. The canvas paints those tiles.

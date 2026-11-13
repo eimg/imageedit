@@ -1374,7 +1374,12 @@ impl Workspace {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_path(event.position, window.scale_factor(), cx);
+                                this.begin_path(
+                                    event.position,
+                                    window.scale_factor(),
+                                    event.modifiers.alt,
+                                    cx,
+                                );
                             }),
                         )
                     })
@@ -1456,6 +1461,7 @@ impl Workspace {
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
+                            selected_path_anchor: self.path_anchor,
                             text_caret: if self.tool == Tool::Text {
                                 self.text_caret()
                             } else {
@@ -1771,6 +1777,7 @@ impl Workspace {
                                     })
                             })
                             .when(self.tool == Tool::Gradient, |panel| panel.child(self.gradient_palette_options(cx)))
+                            .when(self.tool == Tool::Path, |panel| panel.child(self.path_edit_options(cx)))
                             .when(self.tool == Tool::Crop, |panel| panel.child(self.aspect_options(true, cx)))
                             .when_some(self.crop, |panel, _| {
                                 panel
@@ -2889,6 +2896,7 @@ struct CanvasDecorations {
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
     path_handles: bool,
+    selected_path_anchor: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
     text_caret: Option<super::text_ui::TextCaret>,
 }
 
@@ -2916,6 +2924,7 @@ fn image_preview(
         paths,
         active_path,
         path_handles,
+        selected_path_anchor,
         text_caret,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
@@ -3022,6 +3031,7 @@ fn image_preview(
                     (width, height),
                     &paths,
                     active_path,
+                    selected_path_anchor,
                 );
             }
             if let Some(rect) = handle_rect {
@@ -3429,6 +3439,7 @@ fn paint_path_handles(
     canvas: (u32, u32),
     paths: &[crate::paths::VectorPath],
     active: Option<crate::paths::PathId>,
+    selected: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
 ) {
     let (width, height) = canvas;
     if paths.is_empty() || width == 0 || height == 0 {
@@ -3451,9 +3462,21 @@ fn paint_path_handles(
                 if anchor.handle_out != anchor.point {
                     paint_handle_line(window, center, project(anchor.handle_out));
                 }
-                window.paint_quad(fill(
-                    Bounds::centered_at(center, size(px(7.), px(7.))),
-                    rgb(if current { ACCENT } else { 0xffffff }),
+                let selected = selected == Some((path.id, anchor.id));
+                let edge = if selected { 9. } else { 7. };
+                window.paint_quad(gpui::quad(
+                    Bounds::centered_at(center, size(px(edge), px(edge))),
+                    px(1.),
+                    rgb(if selected {
+                        0xffffff
+                    } else if current {
+                        ACCENT
+                    } else {
+                        0xffffff
+                    }),
+                    px(if selected { 2. } else { 1. }),
+                    rgb(if selected { ACCENT } else { 0x12151c }),
+                    gpui::BorderStyle::Solid,
                 ));
             }
         }
