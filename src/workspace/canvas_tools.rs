@@ -270,7 +270,23 @@ impl Workspace {
                 let delta = position - origin;
                 self.canvas_pixel(position, scale, true)
                     .filter(|_| f32::from(delta.x).abs().max(f32::from(delta.y).abs()) >= 3.)
-                    .map(|end| CropRect::between(start, end))
+                    .map(|end| {
+                        if let Some(ratio) = self.crop_ratio {
+                            let rect = ratio.drag(
+                                (i64::from(start.0), i64::from(start.1)),
+                                (i64::from(end.0), i64::from(end.1)),
+                                Some((canvas_width, canvas_height)),
+                            );
+                            CropRect {
+                                x: rect.x as u32,
+                                y: rect.y as u32,
+                                width: rect.width,
+                                height: rect.height,
+                            }
+                        } else {
+                            CropRect::between(start, end)
+                        }
+                    })
             }
             CropDrag::Move { crop, grab } => self
                 .canvas_pixel(position, scale, true)
@@ -280,13 +296,36 @@ impl Workspace {
                 edges,
                 anchor,
             } => self.unclamped_pointer_pixel(position, scale).map(|pixel| {
-                resize_crop(
-                    crop,
-                    edges,
-                    (pixel.0 - anchor.0, pixel.1 - anchor.1),
-                    canvas_width,
-                    canvas_height,
-                )
+                if let Some(ratio) = self.crop_ratio {
+                    let rect = ratio.resize(
+                        crate::preview::PixelRect::new(
+                            i64::from(crop.x),
+                            i64::from(crop.y),
+                            crop.width,
+                            crop.height,
+                        ),
+                        (edges.left, edges.right, edges.top, edges.bottom),
+                        (
+                            pixel.0.saturating_sub(anchor.0),
+                            pixel.1.saturating_sub(anchor.1),
+                        ),
+                        (canvas_width, canvas_height),
+                    );
+                    CropRect {
+                        x: rect.x as u32,
+                        y: rect.y as u32,
+                        width: rect.width,
+                        height: rect.height,
+                    }
+                } else {
+                    resize_crop(
+                        crop,
+                        edges,
+                        (pixel.0 - anchor.0, pixel.1 - anchor.1),
+                        canvas_width,
+                        canvas_height,
+                    )
+                }
             }),
         };
         if self.crop != crop {

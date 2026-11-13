@@ -14,6 +14,8 @@ tool and command icons, and a workspace that keeps the canvas in focus.
 - **Selections and transforms** — rectangle, oval, freehand, and magic wand;
   crop, resize, rotate, flip, and perspective.
   Grow/Shrink retain feathered edges. The wand can sample the visible layers.
+  Rectangle and oval selections have exact position/size controls and optional
+  smooth curved edges. Selections and Crop support fixed aspect ratios.
   Scale Layer has editable dimensions, aspect locking, and resampling choices;
   Rotate accepts typed angles.
 - **Painting and retouching** — pencil, brush, eraser, clone stamp, gradients,
@@ -65,6 +67,23 @@ while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
 In **Rotate**, enter an angle in degrees (including negative values and tenths),
 then use Apply after finishing the numeric edit. **Sample All Layers** on the
 Magic Wand samples the visible composite and can select beyond the active layer.
+
+**Rectangle Select** and **Oval Select** accept X/Y and Width/Height for an
+editable geometric selection. Return or leaving the field commits one selection
+undo step; Escape or empty text restores it. Selection changes keep the image's
+saved state. **Antialias edges** optionally smooths oval/circle and rounded
+rectangle edges; it starts off for hard pixel selections. Toggling it also
+updates the current editable curve. Combined, clipped, feathered, and wand masks
+keep their existing coverage when this setting changes.
+
+Selection and **Crop** offer Free, 1:1, 4:3, 16:9, and Image aspect ratios.
+Choose a fixed preset and edit Ratio W/H for a custom ratio. It constrains the
+next creation drag, handle resize, or Width/Height edit; choosing a ratio alone
+leaves the current box in place. Circle takes priority over the oval ratio.
+Dimensions round to the nearest image pixel and stay within the available
+canvas space when resizing or typing. A side handle keeps the opposite edge
+and centers the other axis; a corner keeps its opposite corner. Fixed-ratio
+handles stop at the minimum size when dragged past their opposite edge.
 
 **Move** accepts signed X/Y coordinates with a live preview. Return or leaving
 the field commits; Escape or empty text restores the position. Arrow keys move

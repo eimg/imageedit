@@ -277,7 +277,7 @@ impl Tool {
                 "Click the image to sample the foreground color from the visible layers. The color swatches are at the top of the toolbox."
             }
             Self::Crop => {
-                "Drag a crop box. Drag inside to move it or drag a handle to resize it. X, Y, Width, and Height update immediately; an empty field leaves the crop unchanged. Return applies the crop; Escape cancels."
+                "Drag a crop box. Drag inside to move it or drag a handle to resize it. Choose Free or a fixed aspect ratio; edit Ratio W/H for a custom ratio. The ratio applies on the next drag, resize, or dimension edit. X, Y, Width, and Height update immediately; empty text restores the field's original value. Return applies the crop; Escape cancels."
             }
             Self::Rotate => {
                 "Drag to rotate the active layer or type an angle in degrees. Hold Shift while dragging to snap to 15-degree angles. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
@@ -292,10 +292,10 @@ impl Tool {
                 "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels. Type Width or Height for a centered live preview; Return or clicking outside commits, and empty text restores the original size. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at commit. Rasterize editable text before scaling it."
             }
             Self::Select => {
-                "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. Width, Height, and corner radius update immediately; empty numeric text leaves the selection unchanged. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, Height, and corner radius update immediately; empty text or Escape restores the numeric edit. Choose Free or a fixed aspect ratio; Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Antialias edges smooths rounded corners. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::OvalSelect => {
-                "Drag an oval; enable Circle to constrain the drag to a circle. Drag inside to move it or drag a handle to resize it; click outside to deselect. Width and Height update immediately. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Drag an oval; enable Circle for a circle, or choose a fixed aspect ratio. Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, and Height update immediately; empty text or Escape restores the numeric edit. Antialias edges smooths the curve. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::FreeSelect => {
                 "Click to add vertices or drag to draw a freehand segment. Releasing keeps the outline open. Click its start or press Return to close it; Escape cancels. Shift adds, Control subtracts, and Shift-Control intersects."

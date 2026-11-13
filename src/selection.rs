@@ -31,11 +31,12 @@ pub struct RoundedRectSelection {
     rect: PixelRect,
     radius: u32,
     outline: Arc<OnceLock<Vec<MaskEdge>>>,
+    antialias: bool,
 }
 
 impl PartialEq for RoundedRectSelection {
     fn eq(&self, other: &Self) -> bool {
-        self.rect == other.rect && self.radius == other.radius
+        self.rect == other.rect && self.radius == other.radius && self.antialias == other.antialias
     }
 }
 
@@ -45,11 +46,12 @@ impl Eq for RoundedRectSelection {}
 pub struct EllipseSelection {
     rect: PixelRect,
     outline: Arc<OnceLock<Vec<MaskEdge>>>,
+    antialias: bool,
 }
 
 impl PartialEq for EllipseSelection {
     fn eq(&self, other: &Self) -> bool {
-        self.rect == other.rect
+        self.rect == other.rect && self.antialias == other.antialias
     }
 }
 
@@ -94,11 +96,47 @@ impl PartialEq for Mask {
 impl Eq for Mask {}
 
 impl EllipseSelection {
+    fn edge_contains(&self, x: i64, y: i64) -> bool {
+        if self.antialias {
+            self.coverage(x, y) > 0
+        } else {
+            self.contains(x, y)
+        }
+    }
+
+    fn coverage(&self, x: i64, y: i64) -> u8 {
+        if !contains(self.rect, x, y) {
+            return 0;
+        }
+        if !self.antialias {
+            return u8::from(self.contains(x, y)) * 255;
+        }
+        let rx = self.rect.width as f64 / 2.;
+        let ry = self.rect.height as f64 / 2.;
+        let dx = ((x as f64 + 0.5 - self.rect.x as f64 - rx) / rx).abs();
+        let dy = ((y as f64 + 0.5 - self.rect.y as f64 - ry) / ry).abs();
+        let mx = 0.5 / rx;
+        let my = 0.5 / ry;
+        // Bound the whole pixel in normalized ellipse space. Only pixels whose
+        // boxes intersect the curve need the sixteen subpixel tests.
+        if (dx + mx).powi(2) + (dy + my).powi(2) <= 1. {
+            return 255;
+        }
+        if (dx - mx).max(0.).powi(2) + (dy - my).max(0.).powi(2) > 1. {
+            return 0;
+        }
+        sample_coverage(x, y, |x, y| self.contains_point(x, y))
+    }
+
     pub fn rect(&self) -> PixelRect {
         self.rect
     }
 
     fn contains(&self, x: i64, y: i64) -> bool {
+        self.contains_point(x as f64 + 0.5, y as f64 + 0.5)
+    }
+
+    fn contains_point(&self, x: f64, y: f64) -> bool {
         let rect = self.rect;
         if rect.width == 0 || rect.height == 0 {
             return false;
@@ -107,8 +145,8 @@ impl EllipseSelection {
         let cy = rect.y as f64 + rect.height as f64 / 2.;
         let rx = rect.width as f64 / 2.;
         let ry = rect.height as f64 / 2.;
-        let dx = (x as f64 + 0.5 - cx) / rx;
-        let dy = (y as f64 + 0.5 - cy) / ry;
+        let dx = (x - cx) / rx;
+        let dy = (y - cy) / ry;
         dx * dx + dy * dy <= 1.0 + 1e-9
     }
 
@@ -128,21 +166,25 @@ impl EllipseSelection {
         let half = rx * (1.0 - dy * dy).max(0.0).sqrt();
         let mut start = (cx - half - 0.5).ceil() as i64;
         let mut end = (cx + half - 0.5).floor() as i64 + 1;
+        if self.antialias {
+            start -= 1;
+            end += 1;
+        }
         start = start.max(rect.x);
         end = end.min(rect.right());
-        while start < end && !self.contains(start, y) {
+        while start < end && !self.edge_contains(start, y) {
             start += 1;
         }
-        while start < end && !self.contains(end - 1, y) {
+        while start < end && !self.edge_contains(end - 1, y) {
             end -= 1;
         }
         if start >= end {
             return None;
         }
-        while start > rect.x && self.contains(start - 1, y) {
+        while start > rect.x && self.edge_contains(start - 1, y) {
             start -= 1;
         }
-        while end < rect.right() && self.contains(end, y) {
+        while end < rect.right() && self.edge_contains(end, y) {
             end += 1;
         }
         Some((start, end))
@@ -164,21 +206,25 @@ impl EllipseSelection {
         let half = ry * (1.0 - dx * dx).max(0.0).sqrt();
         let mut start = (cy - half - 0.5).ceil() as i64;
         let mut end = (cy + half - 0.5).floor() as i64 + 1;
+        if self.antialias {
+            start -= 1;
+            end += 1;
+        }
         start = start.max(rect.y);
         end = end.min(rect.bottom());
-        while start < end && !self.contains(x, start) {
+        while start < end && !self.edge_contains(x, start) {
             start += 1;
         }
-        while start < end && !self.contains(x, end - 1) {
+        while start < end && !self.edge_contains(x, end - 1) {
             end -= 1;
         }
         if start >= end {
             return None;
         }
-        while start > rect.y && self.contains(x, start - 1) {
+        while start > rect.y && self.edge_contains(x, start - 1) {
             start -= 1;
         }
-        while end < rect.bottom() && self.contains(x, end) {
+        while end < rect.bottom() && self.edge_contains(x, end) {
             end += 1;
         }
         Some((start, end))
@@ -190,6 +236,44 @@ impl EllipseSelection {
 }
 
 impl RoundedRectSelection {
+    fn edge_contains(&self, x: i64, y: i64) -> bool {
+        if self.antialias {
+            self.coverage(x, y) > 0
+        } else {
+            self.contains(x, y)
+        }
+    }
+
+    fn coverage(&self, x: i64, y: i64) -> u8 {
+        if !contains(self.rect, x, y) {
+            return 0;
+        }
+        if !self.antialias {
+            return u8::from(self.contains(x, y)) * 255;
+        }
+        let radius = self.clamped_radius() as f64;
+        let left = self.rect.x as f64;
+        let top = self.rect.y as f64;
+        let right = self.rect.right() as f64;
+        let bottom = self.rect.bottom() as f64;
+        if (x as f64 >= left + radius && x as f64 + 1. <= right - radius)
+            || (y as f64 >= top + radius && y as f64 + 1. <= bottom - radius)
+        {
+            return 255;
+        }
+        let px = x as f64 + 0.5;
+        let py = y as f64 + 0.5;
+        let dx = (px - px.clamp(left + radius, right - radius)).abs();
+        let dy = (py - py.clamp(top + radius, bottom - radius)).abs();
+        if (dx + 0.5).powi(2) + (dy + 0.5).powi(2) <= radius * radius {
+            return 255;
+        }
+        if (dx - 0.5).max(0.).powi(2) + (dy - 0.5).max(0.).powi(2) > radius * radius {
+            return 0;
+        }
+        sample_coverage(x, y, |x, y| self.contains_point(x, y))
+    }
+
     pub fn rect(&self) -> PixelRect {
         self.rect
     }
@@ -207,8 +291,11 @@ impl RoundedRectSelection {
         if rect.width == 0 || rect.height == 0 {
             return false;
         }
-        let px = x as f64 + 0.5;
-        let py = y as f64 + 0.5;
+        self.contains_point(x as f64 + 0.5, y as f64 + 0.5)
+    }
+
+    fn contains_point(&self, px: f64, py: f64) -> bool {
+        let rect = self.rect;
         let left = rect.x as f64;
         let top = rect.y as f64;
         let right = rect.right() as f64;
@@ -262,21 +349,25 @@ impl RoundedRectSelection {
         };
         let mut start = (left - 0.5).ceil() as i64;
         let mut end = (right - 0.5).floor() as i64 + 1;
+        if self.antialias {
+            start -= 1;
+            end += 1;
+        }
         start = start.max(rect.x);
         end = end.min(rect.right());
-        while start < end && !self.contains(start, y) {
+        while start < end && !self.edge_contains(start, y) {
             start += 1;
         }
-        while start < end && !self.contains(end - 1, y) {
+        while start < end && !self.edge_contains(end - 1, y) {
             end -= 1;
         }
         if start >= end {
             return None;
         }
-        while start > rect.x && self.contains(start - 1, y) {
+        while start > rect.x && self.edge_contains(start - 1, y) {
             start -= 1;
         }
-        while end < rect.right() && self.contains(end, y) {
+        while end < rect.right() && self.edge_contains(end, y) {
             end += 1;
         }
         Some((start, end))
@@ -317,21 +408,25 @@ impl RoundedRectSelection {
         };
         let mut start = (top - 0.5).ceil() as i64;
         let mut end = (bottom - 0.5).floor() as i64 + 1;
+        if self.antialias {
+            start -= 1;
+            end += 1;
+        }
         start = start.max(rect.y);
         end = end.min(rect.bottom());
-        while start < end && !self.contains(x, start) {
+        while start < end && !self.edge_contains(x, start) {
             start += 1;
         }
-        while start < end && !self.contains(x, end - 1) {
+        while start < end && !self.edge_contains(x, end - 1) {
             end -= 1;
         }
         if start >= end {
             return None;
         }
-        while start > rect.y && self.contains(x, start - 1) {
+        while start > rect.y && self.edge_contains(x, start - 1) {
             start -= 1;
         }
-        while end < rect.bottom() && self.contains(x, end) {
+        while end < rect.bottom() && self.edge_contains(x, end) {
             end += 1;
         }
         Some((start, end))
@@ -342,7 +437,61 @@ impl RoundedRectSelection {
     }
 }
 
+fn sample_coverage(x: i64, y: i64, inside: impl Fn(f64, f64) -> bool) -> u8 {
+    let mut count = 0u16;
+    for sy in 0..4 {
+        for sx in 0..4 {
+            count += u16::from(inside(
+                x as f64 + (sx as f64 + 0.5) / 4.,
+                y as f64 + (sy as f64 + 0.5) / 4.,
+            ));
+        }
+    }
+    ((count * 255 + 8) / 16) as u8
+}
+
 impl Selection {
+    pub fn shape_drag(
+        shape: SelectionShape,
+        start: (i64, i64),
+        end: (i64, i64),
+        canvas: (u32, u32),
+        radius: u32,
+        antialias: bool,
+        ratio: Option<crate::constraints::AspectRatio>,
+    ) -> Self {
+        if !antialias && ratio.is_none() {
+            return match shape {
+                SelectionShape::Rectangle if radius == 0 => {
+                    Self::rectangle(start, end, canvas.0, canvas.1)
+                }
+                SelectionShape::Rectangle => {
+                    Self::rounded_rect(start, end, radius, canvas.0, canvas.1)
+                }
+                SelectionShape::Ellipse => Self::ellipse(start, end, canvas.0, canvas.1),
+                SelectionShape::Circle => Self::circle(start, end, canvas.0, canvas.1),
+            };
+        }
+        let rect = ratio.map_or_else(
+            || {
+                if shape == SelectionShape::Circle {
+                    square_drag_rect(start, end)
+                } else {
+                    drag_rect(start, end)
+                }
+            },
+            |ratio| ratio.drag(start, end, None),
+        );
+        match shape {
+            SelectionShape::Rectangle => {
+                Self::rounded_rect_quality(rect, radius, canvas.0, canvas.1, antialias)
+            }
+            SelectionShape::Ellipse | SelectionShape::Circle => {
+                Self::ellipse_rect_quality(rect, canvas.0, canvas.1, antialias)
+            }
+        }
+    }
+
     pub fn rectangle(start: (i64, i64), end: (i64, i64), width: u32, height: u32) -> Self {
         Self::from_rect(drag_rect(start, end), width, height)
     }
@@ -366,14 +515,29 @@ impl Selection {
     }
 
     pub fn ellipse_rect(rect: PixelRect, width: u32, height: u32) -> Self {
+        Self::ellipse_rect_quality(rect, width, height, false)
+    }
+
+    pub fn ellipse_rect_quality(rect: PixelRect, width: u32, height: u32, antialias: bool) -> Self {
         Self::Ellipse(EllipseSelection {
             rect,
             outline: Arc::default(),
+            antialias,
         })
         .clip_shape(rect, width, height)
     }
 
     pub fn rounded_rect_rect(rect: PixelRect, radius: u32, width: u32, height: u32) -> Self {
+        Self::rounded_rect_quality(rect, radius, width, height, false)
+    }
+
+    pub fn rounded_rect_quality(
+        rect: PixelRect,
+        radius: u32,
+        width: u32,
+        height: u32,
+        antialias: bool,
+    ) -> Self {
         let radius = radius.min(rect.width.min(rect.height) / 2);
         if radius == 0 {
             return Self::from_rect(rect, width, height);
@@ -382,6 +546,7 @@ impl Selection {
             rect,
             radius,
             outline: Arc::default(),
+            antialias,
         })
         .clip_shape(rect, width, height)
     }
@@ -455,20 +620,58 @@ impl Selection {
             Self::Empty => false,
             Self::Full => inside,
             Self::Rect(rect) => inside && contains(*rect, x, y),
-            Self::Ellipse(ellipse) => inside && ellipse.contains(x, y),
-            Self::RoundedRect(shape) => inside && shape.contains(x, y),
+            Self::Ellipse(ellipse) => inside && ellipse.edge_contains(x, y),
+            Self::RoundedRect(shape) => inside && shape.edge_contains(x, y),
             Self::Inverse(hole) => inside && !contains(*hole, x, y),
             Self::Mask(mask) => inside && mask.coverage(x as i32, y as i32) > 0,
         }
     }
 
     pub fn coverage(&self, x: i64, y: i64, width: u32, height: u32) -> u8 {
-        if !self.covers(x, y, width, height) {
-            return 0;
-        }
+        let inside = x >= 0 && y >= 0 && x < i64::from(width) && y < i64::from(height);
         match self {
-            Self::Mask(mask) => mask.coverage(x as i32, y as i32),
-            _ => 255,
+            Self::Ellipse(shape) => {
+                if inside {
+                    shape.coverage(x, y)
+                } else {
+                    0
+                }
+            }
+            Self::RoundedRect(shape) => {
+                if inside {
+                    shape.coverage(x, y)
+                } else {
+                    0
+                }
+            }
+            Self::Mask(mask) => {
+                if inside {
+                    mask.coverage(x as i32, y as i32)
+                } else {
+                    0
+                }
+            }
+            _ => u8::from(self.covers(x, y, width, height)) * 255,
+        }
+    }
+
+    pub fn is_antialiased(&self) -> bool {
+        match self {
+            Self::Ellipse(shape) => shape.antialias,
+            Self::RoundedRect(shape) => shape.antialias,
+            _ => false,
+        }
+    }
+
+    pub fn with_antialias(self, antialias: bool, width: u32, height: u32) -> Self {
+        match self {
+            Self::Ellipse(shape) => {
+                Self::ellipse_rect_quality(shape.rect, width, height, antialias)
+            }
+            Self::RoundedRect(shape) => {
+                Self::rounded_rect_quality(shape.rect, shape.radius(), width, height, antialias)
+            }
+            other => other,
         }
     }
 
@@ -485,9 +688,11 @@ impl Selection {
             Self::Unrestricted | Self::Empty => self,
             Self::Full => Self::Full,
             Self::Rect(_) => Self::from_rect(rect, width, height),
-            Self::Ellipse(_) => Self::ellipse_rect(rect, width, height),
+            Self::Ellipse(shape) => {
+                Self::ellipse_rect_quality(rect, width, height, shape.antialias)
+            }
             Self::RoundedRect(shape) => {
-                Self::rounded_rect_rect(rect, shape.radius(), width, height)
+                Self::rounded_rect_quality(rect, shape.radius(), width, height, shape.antialias)
             }
             Self::Inverse(_) => match clip(rect, width, height) {
                 Some(hole) if covers_canvas(hole, width, height) => Self::Empty,
@@ -505,14 +710,18 @@ impl Selection {
             Self::Rect(rect) => {
                 Self::from_rect(translate(rect, -origin_x, -origin_y), width, height)
             }
-            Self::Ellipse(ellipse) => {
-                Self::ellipse_rect(translate(ellipse.rect, -origin_x, -origin_y), width, height)
-            }
-            Self::RoundedRect(shape) => Self::rounded_rect_rect(
+            Self::Ellipse(ellipse) => Self::ellipse_rect_quality(
+                translate(ellipse.rect, -origin_x, -origin_y),
+                width,
+                height,
+                ellipse.antialias,
+            ),
+            Self::RoundedRect(shape) => Self::rounded_rect_quality(
                 translate(shape.rect, -origin_x, -origin_y),
                 shape.radius(),
                 width,
                 height,
+                shape.antialias,
             ),
             Self::Inverse(hole) => {
                 let hole = translate(hole, -origin_x, -origin_y);
@@ -533,12 +742,19 @@ impl Selection {
         match self {
             Self::Full => translated_canvas(),
             Self::Rect(rect) => Self::from_rect(translate(rect, dx, dy), new.0, new.1),
-            Self::Ellipse(ellipse) => {
-                Self::ellipse_rect(translate(ellipse.rect, dx, dy), new.0, new.1)
-            }
-            Self::RoundedRect(shape) => {
-                Self::rounded_rect_rect(translate(shape.rect, dx, dy), shape.radius(), new.0, new.1)
-            }
+            Self::Ellipse(ellipse) => Self::ellipse_rect_quality(
+                translate(ellipse.rect, dx, dy),
+                new.0,
+                new.1,
+                ellipse.antialias,
+            ),
+            Self::RoundedRect(shape) => Self::rounded_rect_quality(
+                translate(shape.rect, dx, dy),
+                shape.radius(),
+                new.0,
+                new.1,
+                shape.antialias,
+            ),
             Self::Inverse(hole) => translated_canvas().combine(
                 Self::from_rect(translate(hole, dx, dy), new.0, new.1),
                 SelectionOp::Subtract,
@@ -1712,6 +1928,75 @@ fn invert_mask(mask: &Mask, width: u32, height: u32) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antialiased_curves_match_subpixel_coverage_and_keep_geometry_when_clipped() {
+        for rect in [
+            PixelRect::new(0, 0, 8, 8),
+            PixelRect::new(1, 2, 9, 3),
+            PixelRect::new(-2, -2, 8, 8),
+            PixelRect::new(1, 1, 1, 7),
+            PixelRect::new(0, 0, 100, 2),
+            PixelRect::new(0, 0, 2, 100),
+        ] {
+            for rounded in [false, true] {
+                let source = if rounded {
+                    Selection::RoundedRect(RoundedRectSelection {
+                        rect,
+                        radius: 3,
+                        antialias: true,
+                        outline: Arc::default(),
+                    })
+                } else {
+                    Selection::Ellipse(EllipseSelection {
+                        rect,
+                        antialias: true,
+                        outline: Arc::default(),
+                    })
+                };
+                let clipped = source.clone().clip_shape(rect, 12, 12);
+                for y in 0..12 {
+                    for x in 0..12 {
+                        let expected = if !contains(rect, x, y) {
+                            0
+                        } else {
+                            sample_coverage(x, y, |x, y| match &source {
+                                Selection::Ellipse(shape) => shape.contains_point(x, y),
+                                Selection::RoundedRect(shape) => shape.contains_point(x, y),
+                                _ => unreachable!(),
+                            })
+                        };
+                        assert_eq!(
+                            source.coverage(x, y, 12, 12),
+                            expected,
+                            "{rect:?} ({x},{y}) rounded {rounded}"
+                        );
+                        assert_eq!(clipped.coverage(x, y, 12, 12), expected);
+                        assert_eq!(clipped.covers(x, y, 12, 12), expected > 0);
+                        let (row, column) = match &source {
+                            Selection::Ellipse(shape) => (shape.row_span(y), shape.column_span(x)),
+                            Selection::RoundedRect(shape) => {
+                                (shape.row_span(y), shape.column_span(x))
+                            }
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(row.is_some_and(|(a, b)| x >= a && x < b), expected > 0);
+                        assert_eq!(column.is_some_and(|(a, b)| y >= a && y < b), expected > 0);
+                    }
+                }
+            }
+        }
+        let hard = Selection::ellipse_rect(PixelRect::new(0, 0, 8, 8), 8, 8);
+        let soft = hard.clone().with_antialias(true, 8, 8);
+        assert_eq!(hard.coverage(1, 0, 8, 8), 0);
+        assert!((1..255).contains(&soft.coverage(1, 0, 8, 8)));
+        assert_eq!(soft.coverage(4, 4, 8, 8), 255);
+        assert_eq!(soft.clone().with_antialias(false, 8, 8), hard);
+        assert!(soft.clone().rebase(1, 1, 6, 6).coverage(0, 0, 6, 6) > 0);
+        let moved = soft.moved_box(PixelRect::new(2, 2, 8, 8), 12, 12);
+        assert!(moved.is_antialiased());
+        assert!((1..255).contains(&moved.coverage(3, 2, 12, 12)));
+    }
 
     #[test]
     fn fully_transparent_regions_ignore_hidden_rgb_but_keep_alpha_boundaries() {

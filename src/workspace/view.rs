@@ -774,10 +774,113 @@ impl Workspace {
                 }),
             ));
         }
+        let antialias = self.active_selection_antialias();
+        options = options.child(
+            toggle_button("Antialias edges", antialias).on_click(cx.listener(
+                move |this, _, window, cx| this.set_selection_antialias(!antialias, window, cx),
+            )),
+        );
+        if !(self.tool == Tool::OvalSelect && self.oval_circle) {
+            options = options.child(self.aspect_options(false, cx));
+        }
         if self.selection_shape_rect().is_some() {
-            options = options.child(self.selection_size_row(cx));
+            options = options
+                .child(section_label("POSITION"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.numeric_chip(NumericField::SelectionX, Some("X"), cx))
+                        .child(self.numeric_chip(NumericField::SelectionY, Some("Y"), cx)),
+                )
+                .child(section_label("SIZE"))
+                .child(self.selection_size_row(cx));
         }
         options
+    }
+
+    fn aspect_options(&self, crop: bool, cx: &Context<Self>) -> Div {
+        use crate::constraints::AspectRatio;
+        let active = if crop {
+            self.crop_ratio
+        } else {
+            self.selection_ratio
+        };
+        let image = self.active_tab().map(|tab| AspectRatio {
+            width: tab.document.width(),
+            height: tab.document.height(),
+        });
+        let presets = [
+            ("Free", None),
+            ("1:1", Some(AspectRatio::SQUARE)),
+            (
+                "4:3",
+                Some(AspectRatio {
+                    width: 4,
+                    height: 3,
+                }),
+            ),
+            (
+                "16:9",
+                Some(AspectRatio {
+                    width: 16,
+                    height: 9,
+                }),
+            ),
+            ("Image", image),
+        ];
+        let buttons = presets
+            .into_iter()
+            .filter(|(label, _)| *label != "Image" || image.is_some())
+            .map(|(label, ratio)| {
+                choice_button(label, active == ratio).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if crop {
+                            this.crop_ratio = ratio;
+                            if let Some(ratio) = ratio {
+                                this.crop_ratio_value = ratio;
+                            }
+                        } else {
+                            this.selection_ratio = ratio;
+                            if let Some(ratio) = ratio {
+                                this.selection_ratio_value = ratio;
+                            }
+                        }
+                        cx.notify();
+                    },
+                ))
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section_label("ASPECT RATIO"))
+            .child(segmented(buttons))
+            .when(active.is_some(), |panel| {
+                panel.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.numeric_chip(
+                            if crop {
+                                NumericField::CropRatioWidth
+                            } else {
+                                NumericField::SelectionRatioWidth
+                            },
+                            Some("Ratio W"),
+                            cx,
+                        ))
+                        .child(self.numeric_chip(
+                            if crop {
+                                NumericField::CropRatioHeight
+                            } else {
+                                NumericField::SelectionRatioHeight
+                            },
+                            Some("H"),
+                            cx,
+                        )),
+                )
+            })
     }
 
     fn selection_radius_row(&self, cx: &Context<Self>) -> Div {
@@ -1610,6 +1713,7 @@ impl Workspace {
                                         ]))
                                     })
                             })
+                            .when(self.tool == Tool::Crop, |panel| panel.child(self.aspect_options(true, cx)))
                             .when_some(self.crop, |panel, _| {
                                 panel
                                     .child(section_label("CROP"))

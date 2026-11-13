@@ -1,7 +1,8 @@
 # Lime capability roadmap — local working document
 
-Requested by the maintainer. Keep this document uncommitted so we can revisit
-scope, implementation status, and manual feedback between passes. GIMP is a
+Requested by the maintainer to revisit scope, implementation status, and manual
+feedback between passes. The roadmap is now tracked; new pass changes stay
+uncommitted until the maintainer requests a commit. GIMP is a
 functional reference; its interface is not a design target. Add no toolbox tools.
 Existing review fixes and other uncommitted work must remain intact.
 
@@ -21,11 +22,12 @@ is left to the maintainer. A checked item does not imply native interaction QA.
 
 ## Selection quality
 
-- [ ] Optional antialiasing for curved, polygon, and wand selection edges.
+- [x] Optional antialiasing for oval/circle and rounded-rectangle edges.
+- [ ] Optional antialiasing for polygon and wand selection edges.
 - [ ] Optional feathering at selection creation with an explicit radius.
 - [x] Preserve soft coverage through Grow/Shrink and combinations.
 - [ ] Define feathering at canvas boundaries consistently.
-- [ ] Exact selection position/size controls and fixed-ratio constraints.
+- [x] Exact geometric selection position/size controls and fixed-ratio constraints.
 
 Acceptance: fill, paint, clear, clipboard, adjustments, and filters consume the
 same coverage; selection-only changes preserve the saved revision; geometry
@@ -39,7 +41,7 @@ clipping retains the original curves; pixel-art hard selections remain available
 - [x] Keyboard layer nudging, with larger modifier steps.
 - [x] Typed layer position.
 - [ ] Further anchoring/pivot controls for transforms.
-- [ ] Crop aspect ratios and consistent dimension constraints.
+- [x] Crop aspect ratios and consistent dimension constraints.
 
 Acceptance: preview and commit agree; Escape cancels drafts; one completed edit
 creates one undo entry; tab/layer/tool changes never apply a draft to another
@@ -319,7 +321,7 @@ No interactive or visual smoke testing was performed.
 
 ## Pass 4 — PDF reliability and ordinary text editing
 
-Implemented, uncommitted:
+Committed as `16afc87`:
 
 - Reviewed PDF import and fixed the four checked reliability items in its section
   above. Large imported documents no longer prepare their rendered canvases on
@@ -347,8 +349,7 @@ and both release benchmarks pass. Seven regression tests were added for PDF
 dimension/preparation contracts, partial text replacement/history, grapheme and
 word deletion, delayed pointer selection, selection rectangles, and font-query
 navigation isolation. macOS bundling and signature verification pass;
-`dist/Lime.app` was rebuilt. All Pass 4 edits, including this roadmap update,
-remain uncommitted. No interactive or visual smoke tests were run.
+`dist/Lime.app` was rebuilt. No interactive or visual smoke tests were run.
 
 Manual interaction testing stays with the maintainer. Useful checks:
 
@@ -361,3 +362,56 @@ Manual interaction testing stays with the maintainer. Useful checks:
   the preview catches up, then type or navigate. Confirm the caret remains stable.
 - Exercise the font query's clipboard/history and modified navigation, and ensure
   it never changes canvas text. Confirm styles still affect the whole layer.
+
+## Pass 5 — selection and crop precision
+
+Implemented, uncommitted:
+
+- Rectangle and oval selections have editable X/Y as well as Width/Height.
+  Numeric edits preview live and commit one selection-only undo step; empty text
+  and Escape restore the original selection. These controls cover editable
+  geometric selections, rather than arbitrary coverage masks.
+- Selections and Crop have independent session aspect-ratio preferences: Free,
+  1:1, 4:3, 16:9, Image, or custom positive integer parts. Circle takes priority
+  over the oval ratio. Choosing a ratio does not reshape the existing box; the
+  next creation drag, handle resize, or numeric dimension edit uses it.
+- One shared geometry implementation bounds ratio resizes and typed dimensions,
+  preserves opposite corners/edges, and centers the unhandled axis for a side
+  resize. Dimensions round to image pixels; ratios smaller than a pixel remain
+  approximate. Fixed-ratio handles stop at minimum size when crossing their
+  opposite edge. Free handles keep their previous crossing behavior.
+- Optional Antialias edges smooths oval/circle and rounded-rectangle coverage.
+  It starts off. Geometric curves keep their quality through move/resize,
+  image transforms, canvas changes, clipping, and undo. Existing masks retain
+  coverage when the tool preference changes; antialiasing does not try to
+  reconstruct geometry from a combined or clipped mask.
+- Coverage uses a 4×4 subpixel sample only near the curve; whole-pixel bounds
+  provide fast interior/exterior results. Fill, clear, paint, clipboard,
+  adjustments, and filters consume the existing shared coverage interface.
+  Outline spans include pixels with nonzero soft coverage.
+- Numeric position/size edits preserve the selection's current corner radius
+  and quality, including after undo, rather than reusing stale tool settings.
+  Radius readouts and steppers follow the current geometric selection.
+- No new toolbox tool, dependency, or project-format change. Polygon/wand
+  antialiasing, feather-on-creation, and arbitrary mask position controls remain
+  later work.
+
+Automatic validation: formatting, Clippy with warnings denied, all 287 tests,
+and both release benchmarks pass. Six new regression tests cover constrained
+geometry and extreme deltas, subpixel coverage and outline spans (including
+clipped/thin curves), fill/clear coverage, transform invariance, and selection
+history/saved-state behavior. Existing numeric limit tests also cover ratio
+inputs. The macOS bundle was rebuilt and its signature verified. No interactive
+or visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Draw rectangle, rounded rectangle, oval, and circle selections with hard and
+  antialiased edges. Fill/Clear at high zoom, combine and clip selections, then
+  undo/redo. Change radius, undo, then edit X/Y or size without changing corners.
+- Try each ratio and a custom portrait ratio in Select and Crop; drag every
+  handle to canvas edges and across its opposite edge. Edit Width/Height near
+  an edge and confirm the paired dimension and preview agree.
+- Move selections numerically, clear a field, press Escape, and undo/redo.
+  Confirm selection-only changes do not mark a saved image unsaved. Apply a crop
+  and confirm it remains one image undo step. Check controls in a narrow sidebar.

@@ -35,6 +35,12 @@ pub(super) enum NumericField {
     MoveX,
     MoveY,
     GridSpacing,
+    SelectionX,
+    SelectionY,
+    SelectionRatioWidth,
+    SelectionRatioHeight,
+    CropRatioWidth,
+    CropRatioHeight,
 }
 
 impl NumericField {
@@ -62,6 +68,12 @@ impl NumericField {
             Self::MoveX => 19,
             Self::MoveY => 20,
             Self::GridSpacing => 21,
+            Self::SelectionX => 22,
+            Self::SelectionY => 23,
+            Self::SelectionRatioWidth => 24,
+            Self::SelectionRatioHeight => 25,
+            Self::CropRatioWidth => 26,
+            Self::CropRatioHeight => 27,
         }
     }
 
@@ -105,7 +117,11 @@ impl NumericField {
     pub(super) fn is_selection(self) -> bool {
         matches!(
             self,
-            Self::SelectionRadius | Self::SelectionWidth | Self::SelectionHeight
+            Self::SelectionRadius
+                | Self::SelectionWidth
+                | Self::SelectionHeight
+                | Self::SelectionX
+                | Self::SelectionY
         )
     }
 
@@ -128,6 +144,10 @@ impl NumericField {
                 | Self::PathStrokeSize
                 | Self::RotateAngle
                 | Self::GridSpacing
+                | Self::SelectionRatioWidth
+                | Self::SelectionRatioHeight
+                | Self::CropRatioWidth
+                | Self::CropRatioHeight
         )
     }
 
@@ -135,6 +155,10 @@ impl NumericField {
         let (min, max) = match self {
             Self::Tolerance => (0, 255),
             Self::GridSpacing => (1, 4096),
+            Self::SelectionRatioWidth
+            | Self::SelectionRatioHeight
+            | Self::CropRatioWidth
+            | Self::CropRatioHeight => (1, 16384),
             Self::RotateAngle => (-3600, 3600),
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
             Self::BrushSpacing => (1, 100),
@@ -303,7 +327,15 @@ impl Workspace {
         let rect = self.selection_shape_rect();
         let crop = self.crop;
         match field {
-            NumericField::SelectionRadius => Some(i64::from(self.selection_radius)),
+            NumericField::SelectionX => rect.map(|rect| rect.x),
+            NumericField::SelectionY => rect.map(|rect| rect.y),
+            NumericField::SelectionRatioWidth => Some(i64::from(self.selection_ratio_value.width)),
+            NumericField::SelectionRatioHeight => {
+                Some(i64::from(self.selection_ratio_value.height))
+            }
+            NumericField::CropRatioWidth => Some(i64::from(self.crop_ratio_value.width)),
+            NumericField::CropRatioHeight => Some(i64::from(self.crop_ratio_value.height)),
+            NumericField::SelectionRadius => Some(i64::from(self.active_selection_radius())),
             NumericField::SelectionWidth => rect.map(|rect| i64::from(rect.width)),
             NumericField::SelectionHeight => rect.map(|rect| i64::from(rect.height)),
             NumericField::CropX => crop.map(|crop| i64::from(crop.x)),
@@ -537,9 +569,26 @@ impl Workspace {
                     |rect| rect.width.min(rect.height) / 2,
                 );
                 self.selection_radius = value.min(max);
-                if let Some(selection) = rect.and_then(|rect| self.selection_for_rect(rect)) {
+                if let Some(selection) =
+                    rect.and_then(|rect| self.selection_for_rect(rect, Some(self.selection_radius)))
+                {
                     self.selection_preview = Some(selection);
                 }
+            }
+            NumericField::SelectionX | NumericField::SelectionY => {
+                let Some(mut rect) = self.selection_shape_rect() else {
+                    return;
+                };
+                let Some(tab) = self.active_tab() else {
+                    return;
+                };
+                if field == NumericField::SelectionX {
+                    rect.x = i64::from(value.min(tab.document.width().saturating_sub(rect.width)));
+                } else {
+                    rect.y =
+                        i64::from(value.min(tab.document.height().saturating_sub(rect.height)));
+                }
+                self.selection_preview = self.selection_for_rect(rect, None);
             }
             NumericField::SelectionWidth | NumericField::SelectionHeight => {
                 if value == 0 {
@@ -554,14 +603,23 @@ impl Workspace {
                     return;
                 };
                 let (width, height) = tab.document.content.size();
-                if field == NumericField::SelectionWidth {
-                    let left = u32::try_from(rect.x).unwrap_or(0);
-                    rect.width = value.min(width.saturating_sub(left).max(1));
+                let limits = (
+                    width
+                        .saturating_sub(u32::try_from(rect.x).unwrap_or(0))
+                        .max(1),
+                    height
+                        .saturating_sub(u32::try_from(rect.y).unwrap_or(0))
+                        .max(1),
+                );
+                if let Some(ratio) = self.effective_selection_ratio() {
+                    (rect.width, rect.height) =
+                        ratio.fit(field == NumericField::SelectionWidth, value, limits);
+                } else if field == NumericField::SelectionWidth {
+                    rect.width = value.min(limits.0);
                 } else {
-                    let top = u32::try_from(rect.y).unwrap_or(0);
-                    rect.height = value.min(height.saturating_sub(top).max(1));
+                    rect.height = value.min(limits.1);
                 }
-                if let Some(selection) = self.selection_for_rect(rect) {
+                if let Some(selection) = self.selection_for_rect(rect, None) {
                     self.selection_preview = Some(selection);
                 }
             }
@@ -593,10 +651,17 @@ impl Workspace {
                     return;
                 };
                 let (width, height) = tab.document.content.size();
-                if field == NumericField::CropWidth {
-                    crop.width = value.min(width.saturating_sub(crop.x).max(1));
+                let limits = (
+                    width.saturating_sub(crop.x).max(1),
+                    height.saturating_sub(crop.y).max(1),
+                );
+                if let Some(ratio) = self.crop_ratio {
+                    (crop.width, crop.height) =
+                        ratio.fit(field == NumericField::CropWidth, value, limits);
+                } else if field == NumericField::CropWidth {
+                    crop.width = value.min(limits.0);
                 } else {
-                    crop.height = value.min(height.saturating_sub(crop.y).max(1));
+                    crop.height = value.min(limits.1);
                 }
                 self.crop = Some(crop);
             }
@@ -770,7 +835,10 @@ impl Workspace {
                 self.selection_radius = original as u32;
                 self.selection_preview = None;
             }
-            NumericField::SelectionWidth | NumericField::SelectionHeight => {
+            NumericField::SelectionWidth
+            | NumericField::SelectionHeight
+            | NumericField::SelectionX
+            | NumericField::SelectionY => {
                 self.selection_preview = None;
             }
             NumericField::CropX
@@ -792,6 +860,22 @@ impl Workspace {
         match field {
             NumericField::Tolerance => self.tolerance = value as u8,
             NumericField::GridSpacing => self.grid_spacing = value as u32,
+            NumericField::SelectionRatioWidth | NumericField::SelectionRatioHeight => {
+                if field == NumericField::SelectionRatioWidth {
+                    self.selection_ratio_value.width = value as u32;
+                } else {
+                    self.selection_ratio_value.height = value as u32;
+                }
+                self.selection_ratio = Some(self.selection_ratio_value);
+            }
+            NumericField::CropRatioWidth | NumericField::CropRatioHeight => {
+                if field == NumericField::CropRatioWidth {
+                    self.crop_ratio_value.width = value as u32;
+                } else {
+                    self.crop_ratio_value.height = value as u32;
+                }
+                self.crop_ratio = Some(self.crop_ratio_value);
+            }
             NumericField::BrushSize => self.set_brush_value(BrushField::Size, value as u32, cx),
             NumericField::BrushSpacing => {
                 self.set_brush_value(BrushField::Spacing, value as u32, cx)
@@ -828,18 +912,27 @@ impl Workspace {
             .child(up)
     }
 
-    fn selection_for_rect(&self, rect: PixelRect) -> Option<Selection> {
+    fn selection_for_rect(&self, rect: PixelRect, radius: Option<u32>) -> Option<Selection> {
         let tab = self.active_tab()?;
         let (width, height) = tab.document.content.size();
         let current = self.selection_preview.as_ref().or(Some(&tab.selection))?;
         match current {
-            Selection::Ellipse(_) => Some(Selection::ellipse_rect(rect, width, height)),
-            Selection::Rect(_) | Selection::RoundedRect(_) => Some(Selection::rounded_rect_rect(
-                rect,
-                self.selection_radius,
-                width,
-                height,
-            )),
+            Selection::Rect(_) | Selection::RoundedRect(_) if radius.is_some() => {
+                Some(Selection::rounded_rect_quality(
+                    rect,
+                    radius?,
+                    width,
+                    height,
+                    if matches!(current, Selection::RoundedRect(_)) {
+                        current.is_antialiased()
+                    } else {
+                        self.selection_antialias
+                    },
+                ))
+            }
+            Selection::Rect(_) | Selection::RoundedRect(_) | Selection::Ellipse(_) => Some(
+                super::selection::placed_selection(current.clone(), rect, width, height),
+            ),
             _ => None,
         }
     }
@@ -1101,6 +1194,10 @@ mod tests {
             (NumericField::BrushOpacity, 0, 100),
             (NumericField::PathStrokeSize, 1, 500),
             (NumericField::TextLetterSpacing, -64, 256),
+            (NumericField::SelectionRatioWidth, 1, 16384),
+            (NumericField::SelectionRatioHeight, 1, 16384),
+            (NumericField::CropRatioWidth, 1, 16384),
+            (NumericField::CropRatioHeight, 1, 16384),
         ] {
             assert_eq!(field.constrain(i64::MIN), min);
             assert_eq!(field.constrain(i64::MAX), max);

@@ -139,16 +139,18 @@ impl Workspace {
                         *selection = previous.scale_mask(old, content.size());
                         return Dirty::Canvas;
                     }
+                    let antialias = previous.is_antialiased();
                     *selection = match previous {
                         Selection::Rect(rect) | Selection::Inverse(rect) => previous.moved_box(
                             transform::scale_rect(rect, old, content.size()),
                             content.size().0,
                             content.size().1,
                         ),
-                        Selection::Ellipse(ellipse) => Selection::ellipse_rect(
+                        Selection::Ellipse(ellipse) => Selection::ellipse_rect_quality(
                             transform::scale_rect(ellipse.rect(), old, content.size()),
                             content.size().0,
                             content.size().1,
+                            antialias,
                         ),
                         other => other,
                     };
@@ -224,14 +226,20 @@ fn map_image_selection(
         };
     }
     if let Selection::Ellipse(ellipse) = &selection {
-        return Selection::ellipse_rect(map_image_rect(ellipse.rect(), old, action), new.0, new.1);
+        return Selection::ellipse_rect_quality(
+            map_image_rect(ellipse.rect(), old, action),
+            new.0,
+            new.1,
+            selection.is_antialiased(),
+        );
     }
     if let Selection::RoundedRect(shape) = &selection {
-        return Selection::rounded_rect_rect(
+        return Selection::rounded_rect_quality(
             map_image_rect(shape.rect(), old, action),
             shape.radius(),
             new.0,
             new.1,
+            selection.is_antialiased(),
         );
     }
     let (Selection::Rect(rect) | Selection::Inverse(rect)) = selection else {
@@ -943,6 +951,52 @@ fn drop_preview(preview: WarpPreview, window: &mut Window, cx: &mut Context<Work
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_turns_and_flips_keep_antialiased_selection_coverage() {
+        for selection in [
+            Selection::ellipse_rect_quality(
+                crate::preview::PixelRect::new(1, 1, 6, 4),
+                10,
+                8,
+                true,
+            ),
+            Selection::rounded_rect_quality(
+                crate::preview::PixelRect::new(1, 1, 6, 4),
+                2,
+                10,
+                8,
+                true,
+            ),
+        ] {
+            for action in [
+                ImageAdjust::RotateRight,
+                ImageAdjust::FlipHorizontal,
+                ImageAdjust::FlipVertical,
+            ] {
+                let new = if action == ImageAdjust::RotateRight {
+                    (8, 10)
+                } else {
+                    (10, 8)
+                };
+                let transformed = map_image_selection(selection.clone(), (10, 8), new, action);
+                assert!(transformed.is_antialiased());
+                for y in 0..8 {
+                    for x in 0..10 {
+                        let point = match action {
+                            ImageAdjust::RotateRight => (7 - y, x),
+                            ImageAdjust::FlipHorizontal => (9 - x, y),
+                            _ => (x, 7 - y),
+                        };
+                        assert_eq!(
+                            transformed.coverage(point.0, point.1, new.0, new.1),
+                            selection.coverage(x, y, 10, 8)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn constrained_rotation_snaps_absolute_angles_and_survives_the_angle_seam() {

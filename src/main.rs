@@ -5,6 +5,7 @@
 
 mod adjustments;
 mod commands;
+mod constraints;
 mod document;
 mod filters;
 mod geometry;

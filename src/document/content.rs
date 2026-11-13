@@ -2143,6 +2143,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antialiased_selection_coverage_is_shared_by_fill_and_clear() {
+        let selection = Selection::ellipse_rect_quality(PixelRect::new(0, 0, 8, 8), 8, 8, true);
+        let mut content = DocumentContent::single_layer("Soft oval".into(), RgbaImage::new(8, 8));
+        let id = content.top_layer_id();
+        let ink = Rgba([220, 40, 10, 255]);
+        assert!(
+            content
+                .fill_bucket(
+                    id,
+                    4,
+                    4,
+                    ink,
+                    &selection,
+                    FillRequest {
+                        mode: FillMode::Selection,
+                        sample_all: false,
+                        tolerance: 0
+                    }
+                )
+                .is_some()
+        );
+        let coverage = selection.coverage(1, 0, 8, 8);
+        assert!((1..255).contains(&coverage));
+        assert_eq!(
+            *content.layer(id).unwrap().pixels.get_pixel(1, 0),
+            Rgba([220, 40, 10, coverage])
+        );
+        assert_eq!(*content.layer(id).unwrap().pixels.get_pixel(4, 4), ink);
+        assert!(content.clear(id, &selection).is_some());
+        assert_eq!(content.layer(id).unwrap().pixels.get_pixel(4, 4).0[3], 0);
+        let expected = ((u16::from(coverage) * u16::from(255 - coverage) + 127) / 255) as u8;
+        assert_eq!(
+            content.layer(id).unwrap().pixels.get_pixel(1, 0).0[3],
+            expected
+        );
+    }
+
+    #[test]
     fn image_operations_transform_guides_and_guides_require_project_saving() {
         use crate::guides::{Axis, Guide, MAX_GUIDES};
         use crate::transform::{Anchor, Mirror, Resample, Turn};

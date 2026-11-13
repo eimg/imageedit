@@ -26,14 +26,28 @@ Lime supports layered raster editing. The empty workspace can open a
 file or create an image. Crop that image: drag the box, move it from inside,
 resize it from its handles, and edit X, Y, Width, and Height in the Crop
 options. Typed values apply immediately, and an empty field leaves the crop
-unchanged. Sample or set swatches,
+unchanged.
+Crop has Free, 1:1, 4:3, 16:9, Image, and custom integer aspect ratios. A fixed
+ratio constrains creation, handle resize, and numeric dimension edits; choosing
+a ratio alone leaves the current box unchanged. Sample or set swatches,
 and fill connected regions on the active layer. Rectangle, oval, circle,
 freehand or polygon, and wand selections limit fill and Clear to Transparency,
 and Crop to Selection uses the selection bounds. Rectangle Select and Oval Select
 are separate tools. Oval Select has a Circle option for an exact circle, and
 Rectangle Select has a corner radius control with minus and plus buttons, and
-the Width/Height fields accept typed values. Empty numeric text does not change
-the selection.
+the X/Y and Width/Height fields accept typed values for editable geometric
+selections. Empty text or Escape restores the numeric edit. Selection and Crop
+share ratio geometry from `src/constraints.rs`: dimensions round to pixels,
+resizes stay bounded, side handles center the untouched axis, and corner handles
+keep their opposite corner. Fixed-ratio handles stop at minimum size rather than
+crossing their opposite edge. Circle overrides the oval ratio. Rectangle and
+oval tools remember a shared ratio during the session; Crop has a separate one.
+Antialias edges defaults off and smooths oval/circle and rounded-rectangle
+coverage with a 4×4 subpixel sample, using fast interior/exterior checks. It
+updates a current editable curve in one selection-only undo step. Masks retain
+their coverage when the preference changes. Move, resize, crop, canvas resize,
+image transforms, and history preserve curve quality; clipped curves become
+coverage masks.
 Rectangle and oval drags may start or extend outside the canvas; coverage stays
 bounded to canvas pixels and clipped curves retain their original geometry.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
@@ -230,9 +244,11 @@ a rectangle, an ellipse, a rounded rectangle, the inverse of a rectangle, or a
 canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle
 or oval, resizes it from its handles, moves it from inside, and clears it on a
 click outside. Oval Select has a Circle option. Rectangle Select has a corner
-radius control with minus and plus buttons, and the Width/Height fields edit
-the current size with live preview. Empty numeric text keeps the selection
-unchanged. Cropping or shrinking the canvas preserves curved selection coverage;
+radius control with minus and plus buttons. X/Y and Width/Height fields edit
+the position and size with live preview. Selection and Crop share constrained
+ratio geometry in `src/constraints.rs`; each has its own session preference.
+Geometric curve quality lives with the selection, including in history.
+Empty numeric text restores the selection. Cropping or shrinking the canvas preserves curved selection coverage;
 a partially clipped curve becomes a bounded mask. Scaling a rounded selection
 scales its coverage on both axes as a mask. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
@@ -339,9 +355,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
-- `src/workspace/numeric.rs` edits the selection radius, selection size, crop
+- `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
   fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity, path
-  stroke size, Move position, Scale Layer dimensions, Rotate angle, and text size/letter/line
+  stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
+  Rotate angle, and text size/letter/line
   spacing inline with a caret and text selection. Values preview live; selection,
   scale, and Move edits commit one history entry. Rotate angles retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing

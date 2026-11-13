@@ -53,6 +53,61 @@ enum SelectionHit {
 }
 
 impl Workspace {
+    pub(super) fn active_selection_radius(&self) -> u32 {
+        match self
+            .selection_preview
+            .as_ref()
+            .or_else(|| self.active_tab().map(|tab| &tab.selection))
+        {
+            Some(Selection::RoundedRect(shape)) => shape.radius(),
+            Some(Selection::Rect(_)) => 0,
+            _ => self.selection_radius,
+        }
+    }
+
+    pub(super) fn effective_selection_ratio(&self) -> Option<crate::constraints::AspectRatio> {
+        if self.tool == Tool::OvalSelect && self.oval_circle {
+            Some(crate::constraints::AspectRatio::SQUARE)
+        } else {
+            self.selection_ratio
+        }
+    }
+
+    pub(super) fn active_selection_antialias(&self) -> bool {
+        self.active_tab()
+            .filter(|tab| {
+                matches!(
+                    tab.selection,
+                    Selection::Ellipse(_) | Selection::RoundedRect(_)
+                )
+            })
+            .map_or(self.selection_antialias, |tab| {
+                tab.selection.is_antialiased()
+            })
+    }
+
+    pub(super) fn set_selection_antialias(
+        &mut self,
+        antialias: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection_antialias = antialias;
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            cx.notify();
+            return;
+        };
+        let selection = tab.selection.clone().with_antialias(
+            antialias,
+            tab.document.width(),
+            tab.document.height(),
+        );
+        if selection != tab.selection {
+            self.commit_selection(selection, window, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn clear_selection_gesture(&mut self) {
         if self
             .numeric_edit
@@ -78,6 +133,8 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
+        self.selection_antialias = self.active_selection_antialias();
+        self.selection_radius = self.active_selection_radius();
         self.clear_selection_gesture();
         let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
@@ -171,8 +228,17 @@ impl Workspace {
                         SelectionShape::Ellipse
                     };
                     let radius = self.selection_radius;
-                    self.unclamped_pointer_pixel(position, scale)
-                        .map(|end| drag_selection(shape, radius, start, end, width, height))
+                    self.unclamped_pointer_pixel(position, scale).map(|end| {
+                        Selection::shape_drag(
+                            shape,
+                            start,
+                            end,
+                            (width, height),
+                            radius,
+                            self.selection_antialias,
+                            self.effective_selection_ratio(),
+                        )
+                    })
                 }
             }
             SelectionGesture::Move { rect, grab } => pointer.map(|pixel| {
@@ -194,7 +260,17 @@ impl Workspace {
                 );
                 placed_selection(
                     previous,
-                    resize_rect(rect, edges, delta, width, height),
+                    self.effective_selection_ratio().map_or_else(
+                        || resize_rect(rect, edges, delta, width, height),
+                        |ratio| {
+                            ratio.resize(
+                                rect,
+                                (edges.left, edges.right, edges.top, edges.bottom),
+                                delta,
+                                (width, height),
+                            )
+                        },
+                    ),
                     width,
                     height,
                 )
@@ -693,7 +769,9 @@ impl Workspace {
                 .filter(|tab| !tab.busy())
                 .map(|tab| (tab.document.content.size(), tab.selection.clone()));
             if let Some(((width, height), selection)) = state {
-                if let Some(circle) = circle_selection(&selection, width, height) {
+                if let Some(circle) = circle_selection(&selection, width, height).map(|shape| {
+                    shape.with_antialias(self.active_selection_antialias(), width, height)
+                }) {
                     if circle != selection {
                         self.commit_selection(circle, window, cx);
                     }
@@ -721,7 +799,8 @@ impl Workspace {
             |rect| rect.width.min(rect.height) / 2,
         );
         let max = max.min(i32::MAX as u32) as i32;
-        self.selection_radius = (self.selection_radius as i32 + delta).clamp(0, max) as u32;
+        self.selection_radius =
+            (self.active_selection_radius() as i32 + delta).clamp(0, max) as u32;
         let selection = self
             .selection_preview
             .clone()
@@ -731,7 +810,16 @@ impl Workspace {
                 return;
             };
             let (width, height) = tab.document.content.size();
-            let shape = Selection::rounded_rect_rect(rect, self.selection_radius, width, height);
+            let shape = Selection::rounded_rect_quality(
+                rect,
+                self.selection_radius,
+                width,
+                height,
+                selection
+                    .as_ref()
+                    .filter(|selection| matches!(selection, Selection::RoundedRect(_)))
+                    .map_or(self.selection_antialias, Selection::is_antialiased),
+            );
             self.commit_selection(shape, window, cx);
         }
         cx.notify();
@@ -802,10 +890,11 @@ fn circle_selection(selection: &Selection, width: u32, height: u32) -> Option<Se
         Selection::RoundedRect(shape) => shape.rect(),
         _ => return None,
     };
-    Some(Selection::ellipse_rect(
+    Some(Selection::ellipse_rect_quality(
         centered_square(rect),
         width,
         height,
+        selection.is_antialiased(),
     ))
 }
 
@@ -828,6 +917,7 @@ pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
     }
 }
 
+#[cfg(test)]
 fn drag_selection(
     shape: SelectionShape,
     radius: u32,
@@ -836,12 +926,7 @@ fn drag_selection(
     width: u32,
     height: u32,
 ) -> Selection {
-    match shape {
-        SelectionShape::Rectangle if radius == 0 => Selection::rectangle(start, end, width, height),
-        SelectionShape::Rectangle => Selection::rounded_rect(start, end, radius, width, height),
-        SelectionShape::Ellipse => Selection::ellipse(start, end, width, height),
-        SelectionShape::Circle => Selection::circle(start, end, width, height),
-    }
+    Selection::shape_drag(shape, start, end, (width, height), radius, false, None)
 }
 
 pub(super) fn near_polygon_start(origin: Point<Pixels>, pointer: Point<Pixels>) -> bool {
@@ -864,7 +949,12 @@ pub(super) fn adjustable_rect(selection: Selection) -> Option<PixelRect> {
     }
 }
 
-fn placed_selection(previous: Selection, rect: PixelRect, width: u32, height: u32) -> Selection {
+pub(super) fn placed_selection(
+    previous: Selection,
+    rect: PixelRect,
+    width: u32,
+    height: u32,
+) -> Selection {
     let covers = width > 0
         && height > 0
         && rect.x <= 0
@@ -879,10 +969,19 @@ fn placed_selection(previous: Selection, rect: PixelRect, width: u32, height: u3
                 Selection::Inverse(rect)
             }
         }
-        Selection::Ellipse(_) => Selection::ellipse_rect(rect, width, height),
-        Selection::RoundedRect(shape) => {
-            Selection::rounded_rect_rect(rect, shape.radius(), width, height)
-        }
+        Selection::Ellipse(shape) => Selection::ellipse_rect_quality(
+            rect,
+            width,
+            height,
+            Selection::Ellipse(shape).is_antialiased(),
+        ),
+        Selection::RoundedRect(shape) => Selection::rounded_rect_quality(
+            rect,
+            shape.radius(),
+            width,
+            height,
+            Selection::RoundedRect(shape).is_antialiased(),
+        ),
         _ => {
             if covers {
                 Selection::Full
@@ -1016,6 +1115,69 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_geometry_changes_and_undo_preserve_the_saved_revision() {
+        let rounded = placed_selection(
+            Selection::rounded_rect_quality(PixelRect::new(0, 0, 8, 8), 2, 20, 20, true),
+            PixelRect::new(4, 3, 10, 8),
+            20,
+            20,
+        );
+        assert_eq!(
+            rounded,
+            Selection::rounded_rect_quality(PixelRect::new(4, 3, 10, 8), 2, 20, 20, true)
+        );
+        let mut tab = super::super::tests::opacity_tab();
+        let generation = tab.history.generation();
+        let mut state = tab.state();
+        state.selection = Selection::ellipse_rect_quality(PixelRect::new(0, 0, 1, 2), 2, 2, true);
+        let selection = placed_selection(state.selection, PixelRect::new(1, 0, 1, 2), 2, 2);
+        assert!(selection.is_antialiased());
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Selection,
+                Some((state.content, state.active_layer, selection.clone(), patch)),
+                1
+            )
+            .0
+        );
+        assert_eq!(tab.selection, selection);
+        assert!(!tab.history.is_dirty());
+        assert_eq!(
+            adjustable_rect(tab.selection.clone()),
+            Some(PixelRect::new(1, 0, 1, 2))
+        );
+        let target = tab.history.undo_target().unwrap().0.clone();
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &target.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                tab.history.generation(),
+                super::super::Change::Undo,
+                Some((target.content, target.active_layer, target.selection, patch)),
+                2
+            )
+            .0
+        );
+        assert_eq!(tab.selection, Selection::Unrestricted);
+        assert!(!tab.history.is_dirty());
+    }
 
     #[test]
     fn wand_composite_sampling_uses_canvas_coordinates_and_visible_layers() {
