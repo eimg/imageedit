@@ -106,6 +106,14 @@ and corner drags keep their opposite edge or corner, independent of this choice.
 Return or clicking outside commits one undo step; Escape or empty text restores
 the original size. Aspect locking starts on; Shift temporarily reverses the lock
 while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
+**Fit Layer to Canvas** in these options or the Layer menu scales the whole layer
+proportionally to fit inside the canvas and centers it. This works even when its
+resize handles are off-screen. It uses the chosen resampling, may enlarge smaller
+layers, and commits one undo step. The layer must be visible, rasterized, and
+position-unlocked. The canvas and selection stay unchanged. **Layer to Image
+Size** is a separate command that crops/pads the layer at its existing pixel
+positions; it does not proportionally scale the image.
+
 In **Rotate**, enter an angle in degrees (including negative values and tenths),
 then use Apply after finishing the numeric edit. **Pivot** offers nine anchors
 on the original layer, signed canvas X/Y coordinates in tenths of an image pixel,

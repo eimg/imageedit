@@ -1840,6 +1840,15 @@ impl Workspace {
                                         .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Size anchor"))
                                         .child(transform_point_grid(TransformPointControl::Scale, Some(self.scale_anchor.grid_index()), cx))
                                         .id("scale-anchor-options").tooltip(tooltip("Anchor for typed Width/Height changes. Handle drags keep their opposite edge or corner.")))
+                                    .child(button("scale", "Fit Layer to Canvas")
+                                        .id("fit-layer-to-canvas")
+                                        .text_size(px(12.))
+                                        .when(self.can_fit_active_layer(), |button| button.cursor_pointer()
+                                            .hover(|button| button.bg(rgb(HOVER)))
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::commands::FitLayerToCanvas), cx)))
+                                        .when(!self.can_fit_active_layer(), |button| button.text_color(rgb(DISABLED)))
+                                        .tooltip(tooltip("Scale the whole layer proportionally and center it inside the canvas. Uses the selected resampling; may enlarge smaller layers. Requires a visible raster layer with unlocked position and enough project memory.")))
                                     .child(section_label("RESAMPLE"))
                                     .child(segmented([
                                         resample_choice("Nearest", Resample::Nearest, resample, cx),

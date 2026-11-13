@@ -110,8 +110,12 @@ pixel transforms, scale, fit, and layer content crop. Image-wide operations stil
 transform every layer and retain its locks. Editable text remains editable at its
 existing layout anchor, including automatic bitmap resizing; rasterize it before
 locking alpha. Opacity, visibility, order, and deletion remain available.
-The Layer menu can align, fit it to the canvas, or crop it to its opaque
-pixels. Image → Crop to Content
+The Layer menu can align a layer, proportionally Fit Layer to Canvas, or crop
+it to its opaque pixels. Fit Layer to Canvas also appears in Scale Layer options,
+scales the complete raster (including transparent margins), and centers it. It
+may enlarge smaller layers and uses the workspace's selected resampling. Hidden,
+position-locked, and editable-text layers cannot use it. Layer to Image Size
+instead crops/pads at the existing canvas pixel positions. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Rotate also accepts
@@ -422,7 +426,12 @@ document is a single plain layer without paths, guides, or editable text.
   changes no pixels/history; handle behavior stays independent. Anchor placement
   rounds absolute canvas coordinates and rejects i32 overflow before resampling.
   All targets respect image and stack budgets. Hidden layers must
-  be shown before scaling.
+  be shown before scaling. Fit Layer to Canvas routes through the shared action
+  and background edit pipeline. `geometry::proportional_fit` uses integer aspect
+  comparison/rounding and plans the centered bounds without allocating pixels;
+  `DocumentContent` preflights replacement memory before scaling/positioning.
+  Identical fitted bounds are a no-op; pure recentering shares the existing pixels.
+  The selection stays in canvas coordinates and one fit is one image undo step.
 - `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
   lightness, and it desaturates or inverts. It also balances color and maps
   levels and curves through a 256-entry lookup table per channel.
@@ -642,7 +651,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   The resizable toolbox starts at the same total width, sharing the inspector
   constant. Its outer container owns that width; the resize grip overlays its
   inside edge instead of adding a separate layout column.
-  The Layer menu has the fit and content-crop commands.
+  The Layer menu has separate proportional Fit Layer to Canvas, crop/pad Layer
+  to Image Size, and content-crop commands.
   Pointer Move computes snapping from the unsnapped grab on every event, including
   final release and Control changes; it never accumulates snapped deltas.
   `src/guides.rs` owns bounded guide metadata, image transforms, grid density, and
@@ -666,6 +676,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   accept signed decimals for angles, pivots, and Perspective corners; other
   numeric fields retain their existing contracts. Pivot and corner fields
   restore exact tenths on empty text/Escape. Apply and canvas drags finish a numeric edit first.
+  Fit Layer to Canvas waits for any numeric image/selection edit to publish;
+  deferred fits validate the tab, revision, tool, and original active layer before
+  acting. Its option button stops the generic mouse-down commit so the action
+  owns that deferred handoff.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
   options edit X, Y, Width, and Height live.

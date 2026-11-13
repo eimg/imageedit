@@ -1574,6 +1574,40 @@ impl DocumentContent {
         self.set_offset(id, offset)
     }
 
+    pub fn scale_to_canvas_bounds(&self, id: LayerId) -> Option<crate::geometry::PixelBox> {
+        let layer = self.layer(id)?;
+        if layer.locks.position
+            || layer.text.is_some()
+            || !layer.visible
+            || !crate::transform::canvas_allowed(self.width, self.height)
+        {
+            return None;
+        }
+        let bounds = crate::geometry::proportional_fit(layer.pixels.dimensions(), self.size())?;
+        self.accepts_replacement(id, (bounds.width, bounds.height))
+            .then_some(bounds)
+    }
+
+    // Scales the complete raster and centers it. Alpha lock permits geometry changes.
+    pub fn fit_layer_to_canvas(
+        &mut self,
+        id: LayerId,
+        resample: crate::transform::Resample,
+    ) -> Dirty {
+        let Some(bounds) = self.scale_to_canvas_bounds(id) else {
+            return Dirty::None;
+        };
+        let size = (bounds.width, bounds.height);
+        let resize = self
+            .layer(id)
+            .is_some_and(|layer| layer.pixels.dimensions() != size);
+        if resize && !self.scale_layer(id, size.0, size.1, resample) {
+            return Dirty::None;
+        }
+        let positioned = self.set_offset(id, (bounds.x as i32, bounds.y as i32));
+        if resize { Dirty::Canvas } else { positioned }
+    }
+
     pub fn can_fit_layer(&self, id: LayerId) -> bool {
         self.layer(id).is_some_and(|layer| {
             !layer.locks.position
@@ -2310,6 +2344,116 @@ mod tests {
                 Rgba([255; 4])
             }
         })
+    }
+
+    #[test]
+    fn fit_layer_to_canvas_scales_whole_source_centers_and_preserves_metadata() {
+        use crate::transform::Resample;
+        let source = RgbaImage::from_fn(8, 4, |x, y| {
+            Rgba([x as u8 * 30, y as u8 * 60, 90, if x == 0 { 0 } else { 120 }])
+        });
+        let base = DocumentContent::single_layer("Base".into(), RgbaImage::new(4, 4))
+            .layers
+            .remove(0);
+        let mut layer = DocumentContent::single_layer("Imported".into(), source.clone())
+            .layers
+            .remove(0);
+        layer.id = LayerId(1);
+        layer.offset = (-100, 70);
+        layer.opacity = 131;
+        layer.locks.alpha = true;
+        for resample in [Resample::Nearest, Resample::Bilinear, Resample::Bicubic] {
+            let mut content =
+                DocumentContent::from_layers(4, 4, vec![base.clone(), layer.clone()]).unwrap();
+            assert_eq!(
+                content.fit_layer_to_canvas(layer.id, resample),
+                Dirty::Canvas
+            );
+            let fitted = content.layer(layer.id).unwrap();
+            assert_eq!(fitted.offset, (0, 1));
+            assert_eq!(
+                *fitted.pixels,
+                crate::transform::scale_pixels(&source, 4, 2, resample)
+            );
+            assert_eq!(fitted.id, layer.id);
+            assert_eq!(fitted.name, layer.name);
+            assert_eq!(fitted.opacity, layer.opacity);
+            assert_eq!(fitted.locks, layer.locks);
+            assert_eq!(fitted.blend_mode, layer.blend_mode);
+            assert_eq!(content.size(), (4, 4));
+            assert!(Arc::ptr_eq(
+                &base.pixels,
+                &content.layer(base.id).unwrap().pixels
+            ));
+            let accepted = fitted.pixels.clone();
+            assert_eq!(content.fit_layer_to_canvas(layer.id, resample), Dirty::None);
+            assert!(Arc::ptr_eq(
+                &accepted,
+                &content.layer(layer.id).unwrap().pixels
+            ));
+            content.set_offset(layer.id, (i32::MIN, i32::MAX));
+            assert_ne!(content.fit_layer_to_canvas(layer.id, resample), Dirty::None);
+            assert_eq!(content.layer(layer.id).unwrap().offset, (0, 1));
+            assert!(Arc::ptr_eq(
+                &accepted,
+                &content.layer(layer.id).unwrap().pixels
+            ));
+        }
+        for (hidden, locked, text) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut layer = layer.clone();
+            layer.visible = !hidden;
+            layer.locks.position = locked;
+            if text {
+                layer.text = Some(crate::text::TextStyle {
+                    source: "Text".into(),
+                    family: "sans-serif".into(),
+                    resolved_family: "sans-serif".into(),
+                    face: Default::default(),
+                    size: 16.,
+                    color: Rgba([0, 0, 0, 255]),
+                    spacing: Default::default(),
+                    origin: (0, 0),
+                });
+            }
+            let mut content = DocumentContent::from_layers(4, 4, vec![layer.clone()]).unwrap();
+            assert_eq!(content.scale_to_canvas_bounds(layer.id), None);
+            assert_eq!(
+                content.fit_layer_to_canvas(layer.id, Resample::Nearest),
+                Dirty::None
+            );
+            let unchanged = content.layer(layer.id).unwrap();
+            assert_eq!(unchanged.offset, layer.offset);
+            assert!(Arc::ptr_eq(&unchanged.pixels, &layer.pixels));
+        }
+    }
+
+    #[test]
+    fn fit_layer_to_canvas_rejects_stack_budget_before_resampling_or_recentering() {
+        let mut layer = DocumentContent::single_layer("Shared".into(), RgbaImage::new(1024, 1024))
+            .layers
+            .remove(0);
+        layer.offset = (-200, -300);
+        let layers = (0..MAX_LAYERS)
+            .map(|index| {
+                let mut copy = layer.clone();
+                copy.id = LayerId(index as u64);
+                copy
+            })
+            .collect();
+        let mut content = DocumentContent::from_layers(2048, 2048, layers).unwrap();
+        assert_eq!(content.stack_bytes(), MAX_STACK_BYTES);
+        assert_eq!(content.scale_to_canvas_bounds(layer.id), None);
+        assert_eq!(
+            content.fit_layer_to_canvas(layer.id, crate::transform::Resample::Bicubic),
+            Dirty::None
+        );
+        let unchanged = content.layer(layer.id).unwrap();
+        assert_eq!(unchanged.offset, layer.offset);
+        assert!(Arc::ptr_eq(&unchanged.pixels, &layer.pixels));
     }
 
     #[test]

@@ -14,9 +14,9 @@ use super::view::{
     TEXT, icon, section_label,
 };
 use crate::commands::{
-    AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer, LayerOpacity,
-    LayerToImageSize, LowerLayer, MergeDown, NewLayer, RaiseLayer, RenameLayer, ToggleAlphaLock,
-    ToggleLayerVisibility, TogglePositionLock,
+    AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer,
+    FitLayerToCanvas, LayerOpacity, LayerToImageSize, LowerLayer, MergeDown, NewLayer, RaiseLayer,
+    RenameLayer, ToggleAlphaLock, ToggleLayerVisibility, TogglePositionLock,
 };
 use crate::document::{self, LayerGeometry, LayerId};
 use crate::geometry::{self, Alignment, ContentCrop};
@@ -892,7 +892,12 @@ impl Workspace {
         if !self.geometry_enabled() {
             return root;
         }
-        root.when(!self.active_position_locked(), |root| {
+        root.when(self.can_fit_active_layer(), |root| {
+            root.on_action(cx.listener(|this, _: &FitLayerToCanvas, window, cx| {
+                this.fit_active_layer_to_canvas(window, cx);
+            }))
+        })
+        .when(!self.active_position_locked(), |root| {
             root.on_action(cx.listener(|this, action: &AlignLayer, window, cx| {
                 this.align_active(*action, window, cx);
             }))
@@ -940,6 +945,44 @@ impl Workspace {
         };
         self.edit_content(
             move |content, _, _| content.align_layer(id, alignment),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn can_fit_active_layer(&self) -> bool {
+        self.geometry_enabled()
+            && !self.scale_pointer_dragging()
+            && self.text_draft.is_none()
+            && self.active_tab().is_some_and(|tab| {
+                tab.document
+                    .content
+                    .scale_to_canvas_bounds(tab.active_layer)
+                    .is_some()
+            })
+    }
+
+    pub(super) fn fit_active_layer_to_canvas(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layer) = self.active_tab().map(|tab| tab.active_layer) else {
+            return;
+        };
+        if self.commit_numeric_with_followup(
+            super::numeric::NumericFollowup::FitLayer { layer },
+            window,
+            cx,
+        ) {
+            return;
+        }
+        if !self.can_fit_active_layer() {
+            return;
+        }
+        let resample = self.warp_resample;
+        self.edit_content(
+            move |content, _, _| content.fit_layer_to_canvas(layer, resample),
             window,
             cx,
         );

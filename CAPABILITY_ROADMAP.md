@@ -42,6 +42,8 @@ clipping retains the original curves; pixel-art hard selections remain available
 - [x] Constrained rotation angle increments while dragging.
 - [x] Keyboard layer nudging, with larger modifier steps.
 - [x] Typed layer position.
+- [x] Proportional Fit Layer to Canvas from the Layer menu and Scale Layer options
+  for oversized layers whose handles cannot be reached (GitHub issue #1).
 - [x] Rotation pivot anchors, typed canvas coordinates, and dragging.
 - [x] Nine-point anchors for typed Scale Layer dimensions and precise Perspective
   corner coordinates with individual/all-corner reset.
@@ -1329,7 +1331,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 21 — precise Scale anchors and Perspective corners
 
-Implemented; pending commit:
+Implemented and committed as `de9082f`:
 
 - Scale Layer offers a nine-point Size anchor for typed Width/Height edits,
   initially Center. The numeric session captures that choice and calculates
@@ -1380,3 +1382,65 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Apply under each resampler, undo/redo, and switch tools/layers/tabs during a
   preview. Check unchanged selection coordinates, source layer opacity/order,
   and the existing position-lock and editable-text restrictions.
+
+## Pass 22 — proportional Fit Layer to Canvas
+
+Implemented; pending commit:
+
+- Reviewed [GitHub issue #1](https://github.com/eimg/lime/issues/1), “Layer resizing
+  issues.” Aspect locking and Shift reversal were already implemented in Pass 1.
+  Off-viewport handles still needed a convenient alternative; typed dimensions
+  worked, but Layer to Image Size crops/pads and does not proportionally fit.
+- Added Fit Layer to Canvas to the native Layer menu and Scale Layer options,
+  using the same action and existing scale icon. It scales the whole raster,
+  including transparent margins, to the largest proportional size inside the
+  canvas and centers it. Smaller layers may enlarge. Integer rounding bounds the
+  result to at least one pixel per dimension; odd leftover margins differ by one
+  pixel. The selected Nearest/Bilinear/Bicubic resampling controls the result.
+- Computes target bounds without pixel allocation, validates image/stack budgets,
+  then scales and positions through the background edit pipeline. Requires a
+  visible raster layer with position unlocked; alpha lock permits geometry as
+  before. Canvas size, selections, other layers, and layer metadata stay intact.
+- One fit is one undo step. Repeating an already fitted result is a no-op; an
+  already correctly sized but displaced layer only recenters and shares its
+  pixel buffer. The source's old off-canvas location does not crop the scaled
+  content. Existing generation checks prevent a stale job publishing elsewhere.
+- Fit finishes a numeric edit first and waits for asynchronous Scale/Move/
+  selection commits before running. The deferred operation validates tab,
+  revision, tool, and original active layer, and the option button lets that
+  action own numeric commit timing. Stale context cancels the deferred action.
+- Updated tool help, README, and AGENTS to distinguish proportional fitting from
+  Layer to Image Size. No new toolbox tool, dependency, project metadata, package
+  version, publishing, installer, or app icon changes. GitHub issue remains open;
+  its expected capabilities are now implemented locally, with interaction QA
+  left to the maintainer.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 394 tests
+pass. Four new regression tests cover landscape/portrait fits, enlargement,
+rounding, extreme dimensions, zero-size rejection, complete off-canvas source
+sampling, all resamplers, metadata/alpha-lock preservation, hidden/position-lock/
+text rejection, stack-budget rejection before mutation, same-size recentering,
+repeat no-ops, and one-step undo/redo with stationary selections and saved-state
+restoration. Existing numeric follow-up checks now reject a different active
+layer for deferred Fit. The shared native-menu tree and menu-icon tests cover
+both menu variants and the reused scale glyph. Both release benchmarks pass.
+`dist/Lime.app` is rebuilt and its signature verified. No interactive or visual
+smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Paste/import a layer much larger than the canvas so no corners can be reached.
+  Use Fit Layer to Canvas from both entry points; verify the complete image fits,
+  is centered, and keeps its proportions. Try wide/tall layers, transparent
+  margins, positive/negative offsets, each resampler, and smaller layers.
+- Repeat Fit, move a fitted layer and Fit again, then undo/redo. Check no history
+  for a repeated fit, one step for recentering, unchanged canvas/selection, and
+  unchanged layer opacity/order/locks. Compare Layer to Image Size separately:
+  it should retain its crop/pad behavior.
+- Type a Scale dimension or Move coordinate, leave it empty/partial, and invoke
+  Fit through the option button or native menu. Check the field finishes or
+  restores first, then Fit applies to the settled layer. Switch tab/tool/layer
+  during a pending numeric commit to confirm stale follow-ups do not fit another
+  target. Try hidden, position-locked, editable-text, and memory-limited layers.
+- Confirm aspect locking starts on, Shift reverses it during a handle drag, and
+  turning the lock off allows Shift to constrain the original proportions.

@@ -612,6 +612,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fit_layer_from_off_canvas_is_one_undo_step_with_stationary_selection() {
+        use super::super::{Change, Tab, history::State};
+        fn publish(tab: &mut Tab, state: State, dirty: Dirty, change: Change) {
+            let patch = crate::document::RenderedCanvas::prepare_patch(
+                &tab.document.canvas.pixels,
+                tab.document.canvas.preview.has_transparency,
+                tab.document.canvas.level_caches(),
+                &state.content,
+                dirty,
+            )
+            .unwrap();
+            assert!(
+                tab.publish_change(
+                    tab.history.generation(),
+                    change,
+                    Some((state.content, state.active_layer, state.selection, patch)),
+                    1
+                )
+                .0
+            );
+        }
+        let mut tab = super::super::tests::opacity_tab();
+        let id = tab.active_layer;
+        let mut content = tab.document.content.clone();
+        content.place_layer(
+            id,
+            image::RgbaImage::from_pixel(4, 2, image::Rgba([30, 80, 160, 128])),
+            (-100, -100),
+        );
+        tab.document = crate::document::Document::from_content("Fit".into(), content);
+        tab.selection = crate::selection::Selection::Rect(PixelRect::new(0, 0, 1, 2));
+        let original = tab.document.content.layer(id).unwrap().pixels.clone();
+        let selection = tab.selection.clone();
+        let mut state = tab.state();
+        let dirty = state
+            .content
+            .fit_layer_to_canvas(id, crate::transform::Resample::Bilinear);
+        assert_ne!(dirty, Dirty::None);
+        publish(&mut tab, state, dirty, Change::Edit);
+        assert_eq!(tab.selection, selection);
+        assert!(tab.history.is_dirty());
+        assert_eq!(
+            tab.document.content.layer(id).unwrap().pixels.dimensions(),
+            (2, 1)
+        );
+        assert_eq!(tab.document.content.layer(id).unwrap().offset, (0, 0));
+        assert_eq!(
+            tab.document
+                .content
+                .fit_layer_to_canvas(id, crate::transform::Resample::Nearest),
+            Dirty::None
+        );
+        let undo = tab.history.undo_target().unwrap().0.clone();
+        publish(&mut tab, undo, Dirty::Canvas, Change::Undo);
+        assert!(!tab.history.is_dirty());
+        assert!(tab.history.undo_target().is_none());
+        assert_eq!(tab.selection, selection);
+        assert_eq!(tab.document.content.layer(id).unwrap().offset, (-100, -100));
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &tab.document.content.layer(id).unwrap().pixels
+        ));
+        let redo = tab.history.redo_target().unwrap().0.clone();
+        publish(&mut tab, redo, Dirty::Canvas, Change::Redo);
+        assert!(tab.history.is_dirty());
+        assert_eq!(tab.selection, selection);
+        assert_eq!(
+            tab.document.content.layer(id).unwrap().pixels.dimensions(),
+            (2, 1)
+        );
+    }
+
+    #[test]
     fn numeric_anchor_commit_rejects_unplaceable_targets_before_resampling() {
         let tab = super::super::tests::opacity_tab();
         let mut state = tab.state();

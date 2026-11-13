@@ -60,6 +60,31 @@ pub fn aligned_offset(
     }
 }
 
+// Fits the whole layer, including transparent margins, inside the canvas without
+// cropping. The limiting edge is exact; the other rounds to the nearest pixel.
+pub fn proportional_fit(layer: (u32, u32), canvas: (u32, u32)) -> Option<PixelBox> {
+    let (width, height) = layer;
+    let (cw, ch) = canvas;
+    if width == 0 || height == 0 || cw == 0 || ch == 0 {
+        return None;
+    }
+    let rounded = |size: u32, edge: u32, divisor: u32, limit: u32| {
+        ((u64::from(size) * u64::from(edge) + u64::from(divisor) / 2) / u64::from(divisor))
+            .clamp(1, u64::from(limit)) as u32
+    };
+    let (width, height) = if u64::from(cw) * u64::from(height) <= u64::from(ch) * u64::from(width) {
+        (cw, rounded(height, cw, width, ch))
+    } else {
+        (rounded(width, ch, height, cw), ch)
+    };
+    Some(PixelBox {
+        x: (cw - width) / 2,
+        y: (ch - height) / 2,
+        width,
+        height,
+    })
+}
+
 pub fn nonzero_alpha_bounds(pixels: &RgbaImage) -> Option<PixelBox> {
     let (width, height) = pixels.dimensions();
     let (mut min_x, mut min_y) = (width, height);
@@ -183,6 +208,41 @@ mod tests {
 
     fn pixel(alpha: u8) -> RgbaImage {
         RgbaImage::from_pixel(1, 1, Rgba([9, 8, 7, alpha]))
+    }
+
+    #[test]
+    fn proportional_fit_handles_landscape_portrait_rounding_and_extreme_ratios() {
+        for (layer, canvas, expected) in [
+            ((400, 200), (100, 100), (0, 25, 100, 50)),
+            ((200, 400), (100, 100), (25, 0, 50, 100)),
+            ((2, 1), (8, 8), (0, 2, 8, 4)),
+            ((3, 2), (4, 4), (0, 0, 4, 3)),
+            ((4, 3), (3, 2), (0, 0, 3, 2)),
+            ((1, u32::MAX), (5, 7), (2, 0, 1, 7)),
+            ((u32::MAX, 1), (5, 7), (0, 3, 5, 1)),
+            (
+                (u32::MAX, u32::MAX),
+                (u32::MAX, u32::MAX),
+                (0, 0, u32::MAX, u32::MAX),
+            ),
+        ] {
+            let bounds = proportional_fit(layer, canvas).unwrap();
+            assert_eq!((bounds.x, bounds.y, bounds.width, bounds.height), expected);
+            assert_eq!(
+                proportional_fit((bounds.width, bounds.height), canvas),
+                Some(bounds)
+            );
+            assert!(bounds.x + bounds.width <= canvas.0);
+            assert!(bounds.y + bounds.height <= canvas.1);
+        }
+        for (layer, canvas) in [
+            ((0, 1), (2, 2)),
+            ((1, 0), (2, 2)),
+            ((1, 1), (0, 2)),
+            ((1, 1), (2, 0)),
+        ] {
+            assert_eq!(proportional_fit(layer, canvas), None);
+        }
     }
 
     #[test]

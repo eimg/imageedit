@@ -277,6 +277,9 @@ pub(super) enum NumericFollowup {
     Effect {
         reopen: bool,
     },
+    FitLayer {
+        layer: crate::document::LayerId,
+    },
     LayerLock {
         tab: usize,
         layer: crate::document::LayerId,
@@ -303,6 +306,10 @@ impl PendingNumeric {
             && self.generation == generation
             && !tab.busy()
             && generation.checked_add(u64::from(published)) == Some(tab.history.generation())
+            && match &self.followup {
+                NumericFollowup::FitLayer { layer } => tab.active_layer == *layer,
+                _ => true,
+            }
     }
 }
 
@@ -902,6 +909,15 @@ impl Workspace {
                             this.run_last_effect(reopen, window, cx);
                             None
                         }
+                        NumericFollowup::FitLayer { layer } => {
+                            if this
+                                .active_tab()
+                                .is_some_and(|tab| tab.active_layer == layer)
+                            {
+                                this.fit_active_layer_to_canvas(window, cx);
+                            }
+                            None
+                        }
                         NumericFollowup::LayerLock {
                             tab,
                             layer,
@@ -1367,7 +1383,7 @@ mod tests {
 
     #[test]
     fn unchanged_numeric_commit_can_still_focus_the_next_field() {
-        let tab = super::super::tests::opacity_tab();
+        let mut tab = super::super::tests::opacity_tab();
         let pending = PendingNumeric {
             tab: tab.id,
             generation: tab.history.generation(),
@@ -1378,6 +1394,16 @@ mod tests {
             pending.followup,
             NumericFollowup::Focus(NumericField::SelectionHeight)
         ));
+        let fit = PendingNumeric {
+            tab: tab.id,
+            generation: tab.history.generation(),
+            followup: NumericFollowup::FitLayer {
+                layer: tab.active_layer,
+            },
+        };
+        assert!(fit.accepts_completion(&tab, tab.id, tab.history.generation(), false));
+        tab.active_layer = crate::document::LayerId(tab.active_layer.0 + 1);
+        assert!(!fit.accepts_completion(&tab, tab.id, tab.history.generation(), false));
     }
 
     #[test]
