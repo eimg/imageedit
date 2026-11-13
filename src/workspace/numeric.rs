@@ -32,6 +32,8 @@ pub(super) enum NumericField {
     ScaleWidth,
     ScaleHeight,
     RotateAngle,
+    MoveX,
+    MoveY,
 }
 
 impl NumericField {
@@ -56,6 +58,8 @@ impl NumericField {
             Self::ScaleWidth => 16,
             Self::ScaleHeight => 17,
             Self::RotateAngle => 18,
+            Self::MoveX => 19,
+            Self::MoveY => 20,
         }
     }
 
@@ -70,6 +74,10 @@ impl NumericField {
         matches!(self, Self::ScaleWidth | Self::ScaleHeight)
     }
 
+    pub(super) fn is_move(self) -> bool {
+        matches!(self, Self::MoveX | Self::MoveY)
+    }
+
     fn parse(self, text: &str) -> Option<i64> {
         if self == Self::RotateAngle {
             let value = text.parse::<f64>().ok()?;
@@ -77,7 +85,9 @@ impl NumericField {
                 .then(|| (value * 10.).round() as i64)
         } else {
             parse_numeric(text).filter(|&value| {
-                !self.is_scale() || (0..=i64::from(crate::document::MAX_NEW_EDGE)).contains(&value)
+                (!self.is_scale()
+                    || (0..=i64::from(crate::document::MAX_NEW_EDGE)).contains(&value))
+                    && (!self.is_move() || i32::try_from(value).is_ok())
             })
         }
     }
@@ -99,7 +109,8 @@ impl NumericField {
 
     fn accepts_character(self, ch: char) -> bool {
         ch.is_ascii_digit()
-            || (matches!(self, Self::TextLetterSpacing | Self::RotateAngle) && ch == '-')
+            || ((matches!(self, Self::TextLetterSpacing | Self::RotateAngle) || self.is_move())
+                && ch == '-')
             || (self == Self::RotateAngle && ch == '.')
     }
 
@@ -312,6 +323,8 @@ impl Workspace {
                 .warp_status()?
                 .degrees
                 .map(|degrees| (degrees * 10.).round() as i64),
+            NumericField::MoveX => self.move_offset().map(|offset| i64::from(offset.0)),
+            NumericField::MoveY => self.move_offset().map(|offset| i64::from(offset.1)),
         }
     }
 
@@ -346,6 +359,9 @@ impl Workspace {
         };
         let original_crop = if field.is_crop() { self.crop } else { None };
         if field.is_scale() && !self.begin_scale_numeric(window, cx) {
+            return;
+        }
+        if field.is_move() && !self.begin_move_numeric(window, cx) {
             return;
         }
         self.numeric_edit = Some(NumericEdit::new(field, value, original_crop));
@@ -486,6 +502,10 @@ impl Workspace {
             }
             return;
         }
+        if field.is_move() {
+            self.preview_move_position(field == NumericField::MoveX, value as i32, cx);
+            return;
+        }
         let value = value.clamp(0, i64::from(u32::MAX)) as u32;
         match field {
             NumericField::TextSize => {
@@ -589,8 +609,13 @@ impl Workspace {
             if edit.field.is_scale() {
                 self.cancel_scale(window, cx);
             }
+            if edit.field.is_move() {
+                self.cancel_move(window, cx);
+            }
         } else if edit.field.is_scale() {
             self.finish_scale(window, cx);
+        } else if edit.field.is_move() {
+            self.finish_move(window, cx);
         } else if edit.field.is_selection()
             && let Some(selection) = self.selection_preview.take()
         {
@@ -695,6 +720,9 @@ impl Workspace {
         if edit.field.is_scale() {
             self.cancel_scale(window, cx);
         }
+        if edit.field.is_move() {
+            self.cancel_move(window, cx);
+        }
         self.focus.focus(window);
         cx.notify();
     }
@@ -722,6 +750,10 @@ impl Workspace {
         }
         if field.is_scale() {
             self.restore_scale_size(cx);
+            return;
+        }
+        if field.is_move() {
+            self.restore_move_position(cx);
             return;
         }
         match field {
@@ -882,6 +914,21 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_coordinates_accept_signed_pixel_positions_and_reject_overflow() {
+        for field in [NumericField::MoveX, NumericField::MoveY] {
+            let mut edit = NumericEdit::new(field, 12, None);
+            edit.insert_digits("-2147483648");
+            assert_eq!(field.parse(&edit.text), Some(i64::from(i32::MIN)));
+            assert_eq!(field.parse("2147483647"), Some(i64::from(i32::MAX)));
+            for invalid in ["-2147483649", "2147483648", "-", "", "2.5"] {
+                assert_eq!(field.parse(invalid), None);
+            }
+            assert_eq!(edit.original, 12);
+            assert!(field.accepts_character('-'));
+        }
+    }
 
     #[test]
     fn angle_edits_keep_decimal_degrees_and_reject_incomplete_or_invalid_input() {

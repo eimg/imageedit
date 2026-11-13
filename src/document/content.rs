@@ -1356,7 +1356,22 @@ impl DocumentContent {
         let before = layer.bounds();
         layer.offset = offset;
         let after = layer.bounds();
-        region_from_bounds(before.union(after))
+        if !layer.visible || layer.opacity == 0 {
+            return Dirty::Unpainted;
+        }
+        let canvas = PixelBounds {
+            left: 0,
+            top: 0,
+            right: i64::from(self.width),
+            bottom: i64::from(self.height),
+        };
+        let bounds = match (before.intersect(canvas), after.intersect(canvas)) {
+            (Some(before), Some(after)) => before.union(after),
+            (Some(bounds), None) | (None, Some(bounds)) => bounds,
+            (None, None) => return Dirty::Unpainted,
+        };
+        let (width, height) = bounds.dimensions();
+        Dirty::Composite(PixelRect::new(bounds.left, bounds.top, width, height))
     }
 
     pub fn accepts_replacement(&self, id: LayerId, size: (u32, u32)) -> bool {
@@ -2084,6 +2099,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bucket_fill_crosses_hidden_rgb_on_clear_pixels_and_respects_a_soft_selection() {
+        let pixels = RgbaImage::from_fn(4, 1, |x, _| match x {
+            0 => Rgba([255, 0, 0, 0]),
+            1 => Rgba([0, 255, 0, 0]),
+            _ => Rgba([0, 0, 255, 255]),
+        });
+        let blue = Rgba([0, 0, 255, 255]);
+        let ink = Rgba([255, 255, 0, 255]);
+        for sample_all in [false, true] {
+            let mut content = DocumentContent::single_layer("Transparent".into(), pixels.clone());
+            let selection = Selection::Full.feather(1, 4, 1);
+            assert!(
+                content
+                    .fill_bucket(
+                        LayerId(0),
+                        0,
+                        0,
+                        ink,
+                        &selection,
+                        FillRequest {
+                            mode: FillMode::Connected,
+                            sample_all,
+                            tolerance: 0
+                        }
+                    )
+                    .is_some()
+            );
+            let image = &content.layer(LayerId(0)).unwrap().pixels;
+            for x in 0..2 {
+                assert_eq!(&image.get_pixel(x, 0).0[..3], &[255, 255, 0]);
+                assert!(image.get_pixel(x, 0).0[3] > 0 && image.get_pixel(x, 0).0[3] < 255);
+            }
+            assert_eq!(*image.get_pixel(2, 0), blue);
+            assert_eq!(*image.get_pixel(3, 0), blue);
+        }
+    }
+
+    #[test]
     fn composite_clips_offsets_and_blends_in_stack_order() {
         let mut content = DocumentContent::single_layer(
             "Bottom".into(),
@@ -2487,17 +2540,25 @@ mod tests {
         );
         let id = content.top_layer_id();
         content.layers[0].offset = (-1, 3);
-        assert_eq!(
-            content.set_offset(id, (2, 3)),
-            Dirty::Region(PixelRect::new(-1, 3, 7, 2))
-        );
+        assert_eq!(content.set_offset(id, (2, 3)), Dirty::Unpainted);
         assert_eq!(content.layers[0].offset, (2, 3));
         assert_eq!(
             content.align_layer(id, crate::geometry::Alignment::HorizontalCenter),
-            Dirty::Region(PixelRect::new(0, 3, 6, 2))
+            Dirty::Unpainted
         );
         assert_eq!(content.layers[0].offset, (0, 3));
         assert_eq!(content.set_offset(id, (0, 3)), Dirty::None);
+        assert_eq!(
+            content.set_offset(id, (0, 0)),
+            Dirty::Composite(PixelRect::new(0, 0, 4, 2))
+        );
+        content.set_offset(id, (2, 1));
+        assert_eq!(
+            content.set_offset(id, (3, 1)),
+            Dirty::Composite(PixelRect::new(2, 1, 2, 1))
+        );
+        content.set_visible(id, false);
+        assert_eq!(content.set_offset(id, (-1, 0)), Dirty::Unpainted);
     }
 
     #[test]

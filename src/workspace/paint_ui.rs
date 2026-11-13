@@ -18,6 +18,7 @@ pub(super) struct StrokeSession {
     canvas: (u32, u32),
     stroke: Stroke,
     last_point: (f64, f64),
+    clone_delta: Option<(i64, i64)>,
     patches: BTreeMap<TileKey, StrokePaint>,
 }
 
@@ -35,6 +36,46 @@ pub(super) enum BrushField {
     Spacing,
     Hardness,
     Opacity,
+}
+
+pub(super) struct CloneSource {
+    tab: usize,
+    layer: LayerId,
+    point: (u32, u32),
+    offset: (i32, i32),
+    size: (u32, u32),
+    delta: Option<(i64, i64)>,
+    pending: Option<(u64, (i64, i64))>,
+}
+
+impl CloneSource {
+    fn settle(&mut self, tab: usize, generation: u64, published: bool) {
+        if tab != self.tab || self.pending.is_none_or(|pending| pending.0 != generation) {
+            return;
+        }
+        let (_, delta) = self.pending.take().unwrap();
+        if published {
+            self.delta = Some(delta);
+        }
+    }
+
+    fn kind(
+        &self,
+        tab: usize,
+        layer: LayerId,
+        offset: (i32, i32),
+        size: (u32, u32),
+        here: (f64, f64),
+        aligned: bool,
+    ) -> Option<StrokeKind> {
+        if (self.tab, self.layer, self.offset, self.size) != (tab, layer, offset, size) {
+            return None;
+        }
+        if aligned && let Some((dx, dy)) = self.delta {
+            return Some(StrokeKind::Clone { dx, dy });
+        }
+        Some(clone_kind(self.point, offset, here))
+    }
 }
 
 pub(super) struct BrushSettings {
@@ -139,11 +180,54 @@ impl Workspace {
         scale: f32,
         cx: &mut Context<Self>,
     ) {
+        if self.stroke.is_some() {
+            return;
+        }
         let Some((x, y)) = self.canvas_pixel(position, scale, false) else {
             return;
         };
-        self.clone_source = Some((x, y));
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            return;
+        };
+        let Some(layer) = tab.document.content.layer(tab.active_layer) else {
+            return;
+        };
+        let local = (
+            i64::from(x) - i64::from(layer.offset.0),
+            i64::from(y) - i64::from(layer.offset.1),
+        );
+        if !layer.visible
+            || layer.text.is_some()
+            || local.0 < 0
+            || local.1 < 0
+            || local.0 >= i64::from(layer.pixels.width())
+            || local.1 >= i64::from(layer.pixels.height())
+        {
+            self.notice("Choose a source pixel inside the visible raster layer.", cx);
+            return;
+        }
+        self.clone_source = Some(CloneSource {
+            tab: tab.id,
+            layer: layer.id,
+            point: (x, y),
+            offset: layer.offset,
+            size: layer.pixels.dimensions(),
+            delta: None,
+            pending: None,
+        });
         self.notice("Clone source set.", cx);
+    }
+
+    pub(super) fn set_clone_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
+        if self.stroke.is_some() || self.clone_aligned == aligned {
+            return;
+        }
+        self.clone_aligned = aligned;
+        if let Some(source) = self.clone_source.as_mut() {
+            source.delta = None;
+            source.pending = None;
+        }
+        cx.notify();
     }
 
     pub(super) fn begin_stroke(
@@ -191,11 +275,20 @@ impl Workspace {
             .constrain(solid_color(self.colors[0]));
         let here = local_point(point, offset);
         let kind = if matches!(kind, StrokeKind::Clone { .. }) {
-            let Some(source_point) = self.clone_source else {
+            let Some(kind) = self.clone_source.as_ref().and_then(|source| {
+                source.kind(
+                    tab.id,
+                    id,
+                    offset,
+                    layer.pixels.dimensions(),
+                    here,
+                    self.clone_aligned,
+                )
+            }) else {
                 self.notice("Alt-click to set the clone source.", cx);
                 return;
             };
-            clone_kind(source_point, offset, here)
+            kind
         } else {
             kind
         };
@@ -207,6 +300,10 @@ impl Workspace {
             canvas,
             stroke: Stroke::new(kind, color, *self.active_brush()),
             last_point: here,
+            clone_delta: match kind {
+                StrokeKind::Clone { dx, dy } if self.clone_aligned => Some((dx, dy)),
+                _ => None,
+            },
             patches: BTreeMap::new(),
         };
         if shift
@@ -219,6 +316,12 @@ impl Workspace {
         session.last_point = here;
         self.stroke = Some(session);
         self.refresh_stroke_patch(window, cx);
+    }
+
+    pub(super) fn finish_clone_alignment(&mut self, tab: usize, generation: u64, published: bool) {
+        if let Some(source) = self.clone_source.as_mut() {
+            source.settle(tab, generation, published);
+        }
     }
 
     pub(super) fn extend_stroke(
@@ -277,6 +380,12 @@ impl Workspace {
         }
         self.refresh_stroke_patch(window, cx);
         let session = self.stroke.take().unwrap();
+        let generation = self.active_tab().unwrap().history.generation();
+        if let Some(delta) = session.clone_delta
+            && let Some(source) = self.clone_source.as_mut()
+        {
+            source.pending = Some((generation, delta));
+        }
         let layer = session.layer;
         let end = session.last_point;
         let patches = session.patches.into_values().collect();
@@ -448,6 +557,72 @@ fn clone_kind(source: (u32, u32), offset: (i32, i32), here: (f64, f64)) -> Strok
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligned_cloning_keeps_the_offset_and_unaligned_cloning_restarts_at_the_source() {
+        let pixels = RgbaImage::from_fn(10, 1, |x, _| image::Rgba([x as u8 * 20, 0, 0, 255]));
+        let mut source = CloneSource {
+            tab: 7,
+            layer: LayerId(3),
+            point: (6, 0),
+            offset: (0, 0),
+            size: (10, 1),
+            delta: None,
+            pending: None,
+        };
+        let first = source
+            .kind(7, LayerId(3), (0, 0), (10, 1), (0.5, 0.5), true)
+            .unwrap();
+        assert_eq!(first, StrokeKind::Clone { dx: 6, dy: 0 });
+        // The first accepted stroke establishes the alignment. Resolving a
+        // canceled stroke alone does not change it.
+        assert_eq!(source.delta, None);
+        source.pending = Some((9, (6, 0)));
+        source.settle(7, 9, false);
+        assert_eq!(source.delta, None);
+        source.pending = Some((9, (6, 0)));
+        source.settle(8, 9, true);
+        source.settle(7, 8, true);
+        assert_eq!(source.delta, None);
+        source.settle(7, 9, true);
+        assert_eq!(source.delta, Some((6, 0)));
+        for (aligned, expected) in [(true, 8), (false, 6)] {
+            let kind = source
+                .kind(7, LayerId(3), (0, 0), (10, 1), (2.5, 0.5), aligned)
+                .unwrap();
+            let mut stroke = Stroke::new(
+                kind,
+                image::Rgba([0; 4]),
+                crate::paint::Brush {
+                    diameter: 1,
+                    ..Default::default()
+                },
+            );
+            stroke.sample(2.5, 0.5, &pixels, |_, _| 255);
+            let (painted, _) = crate::paint::apply_stroke(&pixels, &stroke).unwrap();
+            assert_eq!(painted.get_pixel(2, 0), pixels.get_pixel(expected, 0));
+        }
+        assert!(
+            source
+                .kind(8, LayerId(3), (0, 0), (10, 1), (0.5, 0.5), true)
+                .is_none()
+        );
+        assert!(
+            source
+                .kind(7, LayerId(4), (0, 0), (10, 1), (0.5, 0.5), true)
+                .is_none()
+        );
+        assert!(
+            source
+                .kind(7, LayerId(3), (1, 0), (10, 1), (0.5, 0.5), true)
+                .is_none()
+        );
+        assert!(
+            source
+                .kind(7, LayerId(3), (0, 0), (8, 1), (0.5, 0.5), true)
+                .is_none()
+        );
+    }
 
     #[test]
     fn paint_tools_and_outline_strokes_retain_independent_settings() {

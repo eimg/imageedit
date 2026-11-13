@@ -1420,6 +1420,11 @@ pub(crate) fn apply_coverage(alpha: u8, coverage: u8) -> u8 {
 }
 
 pub(crate) fn within_tolerance(pixel: Rgba<u8>, target: Rgba<u8>, tolerance: u8) -> bool {
+    // Fully transparent pixels have no visible RGB. Keep alpha comparisons,
+    // but do not split a transparent region because its stored RGB differs.
+    if pixel.0[3] == 0 && target.0[3] == 0 {
+        return true;
+    }
     pixel
         .0
         .iter()
@@ -1707,6 +1712,23 @@ fn invert_mask(mask: &Mask, width: u32, height: u32) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fully_transparent_regions_ignore_hidden_rgb_but_keep_alpha_boundaries() {
+        let image = RgbaImage::from_fn(4, 1, |x, _| match x {
+            0 => Rgba([255, 0, 0, 0]),
+            1 => Rgba([0, 255, 0, 0]),
+            2 => Rgba([0, 0, 255, 1]),
+            _ => Rgba([255, 0, 0, 0]),
+        });
+        let selected = Selection::flood(&image, 0, 0, 0, (0, 0), (4, 1));
+        assert_eq!(selected.coverage(0, 0, 4, 1), 255);
+        assert_eq!(selected.coverage(1, 0, 4, 1), 255);
+        assert_eq!(selected.coverage(2, 0, 4, 1), 0);
+        assert_eq!(selected.coverage(3, 0, 4, 1), 0);
+        assert!(!within_tolerance(Rgba([1, 2, 3, 1]), Rgba([3, 2, 1, 1]), 0));
+        assert!(within_tolerance(Rgba([1, 2, 3, 1]), Rgba([3, 2, 1, 1]), 2));
+    }
 
     #[test]
     fn soft_morphology_matches_min_max_coverage_including_canvas_edges() {

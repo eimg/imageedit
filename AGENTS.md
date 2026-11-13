@@ -39,16 +39,25 @@ bounded to canvas pixels and clipped curves retain their original geometry.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
 bucket share a tolerance; zero matches a color exactly. The wand can sample the
 active layer or the visible composite, independently of Bucket Fill's setting.
+Both region tools ignore stored RGB when both compared pixels are fully
+transparent; other channel and alpha comparisons keep the shared tolerance.
 Feather, Grow, and Shrink edit the mask; Grow/Shrink preserve soft coverage.
 Move repositions the active layer, and its tool options
 align it to any canvas edge or center it with icon buttons. View → Toggle
 Layer Boundary shows a global subtle outline that follows the active layer.
+Move's signed X/Y fields preview a position and commit on Return or leaving the
+field; empty/invalid input and Escape restore the position. Arrow keys nudge
+one image pixel, or ten with Shift, independent of zoom. Release commits one
+undo step per key sequence; Escape, deactivation, or changing tools/tabs/layers
+cancels an unfinished sequence. Nudges queued during their own prior canvas
+commit resume only on the same tab, layer, and document generation.
 The Layer menu can align, fit it to the canvas, or crop it to its opaque
 pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Rotate also accepts
-typed angles in degrees with tenths precision. Perspective
+typed angles in degrees with tenths precision; Shift-drag snaps to absolute
+15-degree angles, including when Shift changes without moving the pointer. Perspective
 corner grips keep a dark rim so they stay visible on a white image. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
 border or corner; release commits one undo step, and the tool uses Shift+S.
@@ -57,7 +66,11 @@ the field; empty text and Escape restore the original size. Aspect locking start
 on and applies to numeric edits and handles; Shift reverses it during a drag.
 Nearest, Bilinear, and Bicubic choose the commit resampling. Escape or a
 layer/tab change cancels the pointer drag. Clone Stamp uses Shift+C,
-sets its source with Alt-click, and copies from that offset while painting. Pencil,
+sets its source with Alt-click inside the visible raster layer. Aligned starts
+on and preserves the source offset across strokes; off restarts each stroke at
+the chosen source. Changing alignment resets its offset. Tab/layer changes clear
+the source; changed layer geometry requires a fresh source. The first successful
+stroke establishes alignment; canceled/failed strokes leave it unchanged. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
@@ -156,7 +169,8 @@ document is a single plain layer without paths or editable text.
   and strokes a polyline in one pass, skipping a repeated endpoint.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
   preview and owns the per-tool brush settings. Release commits dirty regions
-  in one undo step.
+  in one undo step. Its scoped CloneSource validates tab/layer geometry and
+  establishes alignment only after the stroke result publishes successfully.
   `src/workspace/gradient_ui.rs` previews a gradient until Apply.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
   the live GPU-scaled preview, and the commit that resamples the layer. It prepares
@@ -252,7 +266,13 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   change the document while it is open. An unfinished free selection is a pending
   gesture for Save, Export, Close, and Quit.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
-  drag coalescing, and the Move preview. A released opacity value stays visible
+  drag coalescing, and Move previews for pointer, numeric, and keyboard input.
+  Only pointer sessions consume mouse moves/releases; numeric sessions finish
+  through the inline editor, and keyboard sessions finish on arrow release.
+  Pending keyboard deltas validate the source commit and current context before
+  resuming, so repeat events are not dropped during that commit. Move commits
+  reuse thumbnails and refresh only the composite at the old/new visible bounds.
+  A released opacity value stays visible
   in its tab until the background canvas patch settles, including across tab
   switches; each drag commits one undo step. Workspace mouse events track the
   opacity drag outside the slider and sample its final release position.
@@ -267,12 +287,12 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   handles the HSV wheel and brightness slider.
 - `src/workspace/numeric.rs` edits the selection radius, selection size, crop
   fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity, path
-  stroke size, Scale Layer dimensions, Rotate angle, and text size/letter/line
-  spacing inline with a caret and text selection. Values preview live; selection
-  and scale edits commit one history entry. Rotate angles retain Apply/Cancel.
+  stroke size, Move position, Scale Layer dimensions, Rotate angle, and text size/letter/line
+  spacing inline with a caret and text selection. Values preview live; selection,
+  scale, and Move edits commit one history entry. Rotate angles retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing
   accepts negative values. A shortcut or a switch to another numeric field waits
-  for a selection or scale edit to settle and its action bindings to render; stale
+  for a selection, scale, or Move edit to settle and its action bindings to render; stale
   followups are rejected after a tab, tool, or revision change. Rotation accepts
   signed decimals; other numeric fields retain their existing integer contracts.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution

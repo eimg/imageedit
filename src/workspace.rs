@@ -255,6 +255,7 @@ pub struct Workspace {
     scale_lock: bool,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
+    pending_nudge: Option<layers::PendingNudge>,
     warp: Option<transform_ui::WarpSession>,
     warp_overlay: Option<layers::MovePaint>,
     warp_token: u64,
@@ -269,7 +270,8 @@ pub struct Workspace {
     wand_sample_all: bool,
     gradient_shape: crate::paint::GradientShape,
     gradient_blend: crate::paint::GradientBlend,
-    clone_source: Option<(u32, u32)>,
+    clone_source: Option<paint_ui::CloneSource>,
+    clone_aligned: bool,
     inspector_tab: InspectorTab,
     gradient: Option<gradient_ui::GradientSession>,
     gradient_overlay: Option<layers::MovePaint>,
@@ -345,6 +347,7 @@ impl Workspace {
                 workspace.canvas_cursor.leave();
                 workspace.pan_drag = None;
                 workspace.space_pan = false;
+                workspace.pending_nudge = None;
                 workspace.crop_drag = None;
                 workspace.selection_drag = None;
                 workspace.selection_preview = None;
@@ -473,6 +476,7 @@ impl Workspace {
             scale_lock: true,
             move_settled: None,
             move_token: 0,
+            pending_nudge: None,
             warp: None,
             warp_overlay: None,
             warp_token: 0,
@@ -488,6 +492,7 @@ impl Workspace {
             gradient_shape: crate::paint::GradientShape::Linear,
             gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
             clone_source: None,
+            clone_aligned: true,
             inspector_tab: InspectorTab::Layers,
             gradient: None,
             gradient_overlay: None,
@@ -615,6 +620,8 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
         if switched {
+            self.pending_nudge = None;
+            self.clone_source = None;
             self.commit_numeric_edit(window, cx);
             self.numeric_followup = None;
             // A commit that starts here finishes on the tab it belongs to.
@@ -657,6 +664,8 @@ impl Workspace {
         self.pan_drag = None;
         let closed_active = self.active == Some(index);
         if closed_active {
+            self.pending_nudge = None;
+            self.clone_source = None;
             self.numeric_followup = None;
             self.opacity_drag = None;
             self.dismiss_form(window, cx);
@@ -828,6 +837,7 @@ impl Workspace {
             self.drop_settled_text(window, cx);
         }
         let published = self.publish_change(id, generation, change, result, window, cx);
+        self.finish_clone_alignment(id, generation, published);
         if let Some(index) = self.tab_index(id)
             && self.tabs[index].settle_text_commit(published)
         {
@@ -850,6 +860,7 @@ impl Workspace {
             then(self, window, cx);
         }
         self.finish_numeric_followup(id, generation, published, window, cx);
+        self.finish_pending_nudge(id, generation, published, window, cx);
     }
 
     // Publishes a background result only if the tab has not changed since the job started.

@@ -263,7 +263,7 @@ impl Tool {
     pub fn help(self) -> &'static str {
         match self {
             Self::Move => {
-                "Drag to move the active layer; Escape cancels. The alignment buttons place it against a canvas edge or center it. View → Toggle Layer Boundary shows its bounds."
+                "Drag to move the active layer; Escape cancels. Type signed X/Y coordinates for a live preview; Return or leaving the field commits, and Escape or empty text restores the position. Arrow keys nudge one image pixel, or ten with Shift; releasing an arrow commits the key sequence. The alignment buttons place the layer against a canvas edge or center it. View → Toggle Layer Boundary shows its bounds."
             }
             Self::Pan => {
                 "Drag to move the canvas. Hold Space and drag to pan temporarily from another tool."
@@ -278,7 +278,7 @@ impl Tool {
                 "Drag a crop box. Drag inside to move it or drag a handle to resize it. X, Y, Width, and Height update immediately; an empty field leaves the crop unchanged. Return applies the crop; Escape cancels."
             }
             Self::Rotate => {
-                "Drag to rotate the active layer or type an angle in degrees. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
+                "Drag to rotate the active layer or type an angle in degrees. Hold Shift while dragging to snap to 15-degree angles. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
             }
             Self::Flip => {
                 "Choose Horizontal or Vertical, or drag to choose a direction. Return applies the flip; Escape cancels. The selection stays in canvas coordinates."
@@ -299,7 +299,7 @@ impl Tool {
                 "Click to add vertices or drag to draw a freehand segment. Releasing keeps the outline open. Click its start or press Return to close it; Escape cancels. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::MagicWand => {
-                "Click a connected region to select it. Sample All Layers uses the visible composite; otherwise only the active layer is sampled. Tolerance 0 matches its color exactly; this tolerance is shared with Bucket Fill. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Click a connected region to select it. Sample All Layers uses the visible composite; otherwise only the active layer is sampled. Tolerance is shared with Bucket Fill; zero matches exactly, ignoring stored RGB when both pixels are fully transparent. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::Pencil | Self::Brush => {
                 "Paint with the foreground color inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size. Pencil has a hard edge; Brush uses the chosen hardness."
@@ -311,10 +311,10 @@ impl Tool {
                 "Paint to change local detail on the active layer, inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
             }
             Self::CloneStamp => {
-                "Alt-click to set or change the source, then paint to copy from that offset on the active layer. The selection limits the destination. Release commits one stroke; Escape cancels. The bracket keys [ and ] change the brush size."
+                "Alt-click inside the active raster layer to set the source. Aligned keeps the source offset across strokes; turn it off to restart each stroke at the source. Changing the mode resets alignment. Choose a new source after changing tabs or layers, or moving/resizing the layer. The selection limits the destination. Release commits one stroke; Escape cancels. The bracket keys [ and ] change the brush size."
             }
             Self::BucketFill => {
-                "Click to fill with the foreground color. Connected fills a connected region; Selection covers the whole selection. Sample All Layers reads visible layers to find the region, then paints only the active layer. Tolerance 0 matches a color exactly."
+                "Click to fill with the foreground color. Connected fills a connected region; Selection covers the whole selection. Sample All Layers reads visible layers to find the region, then paints only the active layer. Tolerance 0 matches exactly, ignoring stored RGB when both pixels are fully transparent."
             }
             Self::Gradient => {
                 "Drag a line to preview the gradient, then adjust its endpoints. FG → BG blends the foreground and background colors; FG → Clear fades to transparency. The selection limits the fill. Return applies it; Escape cancels."
@@ -421,6 +421,10 @@ pub const TOOL_GROUPS: &[(&str, &[Tool])] = &[
 #[action(namespace = lime, no_json)]
 pub struct SelectTool(pub Tool);
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Action)]
+#[action(namespace = lime, no_json)]
+pub struct NudgeLayer(pub i32, pub i32);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
 #[action(namespace = lime, no_json)]
 pub enum AlignLayer {
@@ -496,6 +500,15 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("-", ZoomOut, None),
         KeyBinding::new("1", Zoom::Percent(100.), None),
         KeyBinding::new("escape", CancelMove, Some("Move")),
+        KeyBinding::new("escape", CancelMove, Some("ScaleLayer")),
+        KeyBinding::new("left", NudgeLayer(-1, 0), Some("Move")),
+        KeyBinding::new("right", NudgeLayer(1, 0), Some("Move")),
+        KeyBinding::new("up", NudgeLayer(0, -1), Some("Move")),
+        KeyBinding::new("down", NudgeLayer(0, 1), Some("Move")),
+        KeyBinding::new("shift-left", NudgeLayer(-10, 0), Some("Move")),
+        KeyBinding::new("shift-right", NudgeLayer(10, 0), Some("Move")),
+        KeyBinding::new("shift-up", NudgeLayer(0, -10), Some("Move")),
+        KeyBinding::new("shift-down", NudgeLayer(0, 10), Some("Move")),
         KeyBinding::new("escape", CancelFreeSelect, Some("FreeSelect")),
         KeyBinding::new("enter", CloseFreeSelect, Some("FreeSelect")),
         KeyBinding::new(&format!("{primary}-c"), CopyImage, None),

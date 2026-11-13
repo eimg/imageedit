@@ -112,14 +112,20 @@ impl Workspace {
         if event.button == MouseButton::Left && !self.free_points.is_empty() {
             self.finish_free(event.position, window, cx);
         }
-        if event.button == MouseButton::Left && self.move_drag.is_some() {
+        if event.button == MouseButton::Left && self.move_pointer_dragging() {
             self.extend_move(event.position, window.scale_factor(), cx);
             self.finish_move(window, cx);
         }
         if event.button == MouseButton::Left
             && self.warp.as_ref().is_some_and(|session| session.dragging())
         {
-            self.extend_warp_drag(event.position, window.scale_factor(), window, cx);
+            self.extend_warp_drag(
+                event.position,
+                window.scale_factor(),
+                event.modifiers.shift,
+                window,
+                cx,
+            );
             self.end_warp_drag(cx);
         }
         if event.button == MouseButton::Left

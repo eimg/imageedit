@@ -552,6 +552,7 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        shift: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -572,10 +573,12 @@ impl Workspace {
                     start_degrees,
                     start_angle,
                 }) => {
-                    let degrees = wrap_degrees(
-                        start_degrees + pointer_angle(session.center(), canvas) - start_angle,
+                    let degrees = drag_degrees(
+                        start_degrees,
+                        start_angle,
+                        pointer_angle(session.center(), canvas),
+                        shift,
                     );
-                    let degrees = (degrees * 10.0).round() / 10.0;
                     changed = degrees != session.degrees;
                     session.degrees = degrees;
                 }
@@ -921,6 +924,12 @@ fn wrap_degrees(mut value: f64) -> f64 {
     value
 }
 
+fn drag_degrees(start: f64, pointer_start: f64, pointer: f64, constrained: bool) -> f64 {
+    let degrees = wrap_degrees(start + pointer - pointer_start);
+    let step = if constrained { 15.0 } else { 0.1 };
+    wrap_degrees((degrees / step).round() * step)
+}
+
 fn drop_preview(preview: WarpPreview, window: &mut Window, cx: &mut Context<Workspace>) {
     let mut images = Vec::new();
     images.extend(preview.below);
@@ -934,6 +943,17 @@ fn drop_preview(preview: WarpPreview, window: &mut Window, cx: &mut Context<Work
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constrained_rotation_snaps_absolute_angles_and_survives_the_angle_seam() {
+        assert_eq!(drag_degrees(0., 0., 22., true), 15.);
+        assert_eq!(drag_degrees(0., 0., -24., true), -30.);
+        assert_eq!(drag_degrees(13., 350., 5., true), 30.);
+        assert_eq!(drag_degrees(178., 0., 4., true).abs(), 180.);
+        assert!((drag_degrees(0., 0., 22.34, false) - 22.3).abs() < 1e-9);
+        // Releasing Shift recomputes from the original grab, without accumulating snaps.
+        assert_eq!(drag_degrees(13., 350., 5., false), 28.);
+    }
 
     #[test]
     fn untouched_rotate_and_perspective_are_not_pending_but_a_flip_is() {

@@ -23,11 +23,62 @@ use crate::geometry::{self, Alignment, ContentCrop};
 use crate::preview::Dirty;
 
 pub(super) struct MoveDrag {
+    tab: usize,
     layer: LayerId,
     origin: (i32, i32),
     pub(super) offset: (i32, i32),
     anchor: (i64, i64),
     anchor_screen: Point<Pixels>,
+    input: MoveInput,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MoveInput {
+    Pointer,
+    Numeric,
+    Keyboard,
+}
+
+pub(super) struct PendingNudge {
+    tab: usize,
+    layer: LayerId,
+    generation: u64,
+    delta: (i32, i32),
+    held: bool,
+}
+
+impl PendingNudge {
+    fn queue(&mut self, context: (usize, LayerId, u64), delta: (i32, i32)) {
+        if (self.tab, self.layer, self.generation) == context {
+            self.delta = (
+                self.delta.0.saturating_add(delta.0),
+                self.delta.1.saturating_add(delta.1),
+            );
+            self.held = true;
+        }
+    }
+
+    fn accepts(&self, tab: &super::Tab, published: bool) -> bool {
+        published
+            && tab.id == self.tab
+            && tab.active_layer == self.layer
+            && !tab.busy()
+            && self.generation.checked_add(1) == Some(tab.history.generation())
+    }
+}
+
+impl MoveDrag {
+    fn belongs_to(&self, tab: &super::Tab) -> bool {
+        self.tab == tab.id && self.layer == tab.active_layer && !tab.busy()
+    }
+    fn nudge_offset(&self, delta: (i32, i32)) -> Option<(i32, i32)> {
+        (self.input == MoveInput::Keyboard).then(|| {
+            (
+                shift_offset(self.offset.0, i64::from(delta.0)),
+                shift_offset(self.offset.1, i64::from(delta.1)),
+            )
+        })
+    }
 }
 
 pub(super) struct OpacityDrag {
@@ -357,8 +408,11 @@ impl Workspace {
             return;
         };
         if !tab.busy() && tab.active_layer != id && tab.document.content.layer(id).is_some() {
+            self.pending_nudge = None;
+            self.clone_source = None;
             tab.active_layer = id;
             tab.notice = None;
+            self.clear_move_preview(window, cx);
             self.opacity_drag = None;
             self.cancel_text(window, cx);
             self.cancel_warp(window, cx);
@@ -845,13 +899,188 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab().is_none_or(|tab| tab.busy()) {
+        if self.move_drag.is_some() || self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
         let Some(anchor) = self.unclamped_pointer_pixel(position, scale) else {
             return;
         };
-        let Some(tab) = self.active.map(|index| &mut self.tabs[index]) else {
+        self.start_move_preview(MoveInput::Pointer, anchor, position, window, cx);
+    }
+
+    pub(super) fn begin_move_numeric(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.tool != crate::commands::Tool::Move || self.move_drag.is_some() {
+            return false;
+        }
+        self.start_move_preview(
+            MoveInput::Numeric,
+            (0, 0),
+            point(px(0.), px(0.)),
+            window,
+            cx,
+        );
+        self.move_drag.is_some()
+    }
+
+    pub(super) fn move_offset(&self) -> Option<(i32, i32)> {
+        self.move_drag
+            .as_ref()
+            .map(|drag| drag.offset)
+            .or(self.move_settled)
+            .or_else(|| {
+                let tab = self.active_tab()?;
+                Some(tab.document.content.layer(tab.active_layer)?.offset)
+            })
+    }
+
+    pub(super) fn preview_move_position(
+        &mut self,
+        horizontal: bool,
+        value: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self
+            .move_drag
+            .as_ref()
+            .filter(|drag| drag.input == MoveInput::Numeric)
+        else {
+            return;
+        };
+        let offset = if horizontal {
+            (value, drag.origin.1)
+        } else {
+            (drag.origin.0, value)
+        };
+        self.update_move_offset(offset, cx);
+    }
+
+    pub(super) fn restore_move_position(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.move_drag.as_ref() {
+            self.update_move_offset(drag.origin, cx);
+        }
+    }
+
+    pub(super) fn nudge_layer(
+        &mut self,
+        delta: (i32, i32),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tool != crate::commands::Tool::Move
+            || self.space_pan
+            || self.numeric_edit.is_some()
+            || self.form.is_some()
+            || self.dialog_open
+        {
+            return;
+        }
+        if let Some(tab) = self.active_tab().filter(|tab| tab.busy()) {
+            let context = (tab.id, tab.active_layer, tab.history.generation());
+            if let Some(pending) = self.pending_nudge.as_mut() {
+                pending.queue(context, delta);
+            }
+            return;
+        }
+        if self.move_drag.is_none() {
+            self.start_move_preview(
+                MoveInput::Keyboard,
+                (0, 0),
+                point(px(0.), px(0.)),
+                window,
+                cx,
+            );
+        }
+        let Some(offset) = self
+            .move_drag
+            .as_ref()
+            .and_then(|drag| drag.nudge_offset(delta))
+        else {
+            return;
+        };
+        self.update_move_offset(offset, cx);
+    }
+
+    pub(super) fn finish_nudge(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(key, "left" | "right" | "up" | "down")
+            && (self.form.is_some() || self.dialog_open)
+            && (self.pending_nudge.is_some()
+                || self
+                    .move_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.input == MoveInput::Keyboard))
+        {
+            self.cancel_move(window, cx);
+            return;
+        }
+        if matches!(key, "left" | "right" | "up" | "down")
+            && let Some(pending) = self.pending_nudge.as_mut()
+        {
+            pending.held = false;
+        }
+        if matches!(key, "left" | "right" | "up" | "down")
+            && self
+                .move_drag
+                .as_ref()
+                .is_some_and(|drag| drag.input == MoveInput::Keyboard)
+        {
+            self.finish_move(window, cx);
+        }
+    }
+
+    pub(super) fn move_pointer_dragging(&self) -> bool {
+        self.move_drag
+            .as_ref()
+            .is_some_and(|drag| drag.input == MoveInput::Pointer)
+    }
+
+    pub(super) fn finish_pending_nudge(
+        &mut self,
+        id: usize,
+        generation: u64,
+        published: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_nudge.take() else {
+            return;
+        };
+        if pending.tab != id || pending.generation != generation {
+            self.pending_nudge = Some(pending);
+            return;
+        }
+        if self.tool != crate::commands::Tool::Move
+            || self.form.is_some()
+            || self.dialog_open
+            || pending.delta == (0, 0)
+            || self
+                .active_tab()
+                .is_none_or(|tab| !pending.accepts(tab, published))
+        {
+            return;
+        }
+        self.nudge_layer(pending.delta, window, cx);
+        if !pending.held {
+            self.finish_move(window, cx);
+        }
+    }
+
+    fn start_move_preview(
+        &mut self,
+        input: MoveInput,
+        anchor: (i64, i64),
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .active
+            .map(|index| &mut self.tabs[index])
+            .filter(|tab| !tab.busy())
+        else {
             return;
         };
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
@@ -864,6 +1093,7 @@ impl Workspace {
         }
         let id = layer.id;
         let origin = layer.offset;
+        let tab_id = tab.id;
         let size = layer.pixels.dimensions();
         let opacity = layer.opacity;
         let pixels = layer.pixels.clone();
@@ -872,11 +1102,13 @@ impl Workspace {
         let token = self.move_token;
         self.drop_move_overlay(window, cx);
         self.move_drag = Some(MoveDrag {
+            tab: tab_id,
             layer: id,
             origin,
             offset: origin,
             anchor,
             anchor_screen: position,
+            input,
         });
         let job = cx.background_executor().spawn(async move {
             let (below, above) = content.composite_around(id);
@@ -915,7 +1147,11 @@ impl Workspace {
         scale: f32,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.move_drag.as_ref() else {
+        let Some(drag) = self
+            .move_drag
+            .as_ref()
+            .filter(|drag| drag.input == MoveInput::Pointer)
+        else {
             return;
         };
         let delta = position - drag.anchor_screen;
@@ -930,6 +1166,10 @@ impl Workspace {
                 shift_offset(drag.origin.1, pointer.1.saturating_sub(drag.anchor.1)),
             )
         };
+        self.update_move_offset(offset, cx);
+    }
+
+    fn update_move_offset(&mut self, offset: (i32, i32), cx: &mut Context<Self>) {
         if self
             .move_drag
             .as_ref()
@@ -954,7 +1194,7 @@ impl Workspace {
         let Some(drag) = self.move_drag.take() else {
             return;
         };
-        if drag.offset == drag.origin {
+        if self.active_tab().is_none_or(|tab| !drag.belongs_to(tab)) || drag.offset == drag.origin {
             self.clear_move_preview(window, cx);
             cx.notify();
             return;
@@ -965,14 +1205,27 @@ impl Workspace {
         }
         let id = drag.layer;
         let offset = drag.offset;
+        let pending = if drag.input == MoveInput::Keyboard {
+            self.active_tab().map(|tab| PendingNudge {
+                tab: tab.id,
+                layer: id,
+                generation: tab.history.generation(),
+                delta: (0, 0),
+                held: false,
+            })
+        } else {
+            None
+        };
         self.edit_content(
             move |content, _, _| content.set_offset(id, offset),
             window,
             cx,
         );
+        self.pending_nudge = pending;
     }
 
     pub(super) fn cancel_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_nudge = None;
         if self.move_drag.is_none() && self.move_overlay.is_none() {
             return;
         }
@@ -981,6 +1234,13 @@ impl Workspace {
     }
 
     pub(super) fn clear_move_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .numeric_edit
+            .as_ref()
+            .is_some_and(|edit| edit.field.is_move())
+        {
+            self.numeric_edit = None;
+        }
         self.move_token = self.move_token.wrapping_add(1);
         self.move_drag = None;
         self.drop_move_overlay(window, cx);
@@ -1067,6 +1327,93 @@ fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_nudges_accumulate_without_changing_a_pointer_or_numeric_session() {
+        let mut drag = MoveDrag {
+            tab: 0,
+            layer: LayerId(0),
+            origin: (0, 0),
+            offset: (0, 0),
+            anchor: (0, 0),
+            anchor_screen: point(px(0.), px(0.)),
+            input: MoveInput::Keyboard,
+        };
+        for _ in 0..5 {
+            drag.offset = drag.nudge_offset((1, -10)).unwrap();
+        }
+        assert_eq!(drag.offset, (5, -50));
+        assert_eq!(drag.origin, (0, 0));
+        drag.offset = (i32::MAX, i32::MIN);
+        assert_eq!(drag.nudge_offset((10, -10)), Some(drag.offset));
+        for input in [MoveInput::Pointer, MoveInput::Numeric] {
+            drag.input = input;
+            assert_eq!(drag.nudge_offset((1, 0)), None);
+        }
+        let mut tab = super::super::tests::opacity_tab();
+        drag.tab = tab.id;
+        drag.layer = tab.active_layer;
+        assert!(drag.belongs_to(&tab));
+        tab.active_layer = LayerId(99);
+        assert!(!drag.belongs_to(&tab));
+        tab.active_layer = drag.layer;
+        tab.id += 1;
+        assert!(!drag.belongs_to(&tab));
+        tab.id = drag.tab;
+        tab.editing = true;
+        assert!(!drag.belongs_to(&tab));
+    }
+
+    #[test]
+    fn queued_nudges_resume_only_after_their_own_move_commit() {
+        let mut tab = super::super::tests::opacity_tab();
+        let generation = tab.history.generation();
+        let context = (tab.id, tab.active_layer, generation);
+        let mut pending = PendingNudge {
+            tab: tab.id,
+            layer: tab.active_layer,
+            generation,
+            delta: (0, 0),
+            held: false,
+        };
+        pending.queue(context, (1, 0));
+        pending.queue(context, (0, -10));
+        pending.queue((tab.id + 1, tab.active_layer, generation), (100, 0));
+        assert_eq!(pending.delta, (1, -10));
+        assert!(pending.held);
+        assert!(!pending.accepts(&tab, true));
+        let mut state = tab.state();
+        let dirty = state.content.set_offset(state.active_layer, (1, 0));
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            dirty,
+        )
+        .unwrap();
+        tab.editing = true;
+        assert!(!pending.accepts(&tab, true));
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Edit,
+                Some((state.content, state.active_layer, state.selection, patch)),
+                1
+            )
+            .0
+        );
+        assert!(pending.accepts(&tab, true));
+        assert!(!pending.accepts(&tab, false));
+        assert_eq!(tab.history.generation(), generation + 1);
+        let (undo, _) = tab.history.undo_target().unwrap();
+        assert_eq!(undo.content.layer(tab.active_layer).unwrap().offset, (0, 0));
+        tab.active_layer = LayerId(99);
+        assert!(!pending.accepts(&tab, true));
+        tab.active_layer = context.1;
+        pending.generation += 1;
+        assert!(!pending.accepts(&tab, true));
+    }
 
     #[test]
     fn opacity_drag_clamps_outside_the_track_and_samples_the_release_position() {

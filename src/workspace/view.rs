@@ -17,7 +17,7 @@ use crate::commands::{
     BrushSizeUp, CancelCrop, CancelFreeSelect, CancelGradient, CancelMove, CancelPath,
     CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, DeletePathAnchor,
     ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
-    InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, OPEN_HINT, OpenImage,
+    InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, NudgeLayer, OPEN_HINT, OpenImage,
     PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
     ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary, Tool,
     Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
@@ -68,17 +68,25 @@ impl Render for Workspace {
             // Modifier events follow the focus path, not the hovered canvas.
             // Keep this on the root so Option press/release repaints the clone
             // cursor immediately, including while a numeric field has focus.
-            .on_modifiers_changed(
-                cx.listener(|_, _: &gpui::ModifiersChangedEvent, window, cx| {
+            .on_modifiers_changed(cx.listener(
+                |this, _: &gpui::ModifiersChangedEvent, window, cx| {
+                    this.extend_warp_drag(
+                        window.mouse_position(),
+                        window.scale_factor(),
+                        window.modifiers().shift,
+                        window,
+                        cx,
+                    );
                     window.refresh();
                     cx.notify();
-                }),
-            )
+                },
+            ))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.begin_space_pan(event, cx);
             }))
-            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
                 this.end_space_pan(event, cx);
+                this.finish_nudge(&event.keystroke.key, window, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -119,6 +127,7 @@ impl Render for Workspace {
                         });
                     }
                     if changed {
+                        this.pending_nudge = None;
                         this.commit_numeric_edit(window, cx);
                         this.numeric_followup = None;
                         this.tool = tool;
@@ -204,12 +213,16 @@ impl Render for Workspace {
                             }))
                     })
                     .when(self.tool == Tool::Move, |root| {
-                        root.key_context("Move").on_action(cx.listener(
-                            |this, _: &CancelMove, window, cx| this.cancel_move(window, cx),
-                        ))
+                        root.key_context("Move")
+                            .on_action(cx.listener(|this, delta: &NudgeLayer, window, cx| {
+                                this.nudge_layer((delta.0, delta.1), window, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &CancelMove, window, cx| {
+                                this.cancel_move(window, cx)
+                            }))
                     })
                     .when(self.tool == Tool::ScaleLayer, |root| {
-                        root.key_context("Move").on_action(cx.listener(
+                        root.key_context("ScaleLayer").on_action(cx.listener(
                             |this, _: &CancelMove, window, cx| this.cancel_scale(window, cx),
                         ))
                     })
@@ -951,6 +964,7 @@ impl Workspace {
                                     this.extend_warp_drag(
                                         event.position,
                                         window.scale_factor(),
+                                        event.modifiers.shift,
                                         window,
                                         cx,
                                     );
@@ -1455,6 +1469,12 @@ impl Workspace {
                                         ),
                                     )
                             })
+                            .when(self.tool == Tool::CloneStamp, |panel| {
+                                let aligned = self.clone_aligned;
+                                panel.child(toggle_button("Aligned", aligned).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_clone_aligned(!aligned, cx);
+                                })))
+                            })
                             .when(self.tool == Tool::MagicWand, |panel| {
                                 let sample_all = self.wand_sample_all;
                                 panel.child(toggle_button("Sample All Layers", sample_all).on_click(
@@ -1543,25 +1563,17 @@ impl Workspace {
                             })
                             .when(self.tool == Tool::Move, |panel| {
                                 let enabled = self.geometry_enabled();
-                                let offset =
-                                    self.move_drag.as_ref().map(|drag| drag.offset).or_else(|| {
-                                        self.active_tab().and_then(|tab| {
-                                            tab.document
-                                                .content
-                                                .layer(tab.active_layer)
-                                                .map(|layer| layer.offset)
-                                        })
-                                    });
+                                let offset = self.move_offset();
                                 panel
-                                    .when_some(offset, |panel, offset| {
+                                    .when_some(offset, |panel, _| {
                                         panel
                                             .child(section_label("POSITION"))
                                             .child(
                                                 div()
                                                     .flex()
                                                     .gap_2()
-                                                    .child(readout_chip("X", offset.0))
-                                                    .child(readout_chip("Y", offset.1)),
+                                                    .child(self.numeric_chip(NumericField::MoveX, Some("X"), cx))
+                                                    .child(self.numeric_chip(NumericField::MoveY, Some("Y"), cx)),
                                             )
                                             .child(section_label("ALIGN"))
                                             .child(align_controls(enabled, cx))
@@ -2184,30 +2196,6 @@ pub(super) fn step_button(
         .cursor_pointer()
         .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
         .child(symbol)
-}
-
-pub(super) fn readout_chip(label: &'static str, value: impl ToString) -> Div {
-    div()
-        .h(px(STEP_HEIGHT))
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_1()
-        .px_2()
-        .rounded_md()
-        .bg(rgb(CANVAS))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .child(
-            div()
-                .text_size(px(10.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(MUTED))
-                .child(label),
-        )
-        .child(div().text_size(px(12.)).child(value.to_string()))
 }
 
 pub(super) fn option_action(label: &'static str, primary: bool) -> gpui::Stateful<Div> {

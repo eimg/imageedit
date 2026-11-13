@@ -978,6 +978,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn moves_refresh_every_composite_level_and_reuse_layer_thumbnails() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(600, 300, Rgba([10, 20, 30, 255])),
+        );
+        let top = content
+            .add_layer(
+                content.top_layer_id(),
+                "Top".into(),
+                Rgba([200, 40, 30, 180]),
+            )
+            .unwrap();
+        let mut canvas = RenderedCanvas::new(&content);
+        canvas.install_cache(build_level(&content, 1));
+        let thumbnails = canvas.thumbnails.clone();
+        for offset in [(-200, 0), (500, 260), (i32::MAX, 0), (i32::MIN, 0), (0, 0)] {
+            let dirty = content.set_offset(top, offset);
+            let patch = RenderedCanvas::prepare_patch(
+                &canvas.pixels,
+                canvas.preview.has_transparency,
+                canvas.level_caches(),
+                &content,
+                dirty,
+            )
+            .unwrap();
+            assert!(patch.thumbnails.is_empty());
+            canvas.apply(patch);
+            assert_eq!(*canvas.pixels, *content.composite());
+            for (id, thumbnail) in &thumbnails {
+                assert!(Arc::ptr_eq(thumbnail, canvas.thumbnail(*id).unwrap()));
+            }
+            for level in &canvas.levels {
+                let expected = build_level(&content, level.cache.shift());
+                for span in expected.spans() {
+                    assert_eq!(level.cache.slot(span.index), expected.slot(span.index));
+                }
+            }
+        }
+    }
+
     fn tile_images(canvas: &RenderedCanvas) -> Vec<Arc<RenderImage>> {
         canvas.tile_sets()[0]
             .1

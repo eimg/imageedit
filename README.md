@@ -60,6 +60,18 @@ In **Rotate**, enter an angle in degrees (including negative values and tenths),
 then use Apply after finishing the numeric edit. **Sample All Layers** on the
 Magic Wand samples the visible composite and can select beyond the active layer.
 
+**Move** accepts signed X/Y coordinates with a live preview. Return or leaving
+the field commits; Escape or empty text restores the position. Arrow keys move
+one image pixel, or ten with Shift, regardless of zoom. Releasing an arrow commits
+one undo step for that key sequence. Hold Shift while dragging **Rotate** to snap
+to 15-degree angles.
+
+**Clone Stamp** starts with Aligned enabled, preserving the source offset across
+strokes. Turn it off to start each stroke at the chosen source. Alt-click to set
+a source again after changing tabs/layers or moving/resizing the layer. Wand and
+connected Fill treat fully transparent pixels as the same color even when their
+stored RGB differs; other alpha and tolerance comparisons stay in effect.
+
 | Action | macOS | Windows |
 | --- | --- | --- |
 | Open / Save | ⌘O / ⌘S | Ctrl+O / Ctrl+S |
