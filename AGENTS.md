@@ -324,13 +324,25 @@ the first page. The dialog shows canvas dimensions and warns about pages extendi
 outside the first-page or existing canvas. Open as Layers never resizes its target.
 Successful imports remember DPI/background during the session, and successful
 new-document imports also remember mode/canvas choice. Failed/canceled imports
-do not change defaults; page selection resets per source. Choose Pages accepts
-comma-separated one-based pages and inclusive ranges, with hyphen/en/em dashes.
-Duplicates/overlaps import once in ascending document order. Page names,
-numbered tab titles, and progress use actual source page numbers rather than ordinal positions.
-The page field accepts at most 2048 characters, scrolls to its caret, and keeps
-clipboard and keyboard navigation in the dialog. Tab switches DPI/page fields
-only in Choose Pages; it does not change the selection mode. PDF imports use the
+do not change defaults; page selection resets per source. The PDF dialog is
+720 px wide above a 760 px window width, with settings beside the page picker;
+narrower windows stack its content. Header/footer stay outside the scrollable
+body. Page thumbnails toggle inclusion, updating a compact canonical range list.
+All selects the source and None clears it; the page field stays visible. An empty
+or invalid selection, invalid DPI, budget failure, or stale target disables Import
+with its reason shown. Page names, numbered tab titles, and progress retain
+source numbers. Lists accept at most 2048 characters and hyphen/en/em dashes.
+DPI/page inputs support pointer caret placement using shaped glyph positions,
+drag/Shift-click selection, double-click select-all, and horizontal caret scrolling.
+Shared Field editing handles partial-range replacement/clipboard and Shift+arrow/
+Home/End extension. Tab cycles both inputs without changing selected pages.
+Thumbnails load automatically in three-page batches. Previous/Next browse source
+batches; Selected brings the first chosen page into view. Selected thumbnails
+have check marks and accent borders. Previews respect white/transparent background,
+with a checker only within the fitted bitmap, and remain independent of import
+DPI. Per-page errors expose details and Retry previews. Dismissing the form
+cancels preview work and releases published images.
+PDF imports use the
 normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
 save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
 one PDF at a time. PDF read/inspection/render/preparation jobs show progress and
@@ -592,11 +604,30 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   projects written before those controls were added.
 - `src/pdf/pages.rs` parses bounded page-list expressions after checking source
   count and endpoints, canonicalizes duplicates in document order, and validates
-  nonempty, unique ascending page numbers against the import page cap. Preview
-  and Apply share its parser for All Pages and Choose Pages. `PdfOptions.pages`
+  nonempty, unique ascending page numbers against the import page cap. Estimates
+  and Apply share its parser for all/custom page choices. `PdfOptions.pages`
   is an explicit source-page list, and preparation checks its count/order before
   constructing a document or inserting layers. Only selected pages contribute
-  dimensions, memory, and canvas bounds; unselected pages are never rendered.
+  dimensions, memory, and canvas bounds at import resolution. The
+  thumbnail browser can render unselected pages at its fixed small resolution.
+- `src/pdf/thumbnails.rs` renders up to three pages with each axis bounded to
+  1–144 pixels. It uses the retained `PdfSource` bytes, validates source page
+  numbers, handles thin/large pages without full-resolution allocation, and
+  catches page render panics independently. Cancellation/parser failures discard
+  the batch; individual page failures stay local. A per-source render mutex
+  serializes thumbnail and full import parsing/rendering; cancellation is checked
+  before and after acquiring it, between pages, and after rendering. Active
+  parser/render calls complete before cancellation settles.
+- `src/workspace/pdf_preview.rs` owns the interactive page picker and one coalesced
+  background preview worker per workspace. Source/batch/background changes
+  invalidate its generation, cancel old work, and retain only the latest request.
+  New preview jobs wait until the old worker has returned, even across forms.
+  Published/stale GPU images are explicitly dropped when replaced or discarded;
+  closing the workspace cancels its worker. At most one displayed batch is kept,
+  with no persistent thumbnail cache or idle polling. Preview work never changes
+  image history or remembered import preferences. Thumbnail clicks update the
+  form page selection through bounded `toggle_page_selection` range formatting. The checker is
+  shared with layer thumbnails.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
   a white or transparent page background. Its `layered_canvas_size` validates
@@ -688,8 +719,18 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   pixels/thumbnails; per-tab pending guides bridge asynchronous publication so
   release does not flash the old position. History accounts for owned guide data.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
-  layer, adjustment, and filter dialogs. `src/workspace/color.rs`
+  layer, adjustment, and filter dialogs. Two-choice dialog groups reuse
+  `view::segmented` and `choice_button`, including PDF choices, New Image
+  background, and Before/After comparison. Navigation buttons share the form
+  action styling and put chevrons before Previous and after Next.
+  `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
+  `src/workspace/dialogs/pdf_input.rs` maps PDF input pointer positions through
+  the current shaped font, field padding, and horizontal scroll offset. The modal
+  owns the drag through mouse-up so selection can extend beyond the field. UTF-8
+  glyph indices map to character boundaries before updating Field's range anchor.
+  Field renders the selected span and tracks the appropriate caret child while
+  scrolling. Pointer click replaces the prior select-all behavior in PDF inputs.
 - `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
   fields, separate wand/fill tolerance and gap radius, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,

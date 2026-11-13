@@ -133,3 +133,102 @@ mod tests {
         );
     }
 }
+
+/// Toggle a thumbnail while preserving every other page choice. Compact ranges
+/// keep even a large source's All Pages selection within the text-field budget.
+pub fn toggle_page_selection(
+    text: &str,
+    all_pages: bool,
+    page: usize,
+    page_count: usize,
+) -> Result<String> {
+    ensure!(
+        (1..=MAX_PDF_PAGES).contains(&page_count) && (1..=page_count).contains(&page),
+        "The PDF page is no longer available."
+    );
+    let mut pages = if all_pages {
+        (1..=page_count).collect::<Vec<_>>()
+    } else if text.trim().is_empty() {
+        Vec::new()
+    } else {
+        parse_page_selection(text, page_count)?
+    };
+    match pages.binary_search(&page) {
+        Ok(index) => {
+            pages.remove(index);
+        }
+        Err(index) => pages.insert(index, page),
+    }
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < pages.len() {
+        let first = pages[index];
+        let mut last = first;
+        index += 1;
+        while index < pages.len() && pages[index] == last + 1 {
+            last = pages[index];
+            index += 1;
+        }
+        ranges.push(if first == last {
+            first.to_string()
+        } else {
+            format!("{first}-{last}")
+        });
+    }
+    let result = ranges.join(", ");
+    ensure!(
+        result.chars().count() <= MAX_PAGE_SELECTION_CHARS,
+        "The page selection is too long. Use fewer ranges."
+    );
+    Ok(result)
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_toggles_preserve_other_pages_and_allow_an_empty_choice() {
+        assert_eq!(toggle_page_selection("", true, 4, 7).unwrap(), "1-3, 5-7");
+        assert_eq!(
+            toggle_page_selection("1, 3–5, 8", false, 4, 10).unwrap(),
+            "1, 3, 5, 8"
+        );
+        assert_eq!(
+            toggle_page_selection("1, 3, 5, 8", false, 4, 10).unwrap(),
+            "1, 3-5, 8"
+        );
+        assert_eq!(toggle_page_selection("", false, 2, 7).unwrap(), "2");
+        assert_eq!(toggle_page_selection("2", false, 2, 7).unwrap(), "");
+        let large = toggle_page_selection("", true, 5000, MAX_PDF_PAGES).unwrap();
+        assert_eq!(large, "1-4999, 5001-10000");
+        let pages = parse_page_selection(&large, MAX_PDF_PAGES).unwrap();
+        assert_eq!(pages.len(), 9999);
+        assert!(!pages.contains(&5000));
+        assert!(validate_page_numbers(&pages, MAX_PDF_PAGES).is_err());
+    }
+
+    #[test]
+    fn thumbnail_toggles_reject_invalid_edits_targets_and_text_overflow() {
+        for text in ["1-", "7-3", "bad"] {
+            assert!(toggle_page_selection(text, false, 2, 10).is_err());
+        }
+        for (page, count) in [(0, 7), (8, 7), (1, 0), (1, usize::MAX)] {
+            assert!(toggle_page_selection("", true, page, count).is_err());
+        }
+        let mut text = String::new();
+        for page in (1..MAX_PDF_PAGES).step_by(2) {
+            let candidate = if text.is_empty() {
+                page.to_string()
+            } else {
+                format!("{text}, {page}")
+            };
+            if candidate.len() > MAX_PAGE_SELECTION_CHARS {
+                break;
+            }
+            text = candidate;
+        }
+        assert!(text.len() <= MAX_PAGE_SELECTION_CHARS);
+        assert!(toggle_page_selection(&text, false, 10_000, MAX_PDF_PAGES).is_err());
+    }
+}

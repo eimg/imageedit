@@ -1,3 +1,5 @@
+mod pdf_input;
+
 use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
@@ -12,7 +14,9 @@ use super::color::{ColorControl, Hsv, control};
 use super::filter_ui::FilterKind;
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::pdf_ui::PdfTarget;
-use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
+use super::view::{
+    ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT, choice_button, segmented,
+};
 use crate::adjustments::{
     Adjustment, BalanceRange, ColorBalance, Curve, Curves, GAMMA_MAX, GAMMA_MIN, GAMMA_ONE,
     Histogram, Levels, MapChannel,
@@ -30,6 +34,7 @@ use super::selection::MaskEdit;
 pub(super) struct Form {
     focus: FocusHandle,
     kind: FormKind,
+    pdf_input_drag: Option<pdf_input::PdfInputDrag>,
     pub(super) error: Option<String>,
 }
 
@@ -309,6 +314,7 @@ pub(super) struct Field {
     text: String,
     cursor: usize,
     selected: bool,
+    anchor: Option<usize>,
 }
 
 impl Field {
@@ -317,6 +323,7 @@ impl Field {
             cursor: text.chars().count(),
             text,
             selected: true,
+            anchor: None,
         }
     }
 
@@ -332,12 +339,38 @@ impl Field {
             .unwrap_or(self.text.len())
     }
 
-    fn replace(&mut self, text: &str) {
-        if self.selected {
-            self.text.clear();
-            self.cursor = 0;
-            self.selected = false;
+    fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        if self.selected && !self.text.is_empty() {
+            return Some(0..self.len());
         }
+        self.anchor
+            .filter(|&anchor| anchor != self.cursor)
+            .map(|anchor| anchor.min(self.cursor)..anchor.max(self.cursor))
+    }
+
+    fn move_cursor(&mut self, index: usize, extend: bool) {
+        if extend {
+            if self.selected {
+                self.anchor = Some(0);
+            } else if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.selected = false;
+        self.cursor = index.min(self.len());
+    }
+
+    fn replace(&mut self, text: &str) {
+        if let Some(range) = self.selection_range() {
+            let start = self.byte_at(range.start);
+            let end = self.byte_at(range.end);
+            self.text.replace_range(start..end, "");
+            self.cursor = range.start;
+        }
+        self.selected = false;
+        self.anchor = None;
         let at = self.byte_at(self.cursor);
         self.text.insert_str(at, text);
         self.cursor += text.chars().count();
@@ -353,12 +386,18 @@ impl Field {
 
     pub(super) fn select_all(&mut self) {
         self.selected = true;
+        self.anchor = None;
         self.cursor = self.len();
     }
 
     pub(super) fn caret_item(&self) -> usize {
         if self.selected && !self.text.is_empty() {
             0
+        } else if self
+            .selection_range()
+            .is_some_and(|range| self.cursor == range.end)
+        {
+            2
         } else {
             1
         }
@@ -367,8 +406,11 @@ impl Field {
     pub(super) fn clipboard(&mut self, key: &str, mode: FieldMode, cx: &mut Context<Workspace>) {
         match key {
             "a" => self.select_all(),
-            "c" | "x" if self.selected => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.text.clone()));
+            "c" | "x" if self.selection_range().is_some() => {
+                let range = self.selection_range().unwrap();
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.text[self.byte_at(range.start)..self.byte_at(range.end)].to_owned(),
+                ));
                 if key == "x" {
                     self.replace("");
                 }
@@ -392,33 +434,33 @@ impl Field {
             self.clipboard(&key.key, mode, cx);
         } else if !key.modifiers.alt && !key.modifiers.control && !key.modifiers.platform {
             match key.key.as_str() {
-                "backspace" | "delete" if self.selected => self.replace(""),
+                "backspace" | "delete" if self.selection_range().is_some() => self.replace(""),
                 "backspace" if self.cursor > 0 => {
                     self.cursor -= 1;
                     let start = self.byte_at(self.cursor);
                     let end = self.byte_at(self.cursor + 1);
                     self.text.replace_range(start..end, "");
+                    self.anchor = None;
+                    self.selected = false;
                 }
                 "delete" if self.cursor < self.len() => {
                     let start = self.byte_at(self.cursor);
                     let end = self.byte_at(self.cursor + 1);
                     self.text.replace_range(start..end, "");
-                }
-                "left" | "home" => {
-                    self.cursor = if self.selected || key.key == "home" {
-                        0
-                    } else {
-                        self.cursor.saturating_sub(1)
-                    };
+                    self.anchor = None;
                     self.selected = false;
                 }
-                "right" | "end" => {
-                    self.cursor = if self.selected || key.key == "end" {
-                        self.len()
-                    } else {
-                        (self.cursor + 1).min(self.len())
+                "left" | "right" | "home" | "end" => {
+                    let range = self.selection_range();
+                    let target = match key.key.as_str() {
+                        "home" => 0,
+                        "end" => self.len(),
+                        "left" if !key.modifiers.shift && range.is_some() => range.unwrap().start,
+                        "right" if !key.modifiers.shift && range.is_some() => range.unwrap().end,
+                        "left" => self.cursor.saturating_sub(1),
+                        _ => (self.cursor + 1).min(self.len()),
                     };
-                    self.selected = false;
+                    self.move_cursor(target, key.modifiers.shift);
                 }
                 _ => {
                     if let Some(text) = key.key_char.as_deref() {
@@ -436,7 +478,7 @@ impl Field {
             FieldMode::Hex => text.trim_start_matches('#'),
             _ => text,
         };
-        let existing = if self.selected { 0 } else { self.len() };
+        let existing = self.len() - self.selection_range().map_or(0, |range| range.len());
         let allowed = match mode {
             FieldMode::Digits { max } => max,
             FieldMode::Hex => 6,
@@ -483,13 +525,31 @@ impl Field {
                     .text_color(rgb(CANVAS))
                     .child(self.text.clone()),
             )
+        } else if let Some(range) = self.selection_range() {
+            let start = self.byte_at(range.start);
+            let end = self.byte_at(range.end);
+            let caret = || div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(rgb(ACCENT));
+            field = field.child(div().flex_shrink_0().child(self.text[..start].to_owned()));
+            if self.cursor == range.start {
+                field = field.child(caret());
+            }
+            field = field.child(
+                div()
+                    .flex_shrink_0()
+                    .bg(rgb(ACCENT))
+                    .text_color(rgb(CANVAS))
+                    .child(self.text[start..end].to_owned()),
+            );
+            if self.cursor == range.end {
+                field = field.child(caret());
+            }
+            field.child(div().flex_shrink_0().child(self.text[end..].to_owned()))
         } else {
             let at = self.byte_at(self.cursor);
-            field = field
-                .child(self.text[..at].to_owned())
-                .child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(rgb(ACCENT)))
-                .child(self.text[at..].to_owned());
             field
+                .child(div().flex_shrink_0().child(self.text[..at].to_owned()))
+                .child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(rgb(ACCENT)))
+                .child(div().flex_shrink_0().child(self.text[at..].to_owned()))
         }
     }
 }
@@ -813,9 +873,16 @@ impl Workspace {
         }
         let focus = cx.focus_handle();
         focus.focus(window);
+        if let FormKind::PdfImport {
+            source, background, ..
+        } = &kind
+        {
+            self.init_pdf_previews(source.clone(), *background, window, cx);
+        }
         self.form = Some(Form {
             focus,
             kind,
+            pdf_input_drag: None,
             error: None,
         });
         cx.notify();
@@ -824,6 +891,7 @@ impl Workspace {
     pub(super) fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_adjustment(window, cx);
         self.clear_filter(window, cx);
+        self.clear_pdf_previews(window, cx);
         self.form = None;
         self.focus.focus(window);
         cx.notify();
@@ -973,24 +1041,23 @@ impl Workspace {
                 div()
                     .flex()
                     .justify_between()
+                    .gap_2()
                     .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(
-                                form_button("Before", self.effect_before).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.effect_before = true;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(form_button("After", !self.effect_before).on_click(
-                                cx.listener(|this, _, _, cx| {
+                        segmented([
+                            choice_button("Before", self.effect_before).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.effect_before = true;
+                                    cx.notify();
+                                },
+                            )),
+                            choice_button("After", !self.effect_before).on_click(cx.listener(
+                                |this, _, _, cx| {
                                     this.effect_before = false;
                                     cx.notify();
-                                }),
+                                },
                             )),
+                        ])
+                        .flex_1(),
                     )
                     .child(form_button("Reset", false).on_click(
                         cx.listener(|this, _, window, cx| this.reset_effect_form(window, cx)),
@@ -1308,6 +1375,40 @@ impl Workspace {
         }
     }
 
+    pub(super) fn toggle_pdf_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        if let FormKind::PdfImport {
+            source,
+            page_selection,
+            page_scroll,
+            all_pages,
+            active,
+            ..
+        } = &mut form.kind
+        {
+            match pdf::toggle_page_selection(
+                &page_selection.text,
+                *all_pages,
+                page,
+                source.info.pages,
+            ) {
+                Ok(text) => {
+                    *page_selection = Field::new(text);
+                    page_selection.selected = false;
+                    *all_pages = false;
+                    *active = 1;
+                    page_scroll.scroll_to_item(1);
+                    form.error = None;
+                    form.pdf_input_drag = None;
+                }
+                Err(error) => form.error = Some(error.to_string()),
+            }
+            cx.notify();
+        }
+    }
+
     fn form_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &mut self.form else {
             return;
@@ -1349,15 +1450,17 @@ impl Workspace {
                         ..
                     } => {
                         if key == "tab" {
-                            *active = if *all_pages { 0 } else { (*active + 1) % 2 };
+                            *active = (*active + 1) % 2;
                             if *active == 0 {
-                                dpi.selected = true;
+                                dpi.select_all();
                             } else {
-                                page_selection.selected = true;
+                                page_selection.select_all();
+                                *all_pages = false;
                             }
-                        } else if *active == 0 || *all_pages {
+                        } else if *active == 0 {
                             dpi.handle_key(event, FieldMode::Digits { max: 4 }, cx);
                         } else {
+                            *all_pages = false;
                             page_selection.handle_key(event, FieldMode::PdfPages, cx);
                         }
                         page_scroll.scroll_to_item(page_selection.caret_item());
@@ -1835,11 +1938,19 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn form_overlay(&self, cx: &Context<Self>) -> Option<Div> {
+    pub(super) fn form_overlay(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
         let adjustment_preview = self.adjustment_preview.clone();
         let adjustment_histogram = self.adjustment_histogram;
         let filter_preview = self.filter_preview.clone();
         let form = self.form.as_ref()?;
+        let mut can_accept = true;
+        let wide_pdf = matches!(form.kind, FormKind::PdfImport { .. });
+        let wide = wide_pdf && window.viewport_size().width >= px(760.);
+        let pdf_width = if wide {
+            720.
+        } else {
+            (f32::from(window.viewport_size().width) - 32.).clamp(320., 560.)
+        };
         let (title, accept, content) =
             match &form.kind {
                 FormKind::New {
@@ -1870,11 +1981,11 @@ impl Workspace {
                             },
                         ),
                     );
-                    let background = div().flex().gap_2().children(
+                    let background = segmented(
                         [("Background color", false), ("Transparent", true)]
                             .into_iter()
                             .map(|(label, value)| {
-                                form_button(label, *transparent == value).on_click(cx.listener(
+                                choice_button(label, *transparent == value).on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         if let Some(Form {
                                             kind: FormKind::New { transparent, .. },
@@ -2031,150 +2142,76 @@ impl Workspace {
                             _ => Some(format!("{count} selected pages extend outside the canvas. Their pixels are retained in the layers.")),
                         }
                     });
-                    let range = div()
-                        .flex()
-                        .gap_2()
-                        .child(form_button("All Pages", *all_pages).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(Form {
-                                    kind:
-                                        FormKind::PdfImport {
-                                            all_pages, active, ..
-                                        },
-                                    ..
-                                }) = &mut this.form
-                                {
-                                    *all_pages = true;
-                                    *active = 0;
-                                    cx.notify();
-                                }
-                            },
-                        )))
-                        .child(form_button("Choose Pages", !*all_pages).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(Form {
-                                    kind:
-                                        FormKind::PdfImport {
-                                            all_pages,
-                                            page_selection,
-                                            page_scroll,
-                                            active,
-                                            ..
-                                        },
-                                    ..
-                                }) = &mut this.form
-                                {
-                                    *all_pages = false;
-                                    *active = 1;
-                                    page_selection.selected = true;
-                                    page_scroll.scroll_to_item(0);
-                                    cx.notify();
-                                }
-                            },
-                        )));
-                    let fields = if *all_pages {
-                        div()
-                    } else {
-                        div().flex().flex_col().gap_1()
-                            .child(page_selection.view(*active == 1).id("pdf-pages").w_full().min_w_0().overflow_x_scroll().track_scroll(page_scroll).whitespace_nowrap().on_scroll_wheel(|_, _, cx| cx.stop_propagation()).on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(Form { kind: FormKind::PdfImport { page_selection, page_scroll, active, .. }, .. }) = &mut this.form {
-                                    *active = 1;
-                                    page_selection.selected = true;
-                                    page_scroll.scroll_to_item(0);
-                                    cx.notify();
-                                }
-                            })))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child("Example: 1, 3-5, 8. Pages open in document order."))
-                    };
-                    let modes = div().flex().gap_2().child(
-                        form_button("As Layers", *mode == PdfMode::Layers).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(Form {
-                                    kind: FormKind::PdfImport { mode, .. },
-                                    ..
-                                }) = &mut this.form
-                                {
-                                    *mode = PdfMode::Layers;
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                    );
-                    let modes = if *target == PdfTarget::NewDocument {
-                        modes.child(
-                            form_button("As Images", *mode == PdfMode::Separate).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Some(Form {
-                                        kind: FormKind::PdfImport { mode, .. },
-                                        ..
-                                    }) = &mut this.form
-                                    {
-                                        *mode = PdfMode::Separate;
-                                        cx.notify();
-                                    }
-                                }),
-                            ),
-                        )
-                    } else {
-                        modes
-                    };
-                    let backgrounds = div().flex().gap_2().children([
-                        ("White", PdfBackground::White), ("Transparent", PdfBackground::Transparent),
-                    ].map(|(label, choice)| form_button(label, *background == choice).on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(Form { kind: FormKind::PdfImport { background, .. }, .. }) = &mut this.form {
-                            *background = choice; cx.notify();
+                    let range = segmented([
+                        choice_button("All", *all_pages || pdf::parse_page_selection(&page_selection.text, info.pages).is_ok_and(|pages| pages.len() == info.pages)).on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(Form {kind: FormKind::PdfImport {source, all_pages, page_selection, active, ..}, error, ..}) = &mut this.form {
+                                *all_pages = true;
+                                *page_selection = Field::new(if source.info.pages == 1 {"1".into()} else {format!("1-{}", source.info.pages)});
+                                page_selection.selected = false;
+                                *active = 1;
+                                *error = None;
+                                cx.notify();
+                            }
+                        })),
+                        choice_button("None", !*all_pages && page_selection.text.trim().is_empty()).on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(Form {kind: FormKind::PdfImport {all_pages, page_selection, active, page_scroll, ..}, error, ..}) = &mut this.form {
+                                *all_pages = false;
+                                *page_selection = Field::new(String::new());
+                                page_selection.selected = false;
+                                *active = 1;
+                                page_scroll.scroll_to_item(1);
+                                *error = None;
+                                cx.notify();
+                            }
+                        })),
+                    ]);
+                    let fields = self.pdf_input_view(pdf_input::PdfInput::Pages, page_selection, *active == 1, Some(page_scroll), cx);
+                    let modes = segmented([
+                        ("As Layers", PdfMode::Layers), ("As Images", PdfMode::Separate),
+                    ].map(|(label, choice)| choice_button(label, *mode == choice).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Form {kind: FormKind::PdfImport {mode, ..}, ..}) = &mut this.form {
+                            *mode = choice;
+                            cx.notify();
                         }
                     }))));
-                    let canvases = div().flex().gap_2().children([
+                    let backgrounds = segmented([
+                        ("White", PdfBackground::White), ("Transparent", PdfBackground::Transparent),
+                    ].map(|(label, choice)| choice_button(label, *background == choice).on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(Form { kind: FormKind::PdfImport { background, .. }, .. }) = &mut this.form {
+                            *background = choice;
+                            this.set_pdf_preview_background(choice, window, cx);
+                            cx.notify();
+                        }
+                    }))));
+                    let canvases = segmented([
                         ("First Page", PdfCanvas::FirstPage), ("Fit All Pages", PdfCanvas::FitAllPages),
-                    ].map(|(label, choice)| form_button(label, *canvas == choice).on_click(cx.listener(move |this, _, _, cx| {
+                    ].map(|(label, choice)| choice_button(label, *canvas == choice).on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Form { kind: FormKind::PdfImport { canvas, .. }, .. }) = &mut this.form {
                             *canvas = choice; cx.notify();
                         }
                     }))));
-                    let body = div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .child(format!("{}  ·  {pages}", file_name(path))),
-                        )
-                        .child(div().child("Resolution (DPI)").child(
-                            dpi.view(*active == 0).id("pdf-dpi").mt_1().on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(Form {
-                                        kind: FormKind::PdfImport { dpi, active, .. },
-                                        ..
-                                    }) = &mut this.form
-                                    {
-                                        *active = 0;
-                                        dpi.selected = true;
-                                        cx.notify();
-                                    }
-                                },
-                            )),
-                        ))
-                        .child(
-                            div()
-                                .child("Pages")
-                                .child(range.mt_1())
-                                .child(fields.mt_2()),
-                        )
-                        .when(*target == PdfTarget::NewDocument, |body| {
-                            body.child(div().child("Open pages as").child(modes.mt_1()))
-                        })
-                        .child(div().child("Page background").child(backgrounds.mt_1()))
+                    let preview_selection = if *all_pages { None } else { pdf::parse_page_selection(&page_selection.text, info.pages).ok() };
+                    let target_error = preview.as_ref().ok().and_then(|(_, sizes)| self.validate_pdf_target(*target, sizes).err()).map(|error| error.to_string());
+                    can_accept = preview.is_ok() && target_error.is_none();
+                    let estimate = target_error.unwrap_or(estimate);
+                    let settings = div().flex().flex_col().gap_3().min_w_0()
+                        .child(div().child("Pages").child(range.mt_1()).child(fields.mt_2())
+                            .child(div().text_xs().text_color(rgb(MUTED)).mt_1().child("Example: 1, 3-5, 8")))
+                        .child(div().child("Resolution (DPI)").child(self.pdf_input_view(pdf_input::PdfInput::Dpi, dpi, *active == 0, None, cx).mt_1()))
+                        .when(*target == PdfTarget::NewDocument, |body| body.child(div().child("Open as").child(modes.mt_1())))
+                        .child(div().child("Background").child(backgrounds.mt_1()))
                         .when(*target == PdfTarget::NewDocument && *mode == PdfMode::Layers && info.pages > 1, |body| {
                             body.child(div().child("Canvas size").child(canvases.mt_1()))
                         })
-                        .child(div().text_xs().text_color(rgb(MUTED)).child(estimate))
-                        .when_some(clipping, |body, warning| body.child(div().text_xs().text_color(rgb(0xffd699)).child(warning)))
-                        .when(matches!(target, PdfTarget::Layers { .. }), |body| {
-                            body.child(div().text_xs().text_color(rgb(MUTED)).child("Pages are centered on the existing canvas; its size stays unchanged."))
-                        });
+                        .when(matches!(target, PdfTarget::Layers { .. }), |body| body.child(div().text_xs().text_color(rgb(MUTED)).child("Pages are centered on the existing canvas.")));
+                    let columns = div().flex().gap_4().when(!wide, |row| row.flex_col())
+                        .child(settings.when(wide, |settings| settings.w(px(280.)).flex_shrink_0()))
+                        .child(div().flex_1().min_w_0().child(self.pdf_preview_browser(preview_selection.as_deref(), *all_pages, cx)));
+                    let body = div().flex().flex_col().gap_3()
+                        .child(div().text_sm().text_color(rgb(MUTED)).child(format!("{} · {pages}", file_name(path))))
+                        .child(columns)
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(if !*all_pages && page_selection.text.trim().is_empty() {"0 pages selected".to_owned()} else {estimate}))
+                        .when_some(clipping, |body, warning| body.child(div().text_xs().text_color(rgb(0xffd699)).child(warning)));
                     ("Import PDF", "Import", body)
                 }
                 FormKind::Color {
@@ -2478,13 +2515,23 @@ impl Workspace {
                 .justify_center()
                 .track_focus(&form.focus)
                 .on_key_down(cx.listener(Self::form_key))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    this.extend_pdf_input_drag(event, window, cx)
+                }))
+                .capture_any_mouse_up(cx.listener(|this, _, _, _| this.end_pdf_input_drag()))
                 .child(
                     div()
-                        .w(px(380.))
+                        .w(px(if wide_pdf { pdf_width } else { 380. }))
+                        .max_w_full()
                         .p_4()
                         .max_h_full()
                         .id("form-panel")
                         .overflow_y_scroll()
+                        .when(wide_pdf, |panel| {
+                            panel
+                                .overflow_y_hidden()
+                                .max_h((window.viewport_size().height - px(32.)).max(px(0.)))
+                        })
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -2497,9 +2544,17 @@ impl Workspace {
                             div()
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(title),
+                                .child(title)
+                                .flex_shrink_0(),
                         )
-                        .child(content)
+                        .child(content.id("form-content").when(wide_pdf, |content| {
+                            content
+                                .min_h_0()
+                                .max_h(px(
+                                    (f32::from(window.viewport_size().height) - 180.).max(80.)
+                                ))
+                                .overflow_y_scroll()
+                        }))
                         .children(form.error.as_ref().map(|error| {
                             div()
                                 .text_color(rgb(0xffb8ad))
@@ -2509,6 +2564,7 @@ impl Workspace {
                         .child(
                             div()
                                 .flex()
+                                .flex_shrink_0()
                                 .justify_end()
                                 .gap_2()
                                 .child(form_button("Cancel", false).on_click(cx.listener(
@@ -2516,11 +2572,17 @@ impl Workspace {
                                         this.dismiss_form(window, cx);
                                     },
                                 )))
-                                .child(form_button(accept, true).on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.submit_form(window, cx);
-                                    },
-                                ))),
+                                .child(
+                                    form_button(accept, true)
+                                        .when(can_accept, |button| {
+                                            button.on_click(cx.listener(|this, _, window, cx| {
+                                                this.submit_form(window, cx)
+                                            }))
+                                        })
+                                        .when(!can_accept, |button| {
+                                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                                        }),
+                                ),
                         ),
                 ),
         )
@@ -2528,6 +2590,25 @@ impl Workspace {
 }
 
 pub(super) fn form_button(label: &'static str, primary: bool) -> gpui::Stateful<Div> {
+    form_button_base(label, primary).child(label)
+}
+
+pub(super) fn form_navigation_button(label: &'static str, forward: bool) -> gpui::Stateful<Div> {
+    form_button_base(label, false)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .when(!forward, |button| {
+            button.child(super::view::icon("chevron-left", 14.))
+        })
+        .child(label)
+        .when(forward, |button| {
+            button.child(super::view::icon("chevron-right", 14.))
+        })
+}
+
+fn form_button_base(label: &'static str, primary: bool) -> gpui::Stateful<Div> {
     div()
         .id(label)
         .px_3()
@@ -2539,7 +2620,6 @@ pub(super) fn form_button(label: &'static str, primary: bool) -> gpui::Stateful<
         .text_color(rgb(if primary { TEXT } else { MUTED }))
         .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
         .cursor_pointer()
-        .child(label)
 }
 
 fn locked_edge(edited: u32, other: u32, source: u32) -> u32 {
@@ -3252,6 +3332,51 @@ fn hit_curve_point(bounds: Bounds<Pixels>, position: Point<Pixels>, curve: Curve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_caret_clicks_and_unicode_range_replacement_keep_unselected_text() {
+        let mut dpi = Field::new("150".into());
+        dpi.move_cursor(1, false);
+        assert!(!dpi.selected);
+        assert_eq!(dpi.selection_range(), None);
+        dpi.insert("2", FieldMode::Digits { max: 4 });
+        assert_eq!(dpi.text, "1250");
+        let mut pages = Field::new("1, 3–5, 8".into());
+        pages.move_cursor(3, false);
+        pages.move_cursor(6, true);
+        assert_eq!(pages.selection_range(), Some(3..6));
+        assert_eq!(&pages.text[pages.byte_at(3)..pages.byte_at(6)], "3–5");
+        assert_eq!(pages.caret_item(), 2);
+        pages.insert("7", FieldMode::PdfPages);
+        assert_eq!(pages.text, "1, 7, 8");
+        assert_eq!(pages.cursor, 4);
+        assert_eq!(pages.selection_range(), None);
+        pages.select_all();
+        pages.move_cursor(2, false);
+        assert_eq!(pages.selection_range(), None);
+        assert_eq!(pages.cursor, 2);
+    }
+
+    #[test]
+    fn field_partial_selection_respects_limits_and_deletes_only_the_selected_range() {
+        let mut field = Field::new("1234".into());
+        field.move_cursor(1, false);
+        field.move_cursor(3, true);
+        field.insert("99", FieldMode::Digits { max: 4 });
+        assert_eq!(field.text, "1994");
+        field.move_cursor(usize::MAX, false);
+        assert_eq!(field.cursor, 4);
+        field.move_cursor(2, true);
+        assert_eq!(field.caret_item(), 1);
+        field.replace("");
+        assert_eq!(field.text, "19");
+        assert_eq!(field.anchor, None);
+        field.select_all();
+        assert_eq!(field.caret_item(), 0);
+        field.insert("12", FieldMode::Digits { max: 1 });
+        assert_eq!(field.text, "19");
+        assert!(field.selected);
+    }
 
     #[test]
     fn pdf_page_field_preserves_ranges_and_unicode_dashes_and_rejects_bad_pastes_atomically() {

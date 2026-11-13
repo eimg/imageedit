@@ -14,6 +14,7 @@ mod layers;
 mod numeric;
 mod paint_ui;
 mod path_ui;
+mod pdf_preview;
 mod pdf_ui;
 mod scale_ui;
 mod selection;
@@ -376,6 +377,7 @@ pub struct Workspace {
     pdf_import_token: u64,
     pdf_job: Option<pdf_ui::PdfJob>,
     pdf_preferences: pdf_ui::PdfPreferences,
+    pdf_previews: pdf_preview::PdfPreviews,
     pending_opens: std::collections::VecDeque<pdf_ui::PendingOpen>,
     open_scheduled: bool,
     dialog_open: bool,
@@ -653,6 +655,7 @@ impl Workspace {
             pdf_import_token: 0,
             pdf_job: None,
             pdf_preferences: Default::default(),
+            pdf_previews: Default::default(),
             pending_opens: Default::default(),
             open_scheduled: false,
             dialog_open: false,

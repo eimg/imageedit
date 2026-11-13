@@ -56,6 +56,7 @@ impl AssetSource for Icons {
             "unlock-alpha" => {
                 r#"<rect x="3" y="3" width="11" height="11" rx="1"/><path d="M3 8.5h11M8.5 3v11M14 15v-3a3 3 0 0 1 6 0"/><rect x="12" y="15" width="10" height="7" rx="1"/>"#
             }
+            "chevron-left" => r#"<path d="m15 5-7 7 7 7"/>"#,
             "chevron-right" => r#"<path d="m9 5 7 7-7 7"/>"#,
             "chevron-down" => r#"<path d="m5 9 7 7 7-7"/>"#,
             "duplicate" => {

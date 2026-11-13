@@ -4,7 +4,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -25,7 +25,11 @@ use image::RgbaImage;
 use crate::document::{Document, MAX_STACK_BYTES};
 
 mod pages;
-pub use pages::{MAX_PAGE_SELECTION_CHARS, parse_page_selection, validate_page_numbers};
+mod thumbnails;
+pub use pages::{
+    MAX_PAGE_SELECTION_CHARS, parse_page_selection, toggle_page_selection, validate_page_numbers,
+};
+pub use thumbnails::{THUMBNAIL_BATCH, render_thumbnails};
 
 pub const MAX_PDF_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PDF_PAGES: usize = 10_000;
@@ -62,6 +66,7 @@ pub struct PdfInfo {
 #[derive(Clone, Debug)]
 pub struct PdfSource {
     data: PdfData,
+    render_lock: Arc<Mutex<()>>,
     pub info: PdfInfo,
 }
 
@@ -156,7 +161,11 @@ pub fn read_source(
         let pdf = load_pdf(data.clone())?;
         let info = info_from_pdf(&pdf, control)?;
         control.check()?;
-        Ok(PdfSource { data, info })
+        Ok(PdfSource {
+            data,
+            info,
+            render_lock: Default::default(),
+        })
     }))
     .map_err(|_| anyhow!("The PDF could not be read."))?
 }
@@ -167,6 +176,11 @@ pub fn render_pages(
     control: &PdfControl,
     progress: impl Fn(PdfProgress),
 ) -> Result<Vec<RgbaImage>> {
+    control.check()?;
+    let _guard = source
+        .render_lock
+        .lock()
+        .map_err(|_| anyhow!("The PDF renderer is unavailable."))?;
     control.check()?;
     catch_unwind(AssertUnwindSafe(|| {
         render_data(source.data.clone(), options, control, &progress)
@@ -382,6 +396,143 @@ mod tests {
     use super::*;
 
     #[test]
+    fn thumbnails_use_snapshot_bytes_bounded_pixels_and_the_chosen_background() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preview.pdf");
+        let data = test_pdf_with(
+            &[(12., 16.), (100_000., 100_000.), (1., 2000.)],
+            "/ExtGState << /GS1 << /Type /ExtGState /ca 0.5 /CA 0.5 >> >>",
+            |width, height| {
+                format!(
+                    "q /GS1 gs 1 0 0 rg 0 0 {} {} re f Q\n1 1 1 rg {} {} {} {} re f\n",
+                    width / 2.,
+                    height / 2.,
+                    width * 0.75,
+                    height * 0.75,
+                    width / 4.,
+                    height / 4.
+                )
+            },
+        );
+        std::fs::write(&path, data).unwrap();
+        let source = read_source(&path, &PdfControl::default(), |_| {}).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let transparent = render_thumbnails(
+            &source,
+            &[1, 2, 3],
+            PdfBackground::Transparent,
+            &PdfControl::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            transparent
+                .iter()
+                .map(|thumbnail| thumbnail.page)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        for thumbnail in &transparent {
+            let pixels = thumbnail.pixels.as_ref().unwrap();
+            assert!(pixels.width() >= 1 && pixels.height() >= 1);
+            assert!(pixels.width() <= 144 && pixels.height() <= 144);
+            assert_eq!(pixels.width().max(pixels.height()), 144);
+        }
+        let first = transparent[0].pixels.as_ref().unwrap();
+        assert_eq!(first.dimensions(), (108, 144));
+        assert_eq!(first.get_pixel(0, 0).0, [0; 4]);
+        let red = first.get_pixel(20, 110).0;
+        assert_eq!(&red[..3], &[255, 0, 0]);
+        assert!(red[3].abs_diff(128) <= 1);
+        assert_eq!(first.get_pixel(90, 10).0, [255; 4]);
+        let white =
+            render_thumbnails(&source, &[1], PdfBackground::White, &PdfControl::default()).unwrap();
+        assert_eq!(
+            white[0].pixels.as_ref().unwrap().get_pixel(0, 0).0,
+            [255; 4]
+        );
+        let options = PdfOptions {
+            path,
+            pages: vec![2],
+            dpi: 72,
+            mode: PdfMode::Separate,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
+        };
+        assert!(validate_options(&source.info, &options).is_err());
+    }
+
+    #[test]
+    fn thumbnail_batches_reject_bad_requests_and_keep_renderer_page_size_fallbacks() {
+        let data = test_pdf(&[(10., 10.), (0., 10.), (10., 10.)]);
+        let parsed = load_pdf(data.clone()).unwrap();
+        let source = PdfSource {
+            data: data.into(),
+            info: info_from_pdf(&parsed, &PdfControl::default()).unwrap(),
+            render_lock: Default::default(),
+        };
+        let thumbnails = render_thumbnails(
+            &source,
+            &[1, 2, 3],
+            PdfBackground::White,
+            &PdfControl::default(),
+        )
+        .unwrap();
+        assert!(thumbnails[0].pixels.is_ok());
+        // hayro normalizes a degenerate MediaBox to a valid fallback page.
+        // Preview that reported geometry rather than inventing a different size.
+        assert!(source.info.sizes[1].0 > 0. && source.info.sizes[1].1 > 0.);
+        let fallback = thumbnails[1].pixels.as_ref().unwrap();
+        assert_eq!(fallback.width().max(fallback.height()), 144);
+        assert!(thumbnails[2].pixels.is_ok());
+        for pages in [&[][..], &[0], &[4], &[1, 1], &[3, 1], &[1, 2, 3, 4]] {
+            assert!(
+                render_thumbnails(&source, pages, PdfBackground::White, &PdfControl::default())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn queued_preview_and_import_cancellation_respect_shared_source_render_access() {
+        let data = test_pdf(&[(10., 10.)]);
+        let parsed = load_pdf(data.clone()).unwrap();
+        let source = PdfSource {
+            data: data.into(),
+            info: info_from_pdf(&parsed, &PdfControl::default()).unwrap(),
+            render_lock: Default::default(),
+        };
+        for thumbnail in [true, false] {
+            let worker_source = source.clone();
+            assert!(Arc::ptr_eq(&source.render_lock, &worker_source.render_lock));
+            let guard = source.render_lock.lock().unwrap();
+            let control = PdfControl::default();
+            let worker_control = control.clone();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                sender.send(()).unwrap();
+                if thumbnail {
+                    render_thumbnails(&worker_source, &[1], PdfBackground::White, &worker_control)
+                        .map(|_| ())
+                } else {
+                    let options = PdfOptions {
+                        path: "queued.pdf".into(),
+                        pages: vec![1],
+                        dpi: 72,
+                        mode: PdfMode::Separate,
+                        background: PdfBackground::White,
+                        canvas: PdfCanvas::FirstPage,
+                    };
+                    render_pages(&worker_source, &options, &worker_control, |_| {}).map(|_| ())
+                }
+            });
+            receiver.recv().unwrap();
+            control.cancel();
+            drop(guard);
+            assert!(worker.join().unwrap().err().unwrap().is::<PdfCanceled>());
+        }
+    }
+
+    #[test]
     fn noncontiguous_render_preflights_only_selected_pages_and_reports_source_numbers() {
         let source = test_pdf(&[(12., 10.), (100_000., 100_000.), (14., 14.), (20., 16.)]);
         let options = PdfOptions {
@@ -586,6 +737,7 @@ mod tests {
     fn cancellation_before_after_and_between_pages_discards_the_entire_render() {
         let source = PdfSource {
             data: test_pdf(&[(12., 18.), (20., 10.)]).into(),
+            render_lock: Default::default(),
             info: PdfInfo {
                 pages: 2,
                 sizes: vec![(12., 18.), (20., 10.)],

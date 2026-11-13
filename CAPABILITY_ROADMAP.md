@@ -142,7 +142,7 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
 - [ ] Consider incremental rendering/preparation to lower peak working memory,
       while retaining deliberate publication and undo semantics.
 - [x] Allow noncontiguous page selection with individual pages and ranges.
-- [ ] Preview page thumbnails.
+- [x] Preview/select pages with an interactive, bounded thumbnail browser.
 - [x] Offer white versus transparent page background and remember import options
       for the session.
 - [x] Offer layered canvas sizing (first page versus fitting all selected pages), with
@@ -1509,7 +1509,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 24 — noncontiguous PDF page selection
 
-Implemented; pending commit:
+Implemented and committed as `92badf9`:
 
 - PDF import now offers All Pages or Choose Pages. The custom field accepts
   comma-separated one-based pages and inclusive ranges, for example `1, 3-5, 8`.
@@ -1564,3 +1564,72 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Cancel during a later selected page, cancel preparation, change the target
   while work is pending, and undo/redo a successful layer import. Check no
   partial pages publish and that one undo removes the whole imported subset.
+
+## Pass 25 — PDF page picker and import dialog
+
+Implemented; pending commit, including maintainer feedback on input behavior,
+thumbnail selection, and the previously narrow/tall layout:
+
+- The PDF dialog uses a wider two-column layout: settings beside the page picker
+  at ordinary window widths, stacked content in narrow windows. Its body scrolls
+  while the title and Cancel/Import footer remain visible. Source filename,
+  selected count, canvas estimate, and clipping/admission messages stay available.
+- Two-choice dialog controls reuse Tool Options' shared segmented picker,
+  covering PDF All/None, import mode, background, canvas policy, New Image
+  background, and effect Before/After. Previous/Next show left/right chevrons
+  beside their labels, preserving navigation availability and shared action style.
+- Page thumbnails load automatically in batches of three. Previous/Next browse;
+  Selected brings the first chosen page into view. Clicking a card toggles that
+  page, with check marks and accent borders showing inclusion. All/None shortcuts
+  and an always-visible page field keep the same selection in sync.
+- Thumbnail changes preserve every other chosen page and canonicalize the field
+  into compact ranges. Removing the final page leaves an empty selection rather
+  than reverting to All. Invalid partially typed lists are preserved and report
+  an error on a thumbnail toggle. Empty/invalid selections, invalid resolution,
+  memory rejection, and stale targets disable Import with an explanatory readout.
+- PDF inputs now place the caret at a clicked glyph boundary, support drag and
+  Shift-click ranges, and select all on double-click. Shared Field editing keeps
+  partial-range typing, deletion, clipboard, and Shift+arrow/Home/End behavior.
+  Hit testing accounts for actual font shaping, padding, horizontal scrolling,
+  and Unicode dashes; long lists follow the caret. Tab cycles both inputs.
+- Thumbnails use retained PDF bytes independently of import DPI, with each axis
+  bounded to 1–144 pixels, including huge/thin pages. White/transparent backgrounds
+  and the existing layer thumbnail checker are respected. One displayed batch
+  is retained, without a persistent cache.
+- Background preview work coalesces source, batch, and background requests. A
+  single preview worker per workspace cancels old work, waits for it to return,
+  and rejects stale generations across closed/reopened dialogs. Published/stale
+  images are explicitly dropped. A per-source gate serializes thumbnail and final
+  import parsing/rendering; cancellation is checked around acquisition and between
+  calls. Active parser/render calls still finish before cancellation settles.
+- Per-page render errors stay local with details and Retry previews; parser/batch
+  failures are shown in the picker. Preview failure does not replace final import
+  validation. Existing source snapshots, page/stack budgets, publication checks,
+  one-step layer import undo, and session import defaults remain in use.
+- Updated README/AGENTS. No new toolbox tool, dependency, project metadata,
+  package version, publishing, installer, app icon, or GitHub issue changes.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 416 tests
+pass. Twelve new regression tests cover bounded thumbnail scaling and real PDF
+alpha/painted white, huge/thin pages, source deletion, renderer fallback geometry,
+invalid batches, queued source cancellation, stale/coalesced requests, batch
+navigation, pointer byte/character boundaries, padding/scroll hit coordinates,
+caret insertion, partial Unicode replacement/deletion and field limits,
+All/custom/empty thumbnail toggles, compact ranges, invalid edits, and text-budget
+rejection. Existing PDF import/selection/history/clipboard tests remain passing.
+Both release benchmarks pass. `dist/Lime.app` is rebuilt and its signature
+verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Click before/between/after DPI digits and page-list characters, drag selections
+  inside and outside the field, Shift-click/Shift-arrow/Home/End, and double-click.
+  Type/cut/paste over a partial range; check Unicode dashes and scrolled long lists.
+- Toggle thumbnail pages from All, custom ranges, and None; remove the last page,
+  then select again. Check list/card synchronization, compact ranges, Import
+  availability, and preserved partial invalid input on an attempted card toggle.
+- Check the wider layout at ordinary sizes and stacked fallback in narrow windows;
+  shrink the height and scroll while keeping the title and footer reachable.
+- Navigate and change backgrounds quickly, retry a failure, close/reopen another
+  PDF, or start/cancel Import during a preview. No stale images should reappear;
+  final DPI, page selection, source numbers, and one-step undo must stay correct.

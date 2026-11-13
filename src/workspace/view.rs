@@ -460,7 +460,7 @@ impl Render for Workspace {
                     .child(self.inspector(cx)),
             )
             .child(self.status_bar(cx))
-            .children(self.form_overlay(cx))
+            .children(self.form_overlay(window, cx))
             .children(self.pdf_progress_overlay(cx))
     }
 }

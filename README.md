@@ -60,14 +60,27 @@ check offers a retry and a link to the releases page if it cannot connect.
 ## Getting started
 
 Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.
-PDF files open an import dialog: choose **All Pages** or **Choose Pages**, set
-the resolution in DPI, and add the pages as layers or as separate images.
-Choose Pages accepts individual pages and inclusive ranges, such as
-`1, 3-5, 8` (en/em dashes also work). Overlapping entries and duplicates import
-once, in document order. The dialog shows the selected count; page names and
-progress retain the original PDF page numbers. The page field scrolls to its
-caret for longer lists. Page selection resets for each source PDF. **Page background**
-can be White (the default) or Transparent. Transparent keeps unpainted page
+PDF files open a wider import dialog with settings beside page thumbnails (stacked
+in narrower windows). Click thumbnails to select or deselect pages. **All** selects
+the whole PDF; **None** clears the selection. Two-choice controls use the same
+segmented picker as Tool Options. The page field also accepts individual
+pages and inclusive ranges, such as `1, 3-5, 8` (en/em dashes work). Overlapping
+entries import once, in document order. Thumbnail changes update compact ranges
+in that field. An empty selection keeps Import disabled.
+
+Click within either input to place the caret, drag or Shift-click to select text,
+or double-click to select the whole value. Shift+arrows/Home/End extend a range;
+copy, cut, paste, and typing use that range. Long page lists scroll with the caret.
+
+Thumbnails load automatically in batches of three. Previous/Next have directional
+chevrons and browse the source;
+Selected brings the first chosen page into view. A check mark and accent border
+show included pages. Previews use the chosen page background and a checker behind
+transparency; import DPI controls the final images. Failed previews can be retried.
+The dialog keeps Cancel/Import visible while its content scrolls. Page choices
+reset per source, and layer names/progress retain source page numbers.
+
+**Page background** can be White (the default) or Transparent. Transparent keeps unpainted page
 areas clear and preserves PDF opacity; white shapes painted in the PDF stay
 white. For a new layered image, **Canvas size** offers First Page (the first
 selected page) or **Fit All Pages**, which fits the greatest selected width and height. Every page stays at
@@ -76,7 +89,7 @@ when selected pages extend outside it; those layer pixels are retained.
 Separate images keep each page's own size, and Open as Layers keeps the existing
 canvas size. Successful imports remember DPI and page background for the session;
 new-document imports also remember Layers/Images and canvas sizing. Canceling
-or failing an import leaves those defaults unchanged. Page ranges reset for each
+or failing an import leaves those defaults unchanged. Page choices reset for each
 file. A PDF import becomes a new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
 not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
 together keep their import dialogs queued. Pages are rasterized at the chosen

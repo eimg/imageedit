@@ -185,7 +185,7 @@ fn thumbnail_size((width, height): (u32, u32)) -> (f32, f32) {
     )
 }
 
-fn thumbnail_checker() -> impl IntoElement {
+pub(super) fn thumbnail_checker() -> impl IntoElement {
     canvas(
         |_, _, _| {},
         |bounds, _, window, _| {
