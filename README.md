@@ -1,5 +1,7 @@
 # Lime
 
+<img src="macos/AppIcon.svg" width="96" height="96" alt="Lime half-slice logo">
+
 **Lite Image Editor** for macOS and Windows. Layered editing, native menus with
 tool and command icons, and a workspace that keeps the canvas in focus.
 

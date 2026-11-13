@@ -549,8 +549,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   `.github/workflows/windows.yml` builds and tests the x64 MSVC release ZIP,
   setting `GPUI_FXC_PATH` from the installed Windows SDK.
 - `src/icons.rs` contains tool glyphs. `macos/AppIcon.svg` is the editable
-  app icon and `macos/AppIcon.icns` is its packaged form.
-  `windows/AppIcon.ico` contains the same original blue artwork in nine sizes.
+  app icon: a small lime half-slice angled at 45 degrees inside the original
+  corner frame, retaining the blue background and blue/yellow palette.
+  `macos/AppIcon.icns` is its packaged form, and `windows/AppIcon.ico` contains
+  the same artwork in nine sizes. README uses the shared SVG for its logo.
   `build.rs` embeds `windows/app.rc` in native Windows builds as icon resource 1,
   which GPUI loads for its window class. Keep GPUI's manifest separate and enabled.
   The Windows workflow verifies the icon group and manifest before packaging.

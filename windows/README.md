@@ -1,6 +1,6 @@
 # Windows icon resources
 
-`AppIcon.ico` uses the original blue artwork from `macos/AppIcon.svg`, with
+`AppIcon.ico` uses the lime half-slice artwork from `macos/AppIcon.svg`, with
 16, 20, 24, 32, 40, 48, 64, 128, and 256 pixel images for Windows display scaling.
 Regenerate the ICO from that SVG when the artwork changes.
 
