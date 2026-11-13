@@ -1378,6 +1378,7 @@ impl Workspace {
                                     event.position,
                                     window.scale_factor(),
                                     event.modifiers.alt,
+                                    event.modifiers.shift,
                                     cx,
                                 );
                             }),
@@ -1461,7 +1462,7 @@ impl Workspace {
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
                             path_handles: self.tool == Tool::Path,
-                            selected_path_anchor: self.path_anchor,
+                            selected_path_anchors: self.path_selection.clone(),
                             text_caret: if self.tool == Tool::Text {
                                 self.text_caret()
                             } else {
@@ -2897,7 +2898,7 @@ struct CanvasDecorations {
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
     path_handles: bool,
-    selected_path_anchor: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
+    selected_path_anchors: Option<super::path_ui::AnchorSelection>,
     text_caret: Option<super::text_ui::TextCaret>,
 }
 
@@ -2925,7 +2926,7 @@ fn image_preview(
         paths,
         active_path,
         path_handles,
-        selected_path_anchor,
+        selected_path_anchors,
         text_caret,
     } = decorations;
     let image = tab.document.canvas.preview.image.clone();
@@ -3032,7 +3033,7 @@ fn image_preview(
                     (width, height),
                     &paths,
                     active_path,
-                    selected_path_anchor,
+                    selected_path_anchors,
                 );
             }
             if let Some(rect) = handle_rect {
@@ -3440,7 +3441,7 @@ fn paint_path_handles(
     canvas: (u32, u32),
     paths: &[crate::paths::VectorPath],
     active: Option<crate::paths::PathId>,
-    selected: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
+    selected: Option<super::path_ui::AnchorSelection>,
 ) {
     let (width, height) = canvas;
     if paths.is_empty() || width == 0 || height == 0 {
@@ -3463,7 +3464,9 @@ fn paint_path_handles(
                 if anchor.handle_out != anchor.point {
                     paint_handle_line(window, center, project(anchor.handle_out));
                 }
-                let selected = selected == Some((path.id, anchor.id));
+                let selected = selected.as_ref().is_some_and(|selected| {
+                    selected.path == path.id && selected.ids.contains(&anchor.id)
+                });
                 let edge = if selected { 9. } else { 7. };
                 window.paint_quad(gpui::quad(
                     Bounds::centered_at(center, size(px(edge), px(edge))),

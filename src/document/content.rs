@@ -299,31 +299,30 @@ impl DocumentContent {
         true
     }
 
-    pub fn delete_anchor(
+    pub fn delete_anchors(
         &mut self,
         path_id: crate::paths::PathId,
-        anchor_id: crate::paths::AnchorId,
+        anchor_ids: &[crate::paths::AnchorId],
     ) -> bool {
         let Some(index) = self.paths.iter().position(|path| path.id == path_id) else {
             return false;
         };
-        let Some(anchor_index) = self.paths[index]
-            .anchors
-            .iter()
-            .position(|anchor| anchor.id == anchor_id)
-        else {
+        let path = &mut self.paths[index];
+        let before = path.anchors.len();
+        path.anchors
+            .retain(|anchor| !anchor_ids.contains(&anchor.id));
+        if path.anchors.len() == before {
             return false;
-        };
-        if self.paths[index].anchors.len() == 1 {
+        }
+        if path.anchors.is_empty() {
             self.paths.remove(index);
             if self.active_path == Some(path_id) {
                 self.active_path = self.paths.last().map(|path| path.id);
             }
             return true;
         }
-        self.paths[index].anchors.remove(anchor_index);
-        if self.paths[index].anchors.len() < 3 {
-            self.paths[index].closed = false;
+        if path.anchors.len() < 3 {
+            path.closed = false;
         }
         self.active_path = Some(path_id);
         true

@@ -192,16 +192,27 @@ first anchor closes the path. Alt-clicking a visible curve inserts an anchor by 
 subdivision, including closing segments; existing anchor/handle hits take priority.
 The inserted point can be dragged within that same one-step gesture. Hit testing
 uses an eight-screen-point radius, bounded subdivision, and chord-projection/
-Newton refinement, including stationary collinear parameterizations. The selected
-anchor has a larger outlined marker. Corner collapses handles; Smooth aligns
-them and preserves existing lengths, initializing missing handles from neighbors.
+Newton refinement, including stationary collinear parameterizations. Shift-click
+toggles anchor selection within one path without starting a gesture; clicking an
+unselected anchor replaces the group, while dragging a selected anchor translates
+all selected anchors and their handles from their gesture-start geometry. All
+Anchors and Deselect live in Tool Options with the selected count. Every selected
+anchor has a larger outlined marker. Corner collapses the group's handles; Smooth
+aligns them and preserves existing lengths, initializing missing handles from neighbors.
+Delete/Backspace removes all selected anchors in one metadata edit, or the last
+anchor when none are selected. Removing down to two anchors opens the path;
+removing every anchor removes the path. A group click never closes an open path;
+click-first-anchor closure is retained for a single selected anchor. Selection
+is session-only and clears on path/tab/tool switches, hiding/deleting its path,
+and undo/redo. Stale or hidden IDs cannot target another path.
 Independent (default), Aligned, and Symmetric are session handle-drag preferences;
 they preserve the opposite handle, its length, or mirror its length respectively.
 Newly placed handles retain symmetric creation. Linked drags use the baseline
 anchor each frame to avoid drift. A click without movement does not couple
 handles; repeated identity shaping creates no history. Geometry, not new anchor
-mode metadata, persists in the existing project format. Multiple anchor selection
-remains planned. Path to Selection fills every closed path with
+mode metadata, persists in the existing project format. Each group gesture or
+shaping/deletion action is one undo step and keeps raster buffers shared.
+Path to Selection fills every closed path with
 nonzero winding. Selection to Path creates closed paths from the current
 selection. Selection ants paint above path outlines so an overlapping path
 cannot hide the selection; path handles remain above both. Image transforms,

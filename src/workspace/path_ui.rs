@@ -15,6 +15,51 @@ use crate::preview::Dirty;
 
 const HIT_PIXELS: f32 = 8.0;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AnchorSelection {
+    pub path: PathId,
+    pub ids: Vec<AnchorId>,
+}
+
+impl AnchorSelection {
+    fn single(path: PathId, anchor: AnchorId) -> Self {
+        Self {
+            path,
+            ids: vec![anchor],
+        }
+    }
+
+    fn click(selection: &mut Option<Self>, path: PathId, anchor: AnchorId, toggle: bool) {
+        if let Some(selected) = selection.as_mut().filter(|selected| selected.path == path) {
+            if let Some(index) = selected.ids.iter().position(|id| *id == anchor) {
+                if toggle {
+                    selected.ids.remove(index);
+                    if selected.ids.is_empty() {
+                        *selection = None;
+                    }
+                }
+                return;
+            }
+            if toggle {
+                selected.ids.push(anchor);
+                return;
+            }
+        }
+        *selection = Some(Self::single(path, anchor));
+    }
+
+    fn anchors(&self, path: &VectorPath) -> Vec<Anchor> {
+        if path.id != self.path || !path.visible {
+            return Vec::new();
+        }
+        path.anchors
+            .iter()
+            .filter(|anchor| self.ids.contains(&anchor.id))
+            .copied()
+            .collect()
+    }
+}
+
 pub(super) struct PathGesture {
     pub path: VectorPath,
     baseline: Option<VectorPath>,
@@ -26,10 +71,9 @@ enum PathEdit {
         anchor: AnchorId,
         origin: (f64, f64),
     },
-    MovePoint {
+    MovePoints {
         anchor: AnchorId,
-        base: Anchor,
-        grab: (f64, f64),
+        bases: Vec<Anchor>,
         down: (f64, f64),
     },
     MoveHandle {
@@ -38,6 +82,64 @@ enum PathEdit {
         grab: (f64, f64),
         mode: HandleMode,
     },
+}
+
+impl PathGesture {
+    fn update(&mut self, point: (f64, f64)) {
+        match &self.edit {
+            PathEdit::Place { anchor, origin } => {
+                let Some(anchor) = self.path.anchor_mut(*anchor) else {
+                    return;
+                };
+                let delta = (point.0 - origin.0, point.1 - origin.1);
+                anchor.handle_out = point;
+                anchor.handle_in = (origin.0 - delta.0, origin.1 - delta.1);
+            }
+            PathEdit::MovePoints { bases, down, .. } => {
+                self.path
+                    .move_anchors_from(bases, (point.0 - down.0, point.1 - down.1));
+            }
+            PathEdit::MoveHandle {
+                anchor,
+                incoming,
+                grab,
+                mode,
+            } => {
+                let next = (point.0 + grab.0, point.1 + grab.1);
+                let Some(anchor) = self.path.anchor_mut(*anchor) else {
+                    return;
+                };
+                let Some(base) = self
+                    .baseline
+                    .as_ref()
+                    .and_then(|path| path.anchor(anchor.id))
+                    .copied()
+                else {
+                    return;
+                };
+                *anchor = base;
+                anchor.move_handle(*incoming, next, *mode);
+            }
+        }
+    }
+
+    fn close_on_click(&mut self, point: (f64, f64), radius: f64) {
+        if let PathEdit::MovePoints {
+            anchor,
+            down,
+            bases,
+        } = &self.edit
+            && bases.len() == 1
+            && let Some(base) = self.baseline.as_ref()
+            && !base.closed
+            && base.anchors.len() >= 3
+            && base.anchors[0].id == *anchor
+            && (point.0 - down.0).hypot(point.1 - down.1) <= radius
+        {
+            self.path = base.clone();
+            self.path.closed = true;
+        }
+    }
 }
 
 enum Target {
@@ -50,20 +152,22 @@ enum Target {
     Anchor {
         path: PathId,
         anchor: AnchorId,
-        at: (f64, f64),
     },
 }
 
 impl Workspace {
     pub(super) fn path_edit_options(&self, cx: &Context<Self>) -> Div {
-        let enabled = self.path_gesture.is_none()
+        let count = self
+            .selected_path_anchors()
+            .map_or(0, |(_, anchors)| anchors.len());
+        let ready = self.path_gesture.is_none() && self.active_tab().is_some_and(|tab| !tab.busy());
+        let enabled = ready && count > 0;
+        let has_path = ready
             && self.active_tab().is_some_and(|tab| {
-                !tab.busy()
-                    && self.path_anchor.is_some_and(|(path, anchor)| {
-                        tab.document.content.active_path().is_some_and(|active| {
-                            active.id == path && active.visible && active.anchor(anchor).is_some()
-                        })
-                    })
+                tab.document
+                    .content
+                    .active_path()
+                    .is_some_and(|path| path.visible && !path.anchors.is_empty())
             });
         div().flex().flex_col().gap_2()
             .child(section_label("HANDLE DRAG"))
@@ -72,20 +176,56 @@ impl Workspace {
             ].map(|(label, mode)| choice_button(label, self.path_handle_mode == mode).on_click(cx.listener(move |this, _, _, cx| {
                 if this.path_gesture.is_none() { this.path_handle_mode = mode; cx.notify(); }
             })))))
-            .child(section_label("SELECTED ANCHOR"))
+            .child(div().flex().justify_between().child(section_label("SELECTED ANCHORS")).child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(count.to_string())))
             .child(div().flex().gap_2().children([
-                ("Corner", false, "Collapse both handles at the selected anchor"),
+                ("All Anchors", true, has_path), ("Deselect", false, enabled),
+            ].map(|(label, all, available)| option_action(label, false).flex_1()
+                .when(available, |button| button.on_click(cx.listener(move |this, _, _, cx| this.select_path_anchors(all, cx))))
+                .when(!available, |button| button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)))))
+            .child(div().flex().gap_2().children([
+                ("Corner", false, "Collapse both handles at the selected anchors"),
                 ("Smooth", true, "Align handles, preserving their lengths or creating them from neighboring points"),
             ].map(|(label, smooth, help)| option_action(label, false).flex_1().tooltip(tooltip(help))
                 .when(enabled, |button| button.on_click(cx.listener(move |this, _, window, cx| this.shape_selected_anchor(smooth, window, cx))))
                 .when(!enabled, |button| button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)))))
     }
 
+    fn selected_path_anchors(&self) -> Option<(PathId, Vec<Anchor>)> {
+        let selected = self.path_selection.as_ref()?;
+        let tab = self.active_tab()?;
+        let path = self
+            .path_gesture
+            .as_ref()
+            .map(|gesture| &gesture.path)
+            .or(self.path_hold.as_ref())
+            .or_else(|| tab.document.content.active_path())?;
+        let anchors = selected.anchors(path);
+        (!anchors.is_empty()).then_some((path.id, anchors))
+    }
+
+    fn select_path_anchors(&mut self, all: bool, cx: &mut Context<Self>) {
+        if self.path_gesture.is_some() || self.active_tab().is_none_or(|tab| tab.busy()) {
+            return;
+        }
+        self.path_selection = if all {
+            self.active_tab()
+                .and_then(|tab| tab.document.content.active_path())
+                .filter(|path| path.visible && !path.anchors.is_empty())
+                .map(|path| AnchorSelection {
+                    path: path.id,
+                    ids: path.anchors.iter().map(|a| a.id).collect(),
+                })
+        } else {
+            None
+        };
+        cx.notify();
+    }
+
     fn shape_selected_anchor(&mut self, smooth: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.path_gesture.is_some() || self.form.is_some() || self.dialog_open {
             return;
         }
-        let Some((id, anchor)) = self.path_anchor else {
+        let Some((id, anchors)) = self.selected_path_anchors() else {
             return;
         };
         let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
@@ -100,11 +240,14 @@ impl Workspace {
         else {
             return;
         };
-        let changed = if smooth {
-            path.make_smooth(anchor)
-        } else {
-            path.make_corner(anchor)
-        };
+        let mut changed = false;
+        for anchor in anchors {
+            changed |= if smooth {
+                path.make_smooth(anchor.id)
+            } else {
+                path.make_corner(anchor.id)
+            };
+        }
         if !changed {
             return;
         }
@@ -335,7 +478,7 @@ impl Workspace {
             && !self.tabs[index].busy()
             && self.tabs[index].document.content.select_path(id)
         {
-            self.path_anchor = None;
+            self.path_selection = None;
             self.path_gesture = None;
             self.path_hold = None;
             self.tabs[index].notice = None;
@@ -350,6 +493,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !visible
+            && self
+                .path_selection
+                .as_ref()
+                .is_some_and(|selected| selected.path == id)
+            && self.active_tab().is_some_and(|tab| !tab.busy())
+        {
+            self.clear_path_edit();
+        }
         self.edit_content(
             move |content, _, _| {
                 if content.set_path_visible(id, visible) {
@@ -364,6 +516,14 @@ impl Workspace {
     }
 
     fn delete_path(&mut self, id: PathId, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .path_selection
+            .as_ref()
+            .is_some_and(|selected| selected.path == id)
+            && self.active_tab().is_some_and(|tab| !tab.busy())
+        {
+            self.clear_path_edit();
+        }
         self.edit_content(
             move |content, _, _| {
                 if content.delete_path(id) {
@@ -416,6 +576,7 @@ impl Workspace {
         position: Point<Pixels>,
         scale: f32,
         insert: bool,
+        toggle: bool,
         cx: &mut Context<Self>,
     ) {
         if self.active_tab().is_none_or(|tab| tab.busy()) || self.path_gesture.is_some() {
@@ -441,6 +602,18 @@ impl Workspace {
             else {
                 return;
             };
+            let anchor_id = match target {
+                Target::Handle { anchor, .. } | Target::Anchor { anchor, .. } => anchor,
+            };
+            let toggle_anchor = toggle && matches!(target, Target::Anchor { .. });
+            AnchorSelection::click(&mut self.path_selection, path.id, anchor_id, toggle_anchor);
+            if let Some(index) = self.active {
+                self.tabs[index].document.content.select_path(path.id);
+            }
+            if toggle_anchor {
+                cx.notify();
+                return;
+            }
             let edit = match target {
                 Target::Handle {
                     anchor,
@@ -453,23 +626,18 @@ impl Workspace {
                     grab: (at.0 - point.0, at.1 - point.1),
                     mode: self.path_handle_mode,
                 },
-                Target::Anchor { anchor, at, .. } => {
-                    let Some(base) = path.anchor(anchor).copied() else {
-                        return;
-                    };
-                    PathEdit::MovePoint {
+                Target::Anchor { anchor, .. } => {
+                    let bases = self
+                        .path_selection
+                        .as_ref()
+                        .map(|selected| selected.anchors(&path))
+                        .unwrap_or_default();
+                    PathEdit::MovePoints {
                         anchor,
-                        base,
-                        grab: (at.0 - point.0, at.1 - point.1),
+                        bases,
                         down: point,
                     }
                 }
-            };
-            self.path_anchor = match &edit {
-                PathEdit::MovePoint { anchor, .. } | PathEdit::MoveHandle { anchor, .. } => {
-                    Some((path.id, *anchor))
-                }
-                PathEdit::Place { .. } => None,
             };
             self.path_gesture = Some(PathGesture {
                 baseline: Some(path.clone()),
@@ -477,6 +645,9 @@ impl Workspace {
                 edit,
             });
             cx.notify();
+            return;
+        }
+        if toggle && !insert {
             return;
         }
         if insert {
@@ -524,14 +695,13 @@ impl Workspace {
             let Some(anchor) = path.split_segment(hit.segment, hit.t, id) else {
                 return;
             };
-            self.path_anchor = Some((path.id, id));
+            self.path_selection = Some(AnchorSelection::single(path.id, id));
             self.path_gesture = Some(PathGesture {
                 baseline: Some(baseline),
                 path,
-                edit: PathEdit::MovePoint {
+                edit: PathEdit::MovePoints {
                     anchor: id,
-                    base: anchor,
-                    grab: (anchor.point.0 - point.0, anchor.point.1 - point.1),
+                    bases: vec![anchor],
                     down: point,
                 },
             });
@@ -559,7 +729,7 @@ impl Workspace {
             }
             let mut path = active.clone();
             path.anchors.push(Anchor::corner(anchor_id, point));
-            self.path_anchor = Some((path.id, anchor_id));
+            self.path_selection = Some(AnchorSelection::single(path.id, anchor_id));
             self.path_gesture = Some(PathGesture {
                 baseline: Some(active),
                 edit: PathEdit::Place {
@@ -578,7 +748,7 @@ impl Workspace {
                 closed: false,
                 anchors: vec![Anchor::corner(anchor_id, point)],
             };
-            self.path_anchor = Some((path_id, anchor_id));
+            self.path_selection = Some(AnchorSelection::single(path_id, anchor_id));
             self.path_gesture = Some(PathGesture {
                 baseline: None,
                 edit: PathEdit::Place {
@@ -603,49 +773,7 @@ impl Workspace {
         let Some(gesture) = self.path_gesture.as_mut() else {
             return;
         };
-        match gesture.edit {
-            PathEdit::Place { anchor, origin } => {
-                let Some(anchor) = gesture.path.anchor_mut(anchor) else {
-                    return;
-                };
-                let delta = (point.0 - origin.0, point.1 - origin.1);
-                anchor.handle_out = point;
-                anchor.handle_in = (origin.0 - delta.0, origin.1 - delta.1);
-            }
-            PathEdit::MovePoint {
-                anchor, base, grab, ..
-            } => {
-                let next = (point.0 + grab.0, point.1 + grab.1);
-                let delta = (next.0 - base.point.0, next.1 - base.point.1);
-                let Some(anchor) = gesture.path.anchor_mut(anchor) else {
-                    return;
-                };
-                anchor.point = next;
-                anchor.handle_in = (base.handle_in.0 + delta.0, base.handle_in.1 + delta.1);
-                anchor.handle_out = (base.handle_out.0 + delta.0, base.handle_out.1 + delta.1);
-            }
-            PathEdit::MoveHandle {
-                anchor,
-                incoming,
-                grab,
-                mode,
-            } => {
-                let next = (point.0 + grab.0, point.1 + grab.1);
-                let Some(anchor) = gesture.path.anchor_mut(anchor) else {
-                    return;
-                };
-                let Some(base) = gesture
-                    .baseline
-                    .as_ref()
-                    .and_then(|path| path.anchor(anchor.id))
-                    .copied()
-                else {
-                    return;
-                };
-                *anchor = base;
-                anchor.move_handle(incoming, next, mode);
-            }
-        }
+        gesture.update(point);
         cx.notify();
     }
 
@@ -657,21 +785,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.extend_path(position, scale, cx);
-        let Some(gesture) = self.path_gesture.take() else {
+        let Some(mut gesture) = self.path_gesture.take() else {
             return;
         };
-        let mut path = gesture.path;
-        if let PathEdit::MovePoint { anchor, down, .. } = gesture.edit
-            && let Some(base) = gesture.baseline.as_ref()
-            && !base.closed
-            && base.anchors.len() >= 3
-            && base.anchors[0].id == anchor
-            && let Some(point) = self.canvas_point(position, scale)
-            && (point.0 - down.0).hypot(point.1 - down.1) <= self.path_hit_radius(scale)
-        {
-            path = base.clone();
-            path.closed = true;
+        if let Some(point) = self.canvas_point(position, scale) {
+            gesture.close_on_click(point, self.path_hit_radius(scale));
         }
+        let path = gesture.path;
         if gesture.baseline.as_ref() == Some(&path)
             && self
                 .active_document()
@@ -694,18 +814,32 @@ impl Workspace {
     }
 
     pub(super) fn end_path_session(&mut self, cx: &mut Context<Self>) {
-        self.path_gesture = None;
-        self.path_hold = None;
-        self.path_anchor = None;
-        if let Some(index) = self.active
-            && self.tabs[index].document.content.clear_active_path()
-        {
+        let gesture = self.path_gesture.take().is_some();
+        let hold = self.path_hold.take().is_some();
+        let selection = self.path_selection.take().is_some();
+        let active = self
+            .active
+            .is_some_and(|index| self.tabs[index].document.content.clear_active_path());
+        if gesture || hold || selection || active {
             cx.notify();
         }
     }
 
     pub(super) fn cancel_path_gesture(&mut self, cx: &mut Context<Self>) {
         if self.path_gesture.take().is_some() {
+            // A canceled insertion/placement has no live anchor. Keep only a
+            // selection that still belongs to the document, before IDs can be reused.
+            self.path_selection = self.path_selection.take().and_then(|mut selected| {
+                let path = self
+                    .active_tab()?
+                    .document
+                    .content
+                    .paths()
+                    .iter()
+                    .find(|path| path.id == selected.path && path.visible)?;
+                selected.ids.retain(|id| path.anchor(*id).is_some());
+                (!selected.ids.is_empty()).then_some(selected)
+            });
             cx.notify();
         }
     }
@@ -713,7 +847,7 @@ impl Workspace {
     pub(super) fn clear_path_edit(&mut self) {
         self.path_gesture = None;
         self.path_hold = None;
-        self.path_anchor = None;
+        self.path_selection = None;
     }
 
     pub(super) fn close_active_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -762,20 +896,33 @@ impl Workspace {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let (path_id, anchor_id) = if let Some(selected) = self.path_anchor {
-            selected
-        } else if let Some(path) = tab.document.content.active_path() {
+        let (path_id, anchor_ids) = if self.path_selection.is_some() {
+            let Some((path, anchors)) = self.selected_path_anchors() else {
+                self.path_selection = None;
+                cx.notify();
+                return;
+            };
+            (
+                path,
+                anchors.iter().map(|anchor| anchor.id).collect::<Vec<_>>(),
+            )
+        } else if let Some(path) = tab
+            .document
+            .content
+            .active_path()
+            .filter(|path| path.visible)
+        {
             let Some(anchor) = path.anchors.last() else {
                 return;
             };
-            (path.id, anchor.id)
+            (path.id, vec![anchor.id])
         } else {
             return;
         };
-        self.path_anchor = None;
+        self.path_selection = None;
         self.edit_content(
             move |content, _, _| {
-                if content.delete_anchor(path_id, anchor_id) {
+                if content.delete_anchors(path_id, &anchor_ids) {
                     Dirty::Unpainted
                 } else {
                     Dirty::None
@@ -909,7 +1056,6 @@ impl Workspace {
                     return Some(Target::Anchor {
                         path: path.id,
                         anchor: anchor.id,
-                        at: anchor.point,
                     });
                 }
             }
@@ -939,6 +1085,194 @@ mod tests {
             1,
         )
         .0
+    }
+
+    fn selection_path() -> VectorPath {
+        VectorPath {
+            id: PathId(1),
+            visible: true,
+            closed: true,
+            anchors: vec![
+                Anchor::corner(AnchorId(1), (0., 0.)),
+                Anchor::corner(AnchorId(2), (2., 0.)),
+                Anchor::corner(AnchorId(3), (2., 2.)),
+                Anchor::corner(AnchorId(4), (0., 2.)),
+            ],
+        }
+    }
+
+    #[test]
+    fn group_gestures_preserve_grab_offset_restore_exactly_and_do_not_close_open_paths() {
+        let mut path = selection_path();
+        path.closed = false;
+        let down = (0.125, -0.375);
+        let mut gesture = PathGesture {
+            path: path.clone(),
+            baseline: Some(path.clone()),
+            edit: PathEdit::MovePoints {
+                anchor: AnchorId(1),
+                bases: vec![path.anchors[0], path.anchors[2]],
+                down,
+            },
+        };
+        gesture.update(down);
+        gesture.close_on_click(down, 8.);
+        assert_eq!(gesture.path, path);
+        gesture.update((down.0 + 0.5, down.1 - 0.25));
+        assert_eq!(gesture.path.anchors[0].point, (0.5, -0.25));
+        assert_eq!(gesture.path.anchors[2].point, (2.5, 1.75));
+        assert_eq!(gesture.path.anchors[1], path.anchors[1]);
+        gesture.update(down);
+        assert_eq!(gesture.path, path);
+        // A single anchor retains the original click-first-anchor closure gesture.
+        gesture.edit = PathEdit::MovePoints {
+            anchor: AnchorId(1),
+            bases: vec![path.anchors[0]],
+            down,
+        };
+        gesture.close_on_click(down, 8.);
+        assert!(gesture.path.closed);
+        gesture.path = path.clone();
+        gesture.update((down.0 + 10., down.1));
+        gesture.close_on_click((down.0 + 10., down.1), 8.);
+        assert!(!gesture.path.closed);
+        // An inserted point is absent from the old path but still has a valid gesture baseline.
+        let inserted = gesture.path.split_segment(0, 0.5, AnchorId(5)).unwrap();
+        gesture.edit = PathEdit::MovePoints {
+            anchor: inserted.id,
+            bases: vec![inserted],
+            down,
+        };
+        gesture.update((down.0 + 3., down.1 + 4.));
+        assert_eq!(
+            gesture.path.anchor(inserted.id).unwrap().point,
+            (inserted.point.0 + 3., inserted.point.1 + 4.)
+        );
+        gesture.update(down);
+        assert_eq!(gesture.path.anchor(inserted.id), Some(&inserted));
+    }
+
+    #[test]
+    fn anchor_clicks_toggle_membership_keep_groups_for_drag_and_replace_other_targets() {
+        let mut selected = None;
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(1), false);
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(3), true);
+        let group = selected.clone();
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(1), false);
+        assert_eq!(selected, group);
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(1), true);
+        assert_eq!(selected.as_ref().unwrap().ids, vec![AnchorId(3)]);
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(3), true);
+        assert!(selected.is_none());
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(2), true);
+        AnchorSelection::click(&mut selected, PathId(1), AnchorId(4), false);
+        assert_eq!(selected.as_ref().unwrap().ids, vec![AnchorId(4)]);
+        AnchorSelection::click(&mut selected, PathId(2), AnchorId(2), true);
+        assert_eq!(
+            selected,
+            Some(AnchorSelection::single(PathId(2), AnchorId(2)))
+        );
+    }
+
+    #[test]
+    fn anchor_selection_validates_visible_path_and_intersects_live_ids() {
+        let mut path = selection_path();
+        let original = path.clone();
+        let selected = AnchorSelection {
+            path: path.id,
+            ids: vec![AnchorId(3), AnchorId(999), AnchorId(1)],
+        };
+        assert_eq!(
+            selected.anchors(&path),
+            vec![path.anchors[0], path.anchors[2]]
+        );
+        assert_eq!(path, original);
+        path.visible = false;
+        assert!(selected.anchors(&path).is_empty());
+        path.visible = true;
+        path.id = PathId(2);
+        assert!(selected.anchors(&path).is_empty());
+    }
+
+    #[test]
+    fn group_move_shape_and_delete_are_single_metadata_edits_with_exact_undo() {
+        let mut tab = super::super::tests::opacity_tab();
+        let original = selection_path();
+        assert!(tab.document.content.upsert_path(original.clone()));
+        let pixels = tab.document.canvas.pixels.clone();
+        let layer = tab
+            .document
+            .content
+            .layer(tab.active_layer)
+            .unwrap()
+            .pixels
+            .clone();
+        let mut edited = original.clone();
+        let bases = vec![edited.anchors[0], edited.anchors[2]];
+        assert!(edited.move_anchors_from(&bases, (0.5, -0.25)));
+        let mut changed = false;
+        for base in &bases {
+            changed |= edited.make_smooth(base.id);
+        }
+        assert!(changed);
+        let mut state = tab.state();
+        assert!(state.content.upsert_path(edited.clone()));
+        assert!(publish(&mut tab, state, Change::Edit));
+        let saved = tab.history.undo_target().unwrap().0.clone();
+        assert!(publish(&mut tab, saved, Change::Undo));
+        assert_eq!(tab.document.content.active_path(), Some(&original));
+        assert!(!tab.history.is_dirty());
+        let next = tab.history.redo_target().unwrap().0.clone();
+        assert!(publish(&mut tab, next, Change::Redo));
+        assert_eq!(tab.document.content.active_path(), Some(&edited));
+        let mut state = tab.state();
+        assert!(
+            state
+                .content
+                .delete_anchors(original.id, &[AnchorId(1), AnchorId(3)])
+        );
+        assert!(publish(&mut tab, state, Change::Edit));
+        let remaining = tab.document.content.active_path().unwrap();
+        assert_eq!(
+            remaining.anchors.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![AnchorId(2), AnchorId(4)]
+        );
+        assert!(!remaining.closed);
+        let previous = tab.history.undo_target().unwrap().0.clone();
+        assert!(publish(&mut tab, previous, Change::Undo));
+        assert_eq!(tab.document.content.active_path(), Some(&edited));
+        assert!(std::sync::Arc::ptr_eq(&pixels, &tab.document.canvas.pixels));
+        assert!(std::sync::Arc::ptr_eq(
+            &layer,
+            &tab.document.content.layer(tab.active_layer).unwrap().pixels
+        ));
+    }
+
+    #[test]
+    fn batch_deletion_handles_empty_stale_duplicate_and_last_anchor_targets() {
+        let mut tab = super::super::tests::opacity_tab();
+        let path = selection_path();
+        let mut other = path.clone();
+        other.id = PathId(2);
+        for anchor in &mut other.anchors {
+            anchor.id.0 += 10;
+        }
+        assert!(tab.document.content.upsert_path(other.clone()));
+        assert!(tab.document.content.upsert_path(path.clone()));
+        let content = &mut tab.document.content;
+        assert!(!content.delete_anchors(path.id, &[]));
+        assert!(!content.delete_anchors(path.id, &[AnchorId(999)]));
+        assert!(!content.delete_anchors(PathId(999), &[AnchorId(1)]));
+        assert_eq!(content.active_path(), Some(&path));
+        assert!(content.delete_anchors(path.id, &[AnchorId(2), AnchorId(2), AnchorId(999)]));
+        assert!(content.active_path().unwrap().closed);
+        assert!(content.delete_anchors(path.id, &[AnchorId(1), AnchorId(3), AnchorId(4)]));
+        assert_eq!(content.paths(), &[other.clone()]);
+        assert_eq!(content.active_path(), Some(&other));
+        assert!(content.delete_anchors(other.id, &[AnchorId(11), AnchorId(12), AnchorId(13)]));
+        assert!(content.delete_anchors(other.id, &[AnchorId(14)]));
+        assert!(content.paths().is_empty());
+        assert!(content.active_path().is_none());
     }
 
     #[test]

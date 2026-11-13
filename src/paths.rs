@@ -115,6 +115,41 @@ impl VectorPath {
         self.anchors.iter_mut().find(|anchor| anchor.id == id)
     }
 
+    /// Translate from gesture-start anchors so repeated previews cannot accumulate drift.
+    /// Invalid, duplicate, or stale targets reject the complete update.
+    pub fn move_anchors_from(&mut self, bases: &[Anchor], delta: (f64, f64)) -> bool {
+        if !delta.0.is_finite() || !delta.1.is_finite() || bases.len() > MAX_ANCHORS {
+            return false;
+        }
+        let mut updates = Vec::with_capacity(bases.len());
+        for (index, base) in bases.iter().enumerate() {
+            if !base.finite()
+                || bases[..index].iter().any(|other| other.id == base.id)
+                || self.anchor(base.id).is_none()
+            {
+                return false;
+            }
+            let translate = |point: (f64, f64)| (point.0 + delta.0, point.1 + delta.1);
+            let next = Anchor {
+                id: base.id,
+                point: translate(base.point),
+                handle_in: translate(base.handle_in),
+                handle_out: translate(base.handle_out),
+            };
+            if !next.finite() {
+                return false;
+            }
+            updates.push(next);
+        }
+        let mut changed = false;
+        for next in updates {
+            let anchor = self.anchor_mut(next.id).expect("validated anchor");
+            changed |= *anchor != next;
+            *anchor = next;
+        }
+        changed
+    }
+
     pub fn make_corner(&mut self, id: AnchorId) -> bool {
         let Some(anchor) = self.anchor_mut(id) else {
             return false;
@@ -787,6 +822,67 @@ mod tests {
             .fold((0., 0.), |sum, (point, weight)| {
                 (sum.0 + point.0 * weight, sum.1 + point.1 * weight)
             })
+    }
+
+    #[test]
+    fn grouped_anchor_motion_uses_its_baseline_and_preserves_unselected_geometry() {
+        let mut path = curve_path();
+        path.anchors.push(Anchor::corner(AnchorId(3), (20., -30.)));
+        path.closed = true;
+        let original = path.clone();
+        let bases = vec![path.anchors[0], path.anchors[2]];
+        assert!(!path.move_anchors_from(&bases, (0., 0.)));
+        for delta in [(5.25, -7.5), (-3., 4.), (5.25, -7.5)] {
+            assert!(path.move_anchors_from(&bases, delta));
+            for base in &bases {
+                let moved = path.anchor(base.id).unwrap();
+                assert_eq!(
+                    moved.point,
+                    (base.point.0 + delta.0, base.point.1 + delta.1)
+                );
+                assert_eq!(
+                    moved.handle_in,
+                    (base.handle_in.0 + delta.0, base.handle_in.1 + delta.1)
+                );
+                assert_eq!(
+                    moved.handle_out,
+                    (base.handle_out.0 + delta.0, base.handle_out.1 + delta.1)
+                );
+            }
+            assert_eq!(path.anchors[1], original.anchors[1]);
+            assert!(path.closed);
+            assert_eq!(path.id, original.id);
+        }
+        assert!(!path.move_anchors_from(&bases, (5.25, -7.5)));
+        assert!(path.move_anchors_from(&bases, (0., 0.)));
+        assert_eq!(path, original);
+    }
+
+    #[test]
+    fn invalid_group_motion_is_atomic_for_stale_duplicate_and_nonfinite_targets() {
+        let mut path = curve_path();
+        let original = path.clone();
+        let bases = path.anchors.clone();
+        let stale = Anchor::corner(AnchorId(999), (0., 0.));
+        let mut invalid = bases[1];
+        invalid.handle_out.0 = f64::NAN;
+        for selected in [
+            vec![bases[0], stale],
+            vec![bases[0], bases[0]],
+            vec![bases[0], invalid],
+        ] {
+            assert!(!path.move_anchors_from(&selected, (3., 5.)));
+            assert_eq!(path, original);
+        }
+        for delta in [(f64::NAN, 0.), (0., f64::INFINITY)] {
+            assert!(!path.move_anchors_from(&bases, delta));
+            assert_eq!(path, original);
+        }
+        let mut overflowing = bases.clone();
+        overflowing[1].handle_in.0 = f64::MAX;
+        assert!(!path.move_anchors_from(&overflowing, (f64::MAX, 0.)));
+        assert_eq!(path, original);
+        assert!(!path.move_anchors_from(&[], (1., 2.)));
     }
 
     #[test]

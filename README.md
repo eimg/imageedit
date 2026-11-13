@@ -201,15 +201,23 @@ anchor while preserving the curve; you can drag the newly inserted point before
 releasing. Existing anchors and handles take priority over curve insertion.
 Escape cancels an unfinished gesture and ends the current path session.
 
-The selected anchor has a larger outlined marker. **Corner** collapses both its
-handles. **Smooth** aligns them while retaining existing lengths, or creates
-handles toward neighboring points. **Handle Drag** controls future handle edits:
+**Shift-click anchors** to add or remove them from a selection on one path.
+Drag any selected anchor to move the group with its handles; clicking an
+unselected anchor starts a new selection. Shift-click selects without dragging
+or closing the path. **All Anchors** and **Deselect** are in Tool Options, with
+a selected count. Every selected anchor has a larger outlined marker. **Corner**
+collapses their handles. **Smooth** aligns them while retaining existing lengths,
+or creates handles toward neighboring points. Delete/Backspace removes the
+selected anchors in one step; with none selected it removes the last anchor.
+Clicking the first anchor closes an open path only when it is selected alone.
+**Handle Drag** controls future handle edits:
 Independent moves only the chosen handle, Aligned keeps the opposite handle's
 length while aligning it, and Symmetric mirrors both direction and length.
 Independent starts selected; newly drawn handles still start symmetric. These
 drag preferences are session settings; the resulting geometry is saved with
-the path. Path edits are undoable and leave raster pixels unchanged. Multiple
-anchor selection is not available yet.
+the path. Each group drag or shaping/deletion command is one undo step and leaves
+raster pixels unchanged. Anchor selection is a session setting and clears when
+switching paths/tabs/tools, hiding/deleting its path, or stepping image history.
 
 **Gradient** supports Linear and Radial fills. Drag its line, adjust the endpoints,
 then Apply/Return or Cancel/Escape. **Reverse** reverses the colors without moving

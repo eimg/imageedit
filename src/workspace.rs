@@ -341,7 +341,7 @@ pub struct Workspace {
     filter_dirty: bool,
     path_gesture: Option<path_ui::PathGesture>,
     path_hold: Option<crate::paths::VectorPath>,
-    path_anchor: Option<(crate::paths::PathId, crate::paths::AnchorId)>,
+    path_selection: Option<path_ui::AnchorSelection>,
     path_handle_mode: crate::paths::HandleMode,
     path_stroke_style: stroke_ui::PathStrokeStyle,
     stroke: Option<paint_ui::StrokeSession>,
@@ -612,7 +612,7 @@ impl Workspace {
             filter_dirty: false,
             path_gesture: None,
             path_hold: None,
-            path_anchor: None,
+            path_selection: None,
             path_handle_mode: crate::paths::HandleMode::Independent,
             path_stroke_style: stroke_ui::PathStrokeStyle::Brush,
             stroke: None,
@@ -849,6 +849,7 @@ impl Workspace {
 
     fn step_history(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_step_history(change) {
+            self.clear_path_edit();
             self.clear_crop();
             self.clear_selection_gesture();
             self.clear_move_preview(window, cx);

@@ -163,7 +163,7 @@ overwritten by Save.
 
 - [x] Corner/Smooth anchor commands and independent/aligned/symmetric handle drags.
 - [x] Insert anchors on segments without changing the curve.
-- [ ] Select and move multiple anchors together.
+- [x] Select and move multiple anchors together.
 - [x] Editable intermediate gradient stops and Reverse.
 - [x] Reusable session gradient presets.
 - [ ] Persist a named gradient library across app launches.
@@ -915,7 +915,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 14 — path anchor insertion and handle precision
 
-Implemented; committed at the start of Pass 15:
+Implemented; committed as `5150b9b` at the start of Pass 15:
 
 - Alt-click a visible path segment to insert an anchor by de Casteljau subdivision
   without changing the represented cubic. Existing anchor/handle hits take
@@ -975,3 +975,58 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Switch paths/tabs/tools, hide/delete a path, and check selected-anchor controls
   cannot edit a stale or hidden target. Save/reopen `.lime`, convert paths to
   selections, and stroke them to confirm the edited geometry is retained.
+
+
+## Pass 15 — grouped path anchor editing
+
+Implemented; committed at the start of Pass 16:
+
+- Shift-click anchors to add/remove a selection within one path. This changes
+  session selection only, without starting a drag, creating an anchor, closing
+  the path, or adding image history. Clicking a selected anchor retains its
+  group for dragging; clicking another anchor or path replaces the selection.
+  Clicking an existing path now selects it without an otherwise empty edit.
+- Drag a selected anchor to translate the entire group and its handles. Each
+  preview derives from the original anchors and pointer-down position, preserving
+  the grab offset and restoring exact geometry when returning to the start.
+  Invalid/nonfinite/overflowing, duplicate, or stale group targets reject the
+  entire translation. Unselected anchors and open/closed state stay intact.
+- All Anchors and Deselect join the existing Path options, with a selected count;
+  every selected marker uses the larger outlined style. Corner and Smooth shape
+  the entire group; Delete/Backspace removes it. Each command or drag commits one
+  metadata undo step, shares raster buffers, and preserves ordinary saved-state
+  tracking. Deleting to two anchors opens the path; deleting all removes it.
+- First-anchor click closure applies only to a single selected anchor. Handle
+  dragging still edits one handle in its chosen coupling mode and preserves an
+  existing group containing that anchor. Alt-insertion selects its new anchor.
+  Escape reliably repaints even when canceling the first uncommitted anchor;
+  other gesture cancellation removes nonexistent draft IDs before they can be reused.
+- Path/tab/tool switches, path hiding/deletion, and undo/redo clear session
+  selection. Controls validate live IDs and path visibility, and busy tabs
+  reject edits. No new tool, project format, dependency, installer, icon, package
+  version, or publishing changes. Updated help, README, and AGENTS.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 356 tests
+pass (two existing performance benchmarks remain ignored). Seven new regression
+tests cover selection toggling and target validation, group/inserted-point drag
+behavior and first-anchor closure, baseline translation without drift, atomic
+invalid updates, batch deletion, and exact undo/redo with shared raster buffers
+and saved-state restoration. A separate release app bundle is rebuilt and its
+signature verified from the current committed workspace plus this pass; shared
+installer artifacts are untouched. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Shift-click several nodes, toggle one off/on, and drag a selected node at Fit
+  and high zoom after panning. Check all selected handles move together, others
+  stay fixed, returning to the starting point restores the geometry, and one
+  Undo restores the entire move. Try an offset click within a node's hit area.
+- Use All Anchors/Deselect and Corner/Smooth. Delete several anchors, undo/redo,
+  delete down to two, then delete all. Check counts, markers, path closure, and
+  the saved marker. Selection alone should not create an undo step.
+- Shift-click the first node of an open path, include it in a group, then click
+  that selected node; neither action should close the path. With that node selected alone, confirm normal click
+  closure. Alt-insert and drag a node, and drag handles while a group is selected.
+- Cancel a live move and the very first newly drawn anchor. Switch paths, hide or
+  delete one, change tabs/tools, and undo/redo. Confirm no stale group is editable.
+  Save/reopen the geometry and check raster pixels are unchanged until Stroke.
