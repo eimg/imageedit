@@ -523,6 +523,10 @@ impl Document {
 
     pub fn from_pixels(name: String, pixels: RgbaImage) -> Self {
         let content = DocumentContent::single_layer(IMPORTED_LAYER_NAME.to_owned(), pixels);
+        Self::from_content(name, content)
+    }
+
+    pub fn from_content(name: String, content: DocumentContent) -> Self {
         Self {
             path: None,
             name,
@@ -1217,6 +1221,16 @@ mod tests {
         assert!(export_image(&document.content, &missing, FileFormat::Png, 92).is_err());
         assert!(!missing.exists());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn imported_content_is_an_unsaved_project_without_a_source_path() {
+        let content = DocumentContent::single_layer("Page 1".into(), RgbaImage::new(2, 2));
+        let document = Document::from_content("source.pdf".into(), content);
+        assert!(document.path.is_none());
+        assert_eq!(document.format, FileFormat::Project);
+        assert_eq!(document.name, "source.pdf");
+        assert!(!document.can_save_as_raster());
     }
 
     #[test]

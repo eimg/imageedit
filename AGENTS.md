@@ -132,7 +132,12 @@ and keeps the pixels. Pixel tools stay disabled until then. The Image menu
 can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
-the same way. Each tab can undo and redo crops, fills, selections and
+the same way. File → Open also imports PDFs through a dialog that selects all
+pages or a range, sets a resolution from 1 to 1200 DPI, and renders pages as
+layers on the first page's canvas or as separate tabs. PDF imports use the
+normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
+save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
+one PDF at a time. Each tab can undo and redo crops, fills, selections and
 layer changes, path edits, strokes, text edits, and rasterizing text. Selection changes preserve the saved revision, and undoing
 back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
@@ -260,11 +265,17 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   stays unchanged; the existing version 6 fixture remains unchanged.
   Text bold/italic flags are optional in both supported versions and default to regular for
   projects written before those controls were added.
+- `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
+  the image, stack, and page-count budgets, and renders at the requested DPI on
+  a white background. `src/workspace/pdf_ui.rs` owns probe and render jobs and
+  turns the result into new documents or layers above the active layer. Import
+  results publish only while their import token and target tab are current.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it
   was built from is still current. The canonical path identifies an already
-  open file.
+  open file. PDF paths probe before the import form opens; raster paths decode
+  directly.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.
@@ -273,7 +284,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   pastes a centered layer, and imports rasters above the active layer. Deferred
   operations validate the document generation and layer; each imported image
   must fit the stack budget before the next one is decoded. New from Clipboard
-  decodes the image and prepares its canvas in the background.
+  decodes the image and prepares its canvas in the background. Open as Layers
+  routes a single PDF through the PDF import form.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
   background saving and export, and unsaved-change confirmation. Raster Save
   eligibility is rechecked after the native dialog, since a deferred paste can
@@ -381,7 +393,8 @@ Keep the package version in `Cargo.toml` and
 
 Run `./scripts/bundle-macos.sh` and open `dist/Lime.app` for native smoke
 checks. `./scripts/package-macos.sh` additionally creates and verifies
-`dist/Lime-<version>.dmg` with an Applications shortcut. Test a valid image and
+`dist/Lime-<version>.dmg` with an Applications shortcut. Test a valid image,
+a multi-page PDF import with page and DPI choices, and
 an unsupported file, switch and close tabs, and
 try Finder's **Open With** after rebuilding packaging changes. For canvas work,
 test fit, fixed zoom, pan at a zoom that clips the image, and sampling after

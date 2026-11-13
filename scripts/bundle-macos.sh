@@ -25,7 +25,7 @@ codesign --verify --strict "$app"
 plist="$app/Contents/Info.plist"
 plutil -lint "$plist" >/dev/null
 cmp macos/Info.plist "$plist"
-for type in com.eimg.lime.project com.imageedit.project public.png public.jpeg org.webmproject.webp; do
+for type in com.eimg.lime.project com.imageedit.project public.png public.jpeg org.webmproject.webp com.adobe.pdf; do
     if ! grep -q "$type" "$plist"; then
         echo "The signed bundle is missing the $type document type." >&2
         exit 1

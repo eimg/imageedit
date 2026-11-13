@@ -1859,7 +1859,9 @@ impl Workspace {
     }
 
     fn status_bar(&self) -> Div {
-        let summary = if self.creating {
+        let summary = if self.pdf_busy {
+            "Importing PDF…".to_owned()
+        } else if self.creating {
             "Creating image…".to_owned()
         } else {
             self.active_tab().map_or_else(

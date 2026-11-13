@@ -1,4 +1,4 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use gpui::{
     Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, Keystroke,
@@ -11,13 +11,17 @@ use super::adjust_ui::AdjustKind;
 use super::color::{ColorControl, Hsv, control};
 use super::filter_ui::FilterKind;
 use super::layers::{opacity_from_percent, opacity_percent};
+use super::pdf_ui::PdfTarget;
 use super::view::{ACCENT, BORDER, CANVAS, CHROME, HOVER, MUTED, PANEL, SELECTED, TEXT};
 use crate::adjustments::{
     Adjustment, BalanceRange, ColorBalance, Curve, Curves, GAMMA_MAX, GAMMA_MIN, GAMMA_ONE,
     Histogram, Levels, MapChannel,
 };
-use crate::document::{Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, solid_color};
+use crate::document::{
+    Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, file_name, solid_color,
+};
 use crate::filters::{self, FilterSpec};
+use crate::pdf::{self, DEFAULT_DPI, PdfInfo, PdfMode, PdfOptions};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
 
@@ -97,6 +101,17 @@ enum FormKind {
         offset_y: i16,
         opacity: i16,
         color: image::Rgba<u8>,
+    },
+    PdfImport {
+        path: PathBuf,
+        info: PdfInfo,
+        dpi: Field,
+        from: Field,
+        to: Field,
+        all_pages: bool,
+        mode: PdfMode,
+        target: PdfTarget,
+        active: usize,
     },
 }
 
@@ -504,6 +519,43 @@ impl Workspace {
         );
     }
 
+    pub(super) fn pdf_import_form(
+        &mut self,
+        path: PathBuf,
+        info: PdfInfo,
+        target: PdfTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.dialog_open || self.form.is_some() || self.creating || self.pdf_busy {
+            self.errors
+                .push("Wait for the current file operation to finish.".into());
+            cx.notify();
+            return false;
+        }
+        if info.pages == 0 {
+            self.errors.push("The PDF has no pages.".into());
+            cx.notify();
+            return false;
+        }
+        self.show_form(
+            FormKind::PdfImport {
+                path,
+                dpi: Field::new(DEFAULT_DPI.to_string()),
+                from: Field::new("1".into()),
+                to: Field::new(info.pages.to_string()),
+                all_pages: true,
+                mode: PdfMode::Layers,
+                target,
+                info,
+                active: 0,
+            },
+            window,
+            cx,
+        );
+        true
+    }
+
     fn show_form(&mut self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open || self.form.is_some() {
             return;
@@ -829,6 +881,73 @@ impl Workspace {
                 self.dismiss_form(window, cx);
                 self.commit_layer_opacity(id, opacity, window, cx);
             }
+            FormKind::PdfImport {
+                path,
+                info,
+                dpi,
+                from,
+                to,
+                all_pages,
+                mode,
+                target,
+                ..
+            } => {
+                let Ok(dpi) = dpi.text.parse::<u32>() else {
+                    form.error = Some("Enter a resolution in DPI.".into());
+                    cx.notify();
+                    return;
+                };
+                let (first, last) = if *all_pages {
+                    (1, info.pages)
+                } else {
+                    let (Ok(first), Ok(last)) =
+                        (from.text.parse::<usize>(), to.text.parse::<usize>())
+                    else {
+                        form.error = Some("Enter a page range.".into());
+                        cx.notify();
+                        return;
+                    };
+                    (first, last)
+                };
+                let mode = if matches!(target, PdfTarget::Layers { .. }) {
+                    PdfMode::Layers
+                } else {
+                    *mode
+                };
+                let options = PdfOptions {
+                    path: path.clone(),
+                    first,
+                    last,
+                    dpi,
+                    mode,
+                };
+                if let Err(error) = pdf::validate_options(info, &options) {
+                    form.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
+                let target = *target;
+                if let PdfTarget::Layers {
+                    tab_id, generation, ..
+                } = target
+                {
+                    let valid = self.tab_index(tab_id).is_some_and(|index| {
+                        let tab = &self.tabs[index];
+                        tab.history.generation() == generation && !tab.busy()
+                    });
+                    if !valid {
+                        if let Some(form) = &mut self.form {
+                            form.error = Some(
+                                "The target image changed. Close this dialog and try again.".into(),
+                            );
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+                self.dismiss_form(window, cx);
+                self.begin_pdf_import(options, target, window, cx);
+            }
             FormKind::Adjustment { .. } => {
                 self.apply_adjustment(window, cx);
                 self.dismiss_form(window, cx);
@@ -870,6 +989,35 @@ impl Workspace {
                     }
                     FormKind::Radius { radius, .. } => {
                         radius.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
+                    FormKind::PdfImport {
+                        dpi,
+                        from,
+                        to,
+                        all_pages,
+                        active,
+                        ..
+                    } => {
+                        if key == "tab" {
+                            if *all_pages {
+                                *all_pages = false;
+                                *active = 1;
+                                from.selected = true;
+                            } else {
+                                *active = (*active + 1) % 3;
+                                match *active {
+                                    0 => dpi.selected = true,
+                                    1 => from.selected = true,
+                                    _ => to.selected = true,
+                                }
+                            }
+                        } else {
+                            match *active {
+                                0 => dpi.handle_key(event, FieldMode::Digits { max: 4 }, cx),
+                                1 => from.handle_key(event, FieldMode::Digits { max: 4 }, cx),
+                                _ => to.handle_key(event, FieldMode::Digits { max: 4 }, cx),
+                            }
+                        }
                     }
                     FormKind::Scale {
                         width,
@@ -1478,6 +1626,205 @@ impl Workspace {
                         .child("Opacity (0–100%)")
                         .child(percent.view(true)),
                 ),
+                FormKind::PdfImport {
+                    path,
+                    info,
+                    dpi,
+                    from,
+                    to,
+                    all_pages,
+                    mode,
+                    target,
+                    active,
+                } => {
+                    let pages = if info.pages == 1 {
+                        "1 page".to_owned()
+                    } else {
+                        format!("{} pages", info.pages)
+                    };
+                    let first_page = if *all_pages {
+                        Some(1)
+                    } else {
+                        from.text
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|page| (1..=info.pages).contains(page))
+                    };
+                    let estimate = match (
+                        dpi.text.parse::<u32>().ok(),
+                        first_page.and_then(|page| info.sizes.get(page - 1)),
+                    ) {
+                        (Some(dpi), Some(size)) => {
+                            let (width, height) = pdf::scaled_page_size(*size, dpi);
+                            format!(
+                                "Page {} at {dpi} DPI: {width} × {height} px",
+                                first_page.unwrap_or(1)
+                            )
+                        }
+                        _ => "Enter a page and a resolution in DPI.".to_owned(),
+                    };
+                    let range = div()
+                        .flex()
+                        .gap_2()
+                        .child(form_button("All Pages", *all_pages).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(Form {
+                                    kind:
+                                        FormKind::PdfImport {
+                                            all_pages, active, ..
+                                        },
+                                    ..
+                                }) = &mut this.form
+                                {
+                                    *all_pages = true;
+                                    *active = 0;
+                                    cx.notify();
+                                }
+                            },
+                        )))
+                        .child(form_button("Page Range", !*all_pages).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(Form {
+                                    kind:
+                                        FormKind::PdfImport {
+                                            all_pages,
+                                            from,
+                                            active,
+                                            ..
+                                        },
+                                    ..
+                                }) = &mut this.form
+                                {
+                                    *all_pages = false;
+                                    *active = 1;
+                                    from.selected = true;
+                                    cx.notify();
+                                }
+                            },
+                        )));
+                    let fields = if *all_pages {
+                        div()
+                    } else {
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div().flex_1().child("From").child(
+                                    from.view(*active == 1).id("pdf-from").mt_1().on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            if let Some(Form {
+                                                kind:
+                                                    FormKind::PdfImport { from, active, .. },
+                                                ..
+                                            }) = &mut this.form
+                                            {
+                                                *active = 1;
+                                                from.selected = true;
+                                                cx.notify();
+                                            }
+                                        }),
+                                    ),
+                                ),
+                            )
+                            .child(
+                                div().flex_1().child("To").child(
+                                    to.view(*active == 2).id("pdf-to").mt_1().on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            if let Some(Form {
+                                                kind: FormKind::PdfImport { to, active, .. },
+                                                ..
+                                            }) = &mut this.form
+                                            {
+                                                *active = 2;
+                                                to.selected = true;
+                                                cx.notify();
+                                            }
+                                        }),
+                                    ),
+                                ),
+                            )
+                    };
+                    let modes = div().flex().gap_2().child(
+                        form_button("As Layers", *mode == PdfMode::Layers).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(Form {
+                                    kind: FormKind::PdfImport { mode, .. },
+                                    ..
+                                }) = &mut this.form
+                                {
+                                    *mode = PdfMode::Layers;
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                    );
+                    let modes = if *target == PdfTarget::NewDocument {
+                        modes.child(
+                            form_button("As Images", *mode == PdfMode::Separate).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if let Some(Form {
+                                        kind: FormKind::PdfImport { mode, .. },
+                                        ..
+                                    }) = &mut this.form
+                                    {
+                                        *mode = PdfMode::Separate;
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                        )
+                    } else {
+                        modes
+                    };
+                    let body = div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .child(format!("{}  ·  {pages}", file_name(path))),
+                        )
+                        .child(div().child("Resolution (DPI)").child(
+                            dpi.view(*active == 0).id("pdf-dpi").mt_1().on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(Form {
+                                        kind: FormKind::PdfImport { dpi, active, .. },
+                                        ..
+                                    }) = &mut this.form
+                                    {
+                                        *active = 0;
+                                        dpi.selected = true;
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                        ))
+                        .child(
+                            div()
+                                .child("Pages")
+                                .child(range.mt_1())
+                                .child(fields.mt_2()),
+                        )
+                        .when(*target == PdfTarget::NewDocument, |body| {
+                            body.child(div().child("Open pages as").child(modes.mt_1()))
+                        })
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(estimate))
+                        .when(
+                            *target == PdfTarget::NewDocument
+                                && *mode == PdfMode::Layers
+                                && info.pages > 1,
+                            |body| {
+                                body.child(
+                                    div().text_xs().text_color(rgb(MUTED)).child(
+                                        "Pages are added as layers centered on the first page.",
+                                    ),
+                                )
+                            },
+                        );
+                    ("Import PDF", "Import", body)
+                }
                 FormKind::Color {
                     swatch, hex, hsv, ..
                 } => {

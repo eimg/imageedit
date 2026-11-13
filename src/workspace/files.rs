@@ -418,7 +418,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.dialog_open || self.creating || self.tabs.iter().any(|tab| tab.busy()) {
+        if self.dialog_open
+            || self.creating
+            || self.pdf_busy
+            || self.tabs.iter().any(|tab| tab.busy())
+        {
             return false;
         }
         let unsaved = self

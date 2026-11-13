@@ -1159,6 +1159,7 @@ mod tests {
             "public.png",
             "public.jpeg",
             "org.webmproject.webp",
+            "com.adobe.pdf",
             "public.filename-extension",
             "<string>lime</string>",
             "<string>imageedit</string>",

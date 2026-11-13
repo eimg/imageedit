@@ -15,6 +15,7 @@ mod macos;
 mod menu_icons;
 mod paint;
 mod paths;
+mod pdf;
 mod preview;
 mod project;
 mod selection;

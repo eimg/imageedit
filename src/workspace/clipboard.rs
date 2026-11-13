@@ -7,6 +7,7 @@ use gpui::{
 use image::RgbaImage;
 
 use super::Workspace;
+use super::pdf_ui::PdfTarget;
 use crate::commands::{
     CopyImage, CutImage, NewFromClipboard, OpenAsLayers, PasteAsLayer, PasteImage,
 };
@@ -303,7 +304,37 @@ impl Workspace {
                 workspace.dialog_open = false;
                 match result {
                     Ok(Ok(Some(paths))) if !paths.is_empty() => {
-                        workspace.begin_import(tab_id, paths, window, cx);
+                        if paths.iter().any(|path| crate::pdf::is_pdf_path(path)) {
+                            if paths.len() != 1 {
+                                workspace.notice(
+                                    "Open PDF files one at a time with Open as Layers.",
+                                    cx,
+                                );
+                            } else if workspace.active_tab().map(|tab| tab.id) != Some(tab_id) {
+                                workspace.tell(
+                                    "Open as Layers was canceled because the image changed.",
+                                    cx,
+                                );
+                            } else if let Some(tab) = workspace.active_tab() {
+                                if !tab.document.content.can_add_layer() {
+                                    workspace.notice("The document cannot hold another layer.", cx);
+                                } else {
+                                    let target = PdfTarget::Layers {
+                                        tab_id,
+                                        generation: tab.history.generation(),
+                                        above: tab.active_layer,
+                                    };
+                                    workspace.request_pdf_import(
+                                        paths[0].clone(),
+                                        target,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }
+                        } else {
+                            workspace.begin_import(tab_id, paths, window, cx);
+                        }
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => workspace

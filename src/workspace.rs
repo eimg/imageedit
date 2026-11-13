@@ -13,6 +13,7 @@ mod layers;
 mod numeric;
 mod paint_ui;
 mod path_ui;
+mod pdf_ui;
 mod scale_ui;
 mod selection;
 mod stroke_ui;
@@ -38,6 +39,7 @@ use self::{
     cursor::CanvasCursor,
     dialogs::Form,
     history::{History, LIMITS, State},
+    pdf_ui::PdfTarget,
 };
 
 const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
@@ -324,6 +326,8 @@ pub struct Workspace {
     caret_blinking: bool,
     copy_token: u64,
     paste_token: u64,
+    pdf_import_token: u64,
+    pdf_busy: bool,
     dialog_open: bool,
     form: Option<Form>,
     creating: bool,
@@ -428,6 +432,36 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             while let Some(path) = requests.next().await {
                 let name = file_name(&path);
+                if crate::pdf::is_pdf_path(&path) {
+                    let probe_path = path.clone();
+                    let info = executor
+                        .spawn(async move { crate::pdf::read_info(&probe_path) })
+                        .await;
+                    if workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            workspace.pending -= 1;
+                            match info {
+                                Ok(info) => {
+                                    workspace.pdf_import_form(
+                                        path,
+                                        info,
+                                        PdfTarget::NewDocument,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                                Err(error) => {
+                                    workspace.errors.push(format!("{name}: {error:#}"));
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 let result = executor.spawn(async move { Document::open(&path) }).await;
                 if workspace
                     .update_in(cx, |workspace, window, cx| {
@@ -549,6 +583,8 @@ impl Workspace {
             caret_blinking: false,
             copy_token: 0,
             paste_token: 0,
+            pdf_import_token: 0,
+            pdf_busy: false,
             dialog_open: false,
             form: None,
             creating: false,

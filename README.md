@@ -39,7 +39,11 @@ macOS builds are ad hoc signed and not notarized.
 
 ## Getting started
 
-Open a PNG, JPEG, or WebP, drop one into the workspace, or create a new image.
+Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.
+PDF files open an import dialog: choose all pages or a range, set the resolution
+in DPI, and add the pages as layers or as separate images. A PDF import becomes a
+new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
+not supported. Open as Layers accepts one PDF at a time.
 Pick a tool on the left and adjust its settings on the right. Hover the **?**
 beside a tool name for gestures and shortcuts.
 
