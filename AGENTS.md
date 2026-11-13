@@ -596,7 +596,13 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   `dist/Lime.app`, ad hoc signs the bundle, checks that signature and the
   project and raster document types, and rejects a Cargo version that differs
   from `CFBundleShortVersionString`. `scripts/package-macos.sh` builds the app
-  and creates the drag-to-Applications `dist/Lime-<version>.dmg`.
+  and creates the drag-to-Applications `dist/Lime-<version>.dmg`. The macOS SDK
+  renders its 1x/2x background via `scripts/dmg-background.swift`, and
+  `scripts/dmg-layout.applescript` saves a 640-by-400 Finder content layout with
+  Lime and Applications icons, an arrow, and installation instructions. Packaging
+  requires a logged-in Finder session with Automation access, uses a temporary
+  writable HFS+ image, and compresses/verifies it before replacing the final DMG.
+  Its cleanup detaches only its own mount. The mounted volume uses the app icon.
 
 ## Build and check
 

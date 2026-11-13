@@ -45,6 +45,10 @@ Windows needs Windows 10 or later, DirectX, and the Microsoft Visual C++
 2015–2022 x64 runtime if it is not already installed. Windows builds are unsigned;
 macOS builds are ad hoc signed and not notarized.
 
+The macOS disk image opens an installation window with Lime on the left and
+Applications on the right. Drag Lime along the arrow into Applications, then
+open the copied app from there. Eject the disk image after installation.
+
 ## Getting started
 
 Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.
