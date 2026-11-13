@@ -49,6 +49,14 @@ The macOS disk image opens an installation window with Lime on the left and
 Applications on the right. Drag Lime along the arrow into Applications, then
 open the copied app from there. Eject the disk image after installation.
 
+Lime quietly checks for a new stable release about once a day. When one is
+available, a badge appears at the right of the status bar. Click it for the
+changelog and a direct download for your platform. **Check for Updates…** is
+also available in the Lime menu on macOS and the Help menu on Windows.
+Downloads open in your browser; you choose when to download and install them.
+Lime never installs updates automatically. Offline checks stay quiet; a manual
+check offers a retry and a link to the releases page if it cannot connect.
+
 ## Getting started
 
 Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.

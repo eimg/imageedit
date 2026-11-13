@@ -25,6 +25,7 @@ mod selection;
 mod text;
 mod theme;
 mod transform;
+mod updates;
 #[cfg(target_os = "windows")]
 mod windows_menu;
 mod workspace;
@@ -61,6 +62,7 @@ fn main() {
         }
     });
     app.run(|cx| {
+        updates::init(cx);
         #[cfg(target_os = "macos")]
         macos::set_dock_icon();
         commands::register(cx);

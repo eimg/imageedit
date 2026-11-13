@@ -2848,6 +2848,7 @@ dependencies = [
  "objc2-foundation",
  "raw-window-handle",
  "resvg",
+ "semver",
  "serde",
  "serde_json",
  "smallvec",
@@ -2855,6 +2856,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "windows-sys 0.61.2",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -6539,6 +6541,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

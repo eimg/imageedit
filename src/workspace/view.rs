@@ -459,7 +459,7 @@ impl Render for Workspace {
                     )
                     .child(self.inspector(cx)),
             )
-            .child(self.status_bar())
+            .child(self.status_bar(cx))
             .children(self.form_overlay(cx))
             .children(self.pdf_progress_overlay(cx))
     }
@@ -2228,7 +2228,7 @@ impl Workspace {
             )
     }
 
-    fn status_bar(&self) -> Div {
+    fn status_bar(&self, cx: &App) -> Div {
         let summary = if let Some(job) = &self.pdf_job {
             job.label()
         } else if self.creating {
@@ -2292,7 +2292,7 @@ impl Workspace {
             .border_color(rgb(BORDER))
             .text_xs()
             .text_color(rgb(MUTED))
-            .child(div().flex_1().child(summary))
+            .child(div().flex_1().min_w_0().truncate().child(summary))
             .when_some(self.active_tab(), |bar, tab| {
                 let zoom = match tab.zoom {
                     Zoom::Fit => "Fit".to_owned(),
@@ -2323,6 +2323,7 @@ impl Workspace {
             } else {
                 format!("{count} images open")
             })
+            .children(crate::updates::badge(cx))
     }
 
     fn error_banner(&self, cx: &Context<Self>) -> Div {

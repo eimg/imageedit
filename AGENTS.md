@@ -296,6 +296,18 @@ document is a single plain layer without paths, guides, or editable text.
 
 ## Code map
 
+- `src/updates.rs` checks the public GitHub latest stable release in a background
+  job, starting after 15 seconds and then every 24 hours. A bounded per-user cache
+  throttles automatic attempts across restarts, including failed checks; manual
+  checks bypass the cooldown and join an existing request. SemVer precedence
+  excludes drafts/prereleases and ignores build metadata. Platform/architecture
+  matching uses published asset names (Apple silicon DMG, Windows x64 EXE then
+  ZIP), and direct URLs must match this repository's HTTPS release paths.
+  `src/updates/ui.rs` adds a status-bar badge and a separate update window with
+  changelog/download links, current/checking/offline states, and keyboard access.
+  Missing platform assets leave the changelog available without guessing a URL.
+  The Lime menu (macOS) or Help menu (Windows) exposes Check for Updates. Nothing
+  downloads or installs in the app, and update state never enters image history.
 - `src/main.rs` starts GPUI, creates or reopens the main window, and routes
   launch arguments and macOS file URLs to the workspace.
 - `src/commands.rs` defines actions, shortcuts, native menus, and toolbox

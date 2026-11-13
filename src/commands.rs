@@ -103,6 +103,7 @@ actions!(
         HideOthers,
         ShowAll,
         Quit,
+        CheckForUpdates,
     ]
 );
 
@@ -637,6 +638,12 @@ pub fn register(cx: &mut App) {
     // Window actions run while GPUI has the active window borrowed.
     cx.on_action(|_: &OpenImage, cx| cx.defer(crate::open_dialog));
     cx.on_action(|_: &Quit, cx| cx.defer(crate::quit));
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        cx.defer(|cx| {
+            crate::updates::show(cx);
+            crate::updates::check(true, cx);
+        });
+    });
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -683,6 +690,8 @@ pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
         menus.push(menu(
             "Lime",
             vec![
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide Lime", Hide),
@@ -846,6 +855,12 @@ pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
             ],
         ),
     ]);
+    if !macos {
+        menus.push(menu(
+            "Help",
+            vec![MenuItem::action("Check for Updates…", CheckForUpdates)],
+        ));
+    }
     menus
 }
 
@@ -1010,6 +1025,7 @@ mod tests {
         let windows = menu_labels(&application_menus(false));
         let checklist = [
             "menu:Lime",
+            "Check for Updates…",
             "Services",
             "Hide Lime",
             "Hide Others",
@@ -1173,6 +1189,7 @@ mod tests {
                 !matches!(
                     *label,
                     "menu:Lime"
+                        | "Check for Updates…"
                         | "Services"
                         | "Hide Lime"
                         | "Hide Others"
@@ -1186,6 +1203,7 @@ mod tests {
             .position(|label| *label == "Export as WebP…")
             .unwrap();
         expected_windows.insert(export + 1, "Exit");
+        expected_windows.extend(["menu:Help", "Check for Updates…"]);
         assert_eq!(
             windows,
             expected_windows
