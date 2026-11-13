@@ -56,6 +56,17 @@ active layer or the visible composite, independently of Bucket Fill's setting.
 Both region tools ignore stored RGB when both compared pixels are fully
 transparent; other channel and alpha comparisons keep the shared tolerance.
 Feather, Grow, and Shrink edit the mask; Grow/Shrink preserve soft coverage.
+Free Select has an independent, default-off antialias preference for new closed
+freehand/polygon selections. It uses 4×4 subpixel nonzero-winding coverage;
+existing paths retain hard rasterization. Rectangle/Oval/Free Select and Wand
+share a default-off Feather new selections preference and a 0–128 image-pixel
+radius (initially 8). These settings edit preferences only, not the current mask
+or history. Creation feathers only the incoming region before combination;
+moving/resizing existing geometry does not feather it again. Work runs in the
+selection background job on completion, never on each pointer update. Feathered
+results use the existing coverage-mask representation and its editing limits.
+Feather uses a fixed square averaging kernel with zero coverage outside the
+canvas, including for bounded Full selections; Unrestricted stays unrestricted.
 Move repositions the active layer, and its tool options
 align it to any canvas edge or center it with icon buttons. View → Toggle
 Layer Boundary shows a global subtle outline that follows the active layer.
@@ -335,7 +346,12 @@ a partially clipped curve becomes a bounded mask. Scaling a rounded selection
 scales its coverage on both axes as a mask. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
 drag keeps the draft open as a checkpoint, and the start node or Return closes
-it. The Magic Wand shares the bucket tolerance. Its optional visible-composite
+it. Optional polygon antialiasing uses four scanlines per pixel row and counts
+horizontal samples into the normal byte-per-pixel mask, without a supersized
+intermediate image. Hard polygon/path rasterization keeps its center-sample
+scanline path. `combine_created_selection` feathers new shapes/flood results
+before combining them, preserving previous coverage and one selection history
+entry. The Magic Wand shares the bucket tolerance. Its optional visible-composite
 source is built in the background and floods in canvas coordinates; active-layer
 sampling maps through the layer offset.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control

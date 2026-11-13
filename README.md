@@ -91,6 +91,23 @@ rectangle edges; it starts off for hard pixel selections. Toggling it also
 updates the current editable curve. Combined, clipped, feathered, and wand masks
 keep their existing coverage when this setting changes.
 
+**Free Select** has its own **Antialias edges** option for new freehand/polygon
+selections. It also starts off; enabling it preserves fractional edge coverage
+when the outline closes, without blurring aligned pixel edges.
+
+Rectangle Select, Oval Select, Free Select, and Magic Wand offer **Feather new
+selections**, with a shared radius of 0–128 image pixels (initially 8). Feathering
+starts off. These settings affect new selections when their gesture finishes;
+they leave an existing selection unchanged. A radius of zero skips feathering.
+Feathering happens before add/subtract/intersect, so repeated additions do not
+soften the old selection again. Use **Select → Feather…** to soften the current
+selection. Feathered selections are coverage masks; their numeric geometric
+position/size controls are unavailable, as with other mask selections.
+
+Feathering treats space outside the canvas as unselected. A selection touching
+the border softens there too, including Select All. Coverage remains inside the
+canvas. Hard-edge and unfeathered workflows keep their existing behavior.
+
 Selection and **Crop** offer Free, 1:1, 4:3, 16:9, and Image aspect ratios.
 Choose a fixed preset and edit Ratio W/H for a custom ratio. It constrains the
 next creation drag, handle resize, or Width/Height edit; choosing a ratio alone

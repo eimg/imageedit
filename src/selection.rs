@@ -876,12 +876,24 @@ impl Selection {
     }
 
     pub fn polygon(points: &[(f64, f64)], width: u32, height: u32) -> Self {
-        polygons_selection(&[points], width, height)
+        polygons_selection(&[points], width, height, false)
+    }
+
+    pub fn polygon_quality(
+        points: &[(f64, f64)],
+        width: u32,
+        height: u32,
+        antialias: bool,
+    ) -> Self {
+        if !antialias {
+            return Self::polygon(points, width, height);
+        }
+        polygons_selection(&[points], width, height, true)
     }
 
     // Nonzero winding across every ring. Opposite contours cancel where they overlap.
     pub fn polygons(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Self {
-        polygons_selection(rings, width, height)
+        polygons_selection(rings, width, height, false)
     }
 
     pub fn flood(
@@ -916,6 +928,9 @@ impl Selection {
         reshape(self, radius, width, height, Reshape::Shrink)
     }
 
+    // The square averaging kernel has zero coverage outside the canvas. Its
+    // denominator stays fixed there, so a bounded full selection also softens
+    // at image edges. Unrestricted means no mask and stays unrestricted.
     pub fn feather(self, radius: u32, width: u32, height: u32) -> Self {
         reshape(self, radius, width, height, Reshape::Feather)
     }
@@ -1471,7 +1486,12 @@ fn union_rect(left: PixelRect, right: PixelRect) -> PixelRect {
     PixelRect::new(x, y, (right_edge - x) as u32, (bottom - y) as u32)
 }
 
-fn polygons_selection(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Selection {
+fn polygons_selection(
+    rings: &[&[(f64, f64)]],
+    width: u32,
+    height: u32,
+    antialias: bool,
+) -> Selection {
     if width == 0 || height == 0 || rings.iter().all(|points| points.len() < 3) {
         return Selection::Empty;
     }
@@ -1493,8 +1513,21 @@ fn polygons_selection(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Selec
             max_y = max_y.max(y);
         }
     }
-    let (min_x, max_x) = (scan_edge(min_x, width), scan_edge(max_x, width));
-    let (min_y, max_y) = (scan_edge(min_y, height), scan_edge(max_y, height));
+    let (min_x, max_x, min_y, max_y) = if antialias {
+        (
+            min_x.floor().clamp(0., f64::from(width)) as i32,
+            max_x.ceil().clamp(0., f64::from(width)) as i32,
+            min_y.floor().clamp(0., f64::from(height)) as i32,
+            max_y.ceil().clamp(0., f64::from(height)) as i32,
+        )
+    } else {
+        (
+            scan_edge(min_x, width),
+            scan_edge(max_x, width),
+            scan_edge(min_y, height),
+            scan_edge(max_y, height),
+        )
+    };
     if min_x >= max_x || min_y >= max_y {
         return Selection::Empty;
     }
@@ -1522,35 +1555,67 @@ fn polygons_selection(rings: &[&[(f64, f64)]], width: u32, height: u32) -> Selec
     }
     let mut hits = Vec::new();
     for y in min_y..max_y {
-        let scan = f64::from(y) + 0.5;
-        hits.clear();
-        for &(y0, y1, x0, x1, dir) in &edges {
-            if scan >= y0 && scan < y1 {
-                let t = (scan - y0) / (y1 - y0);
-                hits.push((x0 + t * (x1 - x0), dir));
+        let samples = if antialias { 4 } else { 1 };
+        for sample in 0..samples {
+            let scan = f64::from(y) + (f64::from(sample) + 0.5) / f64::from(samples);
+            hits.clear();
+            for &(y0, y1, x0, x1, dir) in &edges {
+                if scan >= y0 && scan < y1 {
+                    let t = (scan - y0) / (y1 - y0);
+                    hits.push((x0 + t * (x1 - x0), dir));
+                }
+            }
+            hits.sort_by(|left, right| {
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut wind = 0;
+            let mut from = None;
+            for &(x, dir) in &hits {
+                let next = wind + dir;
+                if wind == 0 && next != 0 {
+                    from = Some(x);
+                } else if wind != 0
+                    && next == 0
+                    && let Some(left) = from.take()
+                {
+                    if antialias {
+                        let row = (y - min_y) as usize * buf_w as usize;
+                        add_sample_span(&mut pixels[row..row + buf_w as usize], min_x, left, x);
+                    } else {
+                        fill_span(&mut pixels, min_x, min_y, buf_w, y, left, x);
+                    }
+                }
+                wind = next;
             }
         }
-        hits.sort_by(|left, right| {
-            left.0
-                .partial_cmp(&right.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut wind = 0;
-        let mut from = None;
-        for &(x, dir) in &hits {
-            let next = wind + dir;
-            if wind == 0 && next != 0 {
-                from = Some(x);
-            } else if wind != 0
-                && next == 0
-                && let Some(left) = from.take()
-            {
-                fill_span(&mut pixels, min_x, min_y, buf_w, y, left, x);
-            }
-            wind = next;
+    }
+    if antialias {
+        for count in &mut pixels {
+            *count = ((u16::from(*count) * 255 + 8) / 16) as u8;
         }
     }
     finish_mask(min_x, min_y, buf_w, buf_h, pixels, width, height)
+}
+
+// Count four horizontal subpixel samples for each of the four vertical scans.
+// Interior spans visit a pixel once per scan, without a 4x-resolution mask.
+fn add_sample_span(row: &mut [u8], origin_x: i32, left: f64, right: f64) {
+    let edge = |value: f64| {
+        ((value - f64::from(origin_x)) * 4. - 0.5)
+            .ceil()
+            .clamp(0., (row.len() * 4) as f64) as usize
+    };
+    let (start, end) = (edge(left), edge(right));
+    if start >= end {
+        return;
+    }
+    let first = start / 4;
+    for (index, count) in row[first..end.div_ceil(4)].iter_mut().enumerate() {
+        let pixel = first + index;
+        *count += (end.min((pixel + 1) * 4) - start.max(pixel * 4)) as u8;
+    }
 }
 
 fn fill_span(
@@ -2294,6 +2359,194 @@ mod tests {
         );
         let outside = [(-1e12, -1e12), (4., -1e12), (4., 4.), (-1e12, 4.)];
         assert_eq!(Selection::polygon(&outside, 4, 4), Selection::Full);
+    }
+
+    #[test]
+    fn antialiased_polygon_spans_match_subpixel_winding_for_clips_holes_and_crossings() {
+        fn inside(rings: &[Vec<(f64, f64)>], x: f64, y: f64) -> bool {
+            let mut winding = 0;
+            for ring in rings {
+                for (a, b) in ring
+                    .iter()
+                    .zip(ring.iter().cycle().skip(1))
+                    .take(ring.len())
+                {
+                    let side = (b.0 - a.0) * (y - a.1) - (x - a.0) * (b.1 - a.1);
+                    if a.1 <= y && b.1 > y && side > 0. {
+                        winding += 1;
+                    }
+                    if a.1 > y && b.1 <= y && side < 0. {
+                        winding -= 1;
+                    }
+                }
+            }
+            winding != 0
+        }
+        let cases = [
+            vec![vec![(0.21, 0.32), (6.43, 1.27), (1.74, 7.86)]],
+            vec![vec![
+                (-2.21, 2.32),
+                (5.43, -1.27),
+                (7.74, 5.86),
+                (1.17, 3.24),
+            ]],
+            vec![vec![(0.21, 0.32), (7.43, 7.27), (0.74, 7.86), (7.17, 0.24)]],
+            vec![
+                vec![(0.21, 0.23), (7.79, 0.23), (7.79, 7.77), (0.21, 7.77)],
+                vec![(2.21, 2.23), (2.21, 5.77), (5.79, 5.77), (5.79, 2.23)],
+            ],
+        ];
+        for rings in cases {
+            let refs: Vec<_> = rings.iter().map(Vec::as_slice).collect();
+            let selection = polygons_selection(&refs, 8, 8, true);
+            let reversed: Vec<Vec<_>> = rings
+                .iter()
+                .map(|ring| ring.iter().copied().rev().collect())
+                .collect();
+            let reversed_refs: Vec<_> = reversed.iter().map(Vec::as_slice).collect();
+            assert_eq!(selection, polygons_selection(&reversed_refs, 8, 8, true));
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(
+                        selection.coverage(x, y, 8, 8),
+                        sample_coverage(x, y, |x, y| inside(&rings, x, y)),
+                        "pixel {x},{y} in {rings:?}"
+                    );
+                }
+            }
+            assert_eq!(selection.coverage(-1, 2, 8, 8), 0);
+            assert_eq!(selection.coverage(8, 2, 8, 8), 0);
+        }
+    }
+
+    #[test]
+    fn polygon_antialiasing_keeps_thin_shapes_and_hard_mode_without_blurring_aligned_edges() {
+        let thin = [(0.1, 0.1), (0.3, 0.1), (0.3, 3.2), (0.1, 3.2)];
+        assert_eq!(
+            Selection::polygon_quality(&thin, 4, 4, false),
+            Selection::Empty
+        );
+        assert_eq!(
+            Selection::polygon_quality(&thin, 4, 4, false),
+            Selection::polygon(&thin, 4, 4)
+        );
+        let soft = Selection::polygon_quality(&thin, 4, 4, true);
+        assert_eq!(soft.coverage(0, 1, 4, 4), 64);
+        assert_eq!(soft.coverage(1, 1, 4, 4), 0);
+        let aligned = [(1., 1.), (4., 1.), (4., 4.), (1., 4.)];
+        assert_eq!(
+            Selection::polygon_quality(&aligned, 6, 6, true),
+            Selection::Rect(PixelRect::new(1, 1, 3, 3))
+        );
+        for points in [
+            vec![],
+            vec![(1., 1.)],
+            vec![(1., 1.), (2., 2.), (3., 3.)],
+            vec![(0., 0.), (f64::NAN, 1.), (2., 2.)],
+        ] {
+            assert_eq!(
+                Selection::polygon_quality(&points, 4, 4, true),
+                Selection::Empty
+            );
+        }
+        let distant = [(-1e12, -1e12), (4., -1e12), (4., 4.), (-1e12, 4.)];
+        assert_eq!(
+            Selection::polygon_quality(&distant, 4, 4, true),
+            Selection::Full
+        );
+        assert_eq!(
+            Selection::polygon_quality(&aligned, 0, 6, true),
+            Selection::Empty
+        );
+    }
+
+    #[test]
+    fn feathering_matches_a_fixed_kernel_with_zero_coverage_beyond_the_canvas() {
+        let (width, height) = (7, 6);
+        let selections = [
+            Selection::Full,
+            Selection::Rect(PixelRect::new(0, 0, 2, 3)),
+            Selection::ellipse_rect_quality(PixelRect::new(-2, 1, 7, 7), width, height, true),
+            Selection::polygon_quality(&[(-1.2, 0.2), (5.4, 1.2), (1.7, 5.8)], width, height, true),
+        ];
+        for source in selections {
+            assert_eq!(source.clone().feather(0, width, height), source);
+            for radius in [1, 2, 3, 128] {
+                let soft = source.clone().feather(radius, width, height);
+                let area = (u64::from(radius) * 2 + 1).pow(2);
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut sum = 0u64;
+                        for sy in 0..height {
+                            for sx in 0..width {
+                                if sx.abs_diff(x) <= radius && sy.abs_diff(y) <= radius {
+                                    sum += u64::from(source.coverage(
+                                        i64::from(sx),
+                                        i64::from(sy),
+                                        width,
+                                        height,
+                                    ));
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            soft.coverage(i64::from(x), i64::from(y), width, height),
+                            ((sum + area / 2) / area) as u8
+                        );
+                    }
+                }
+                assert_eq!(soft.coverage(-1, 0, width, height), 0);
+            }
+        }
+        let full = Selection::Full.feather(1, 3, 3);
+        assert_eq!(full.coverage(0, 0, 3, 3), 113);
+        assert_eq!(full.coverage(1, 1, 3, 3), 255);
+        assert_eq!(
+            Selection::Unrestricted.feather(3, 3, 3),
+            Selection::Unrestricted
+        );
+        assert_eq!(Selection::Empty.feather(3, 3, 3), Selection::Empty);
+    }
+
+    #[test]
+    fn soft_polygon_coverage_is_shared_by_fill_and_clear() {
+        use crate::document::{DocumentContent, FillMode, FillRequest};
+        let selection =
+            Selection::polygon_quality(&[(0.21, 0.32), (6.43, 1.27), (1.74, 7.86)], 8, 8, true)
+                .feather(1, 8, 8);
+        let mut filled = DocumentContent::single_layer("fill".into(), RgbaImage::new(8, 8));
+        let fill_layer = filled.top_layer_id();
+        filled.fill_bucket(
+            fill_layer,
+            1,
+            1,
+            Rgba([255; 4]),
+            &selection,
+            FillRequest {
+                mode: FillMode::Selection,
+                sample_all: false,
+                tolerance: 0,
+            },
+        );
+        let mut cleared = DocumentContent::single_layer(
+            "clear".into(),
+            RgbaImage::from_pixel(8, 8, Rgba([255; 4])),
+        );
+        let clear_layer = cleared.top_layer_id();
+        cleared.clear(clear_layer, &selection);
+        for y in 0..8 {
+            for x in 0..8 {
+                let coverage = selection.coverage(i64::from(x), i64::from(y), 8, 8);
+                assert_eq!(
+                    filled.layer(fill_layer).unwrap().pixels.get_pixel(x, y)[3],
+                    coverage
+                );
+                assert_eq!(
+                    cleared.layer(clear_layer).unwrap().pixels.get_pixel(x, y)[3],
+                    255 - coverage
+                );
+            }
+        }
     }
 
     #[test]

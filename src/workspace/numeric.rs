@@ -42,6 +42,7 @@ pub(super) enum NumericField {
     CropRatioWidth,
     CropRatioHeight,
     BrushFlow,
+    SelectionFeatherRadius,
 }
 
 impl NumericField {
@@ -76,6 +77,7 @@ impl NumericField {
             Self::CropRatioWidth => 26,
             Self::CropRatioHeight => 27,
             Self::BrushFlow => 28,
+            Self::SelectionFeatherRadius => 29,
         }
     }
 
@@ -151,6 +153,7 @@ impl NumericField {
                 | Self::SelectionRatioHeight
                 | Self::CropRatioWidth
                 | Self::CropRatioHeight
+                | Self::SelectionFeatherRadius
         )
     }
 
@@ -158,6 +161,7 @@ impl NumericField {
         let (min, max) = match self {
             Self::Tolerance => (0, 255),
             Self::GridSpacing => (1, 4096),
+            Self::SelectionFeatherRadius => (0, 128),
             Self::SelectionRatioWidth
             | Self::SelectionRatioHeight
             | Self::CropRatioWidth
@@ -374,6 +378,7 @@ impl Workspace {
             NumericField::MoveX => self.move_offset().map(|offset| i64::from(offset.0)),
             NumericField::MoveY => self.move_offset().map(|offset| i64::from(offset.1)),
             NumericField::GridSpacing => Some(i64::from(self.grid_spacing)),
+            NumericField::SelectionFeatherRadius => Some(i64::from(self.selection_feather_radius)),
         }
     }
 
@@ -884,6 +889,7 @@ impl Workspace {
         match field {
             NumericField::Tolerance => self.tolerance = value as u8,
             NumericField::GridSpacing => self.grid_spacing = value as u32,
+            NumericField::SelectionFeatherRadius => self.selection_feather_radius = value as u32,
             NumericField::SelectionRatioWidth | NumericField::SelectionRatioHeight => {
                 if field == NumericField::SelectionRatioWidth {
                     self.selection_ratio_value.width = value as u32;
@@ -1038,6 +1044,24 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_feather_radius_is_a_bounded_setting_and_empty_text_keeps_its_original() {
+        let field = NumericField::SelectionFeatherRadius;
+        assert!(field.is_tool_option());
+        assert!(!field.is_selection());
+        assert_eq!(field.constrain(-1), 0);
+        assert_eq!(field.constrain(129), 128);
+        let mut edit = NumericEdit::new(field, 8, None);
+        edit.insert_digits("128");
+        assert_eq!(field.parse(&edit.text), Some(128));
+        edit.selected = true;
+        edit.backspace();
+        assert_eq!(field.parse(&edit.text), None);
+        assert_eq!(edit.original, 8);
+        assert!(!field.accepts_character('-'));
+        assert!(!field.accepts_character('.'));
+    }
 
     #[test]
     fn move_coordinates_accept_signed_pixel_positions_and_reject_overflow() {

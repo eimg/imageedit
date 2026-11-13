@@ -789,12 +789,6 @@ impl Workspace {
                 }),
             ));
         }
-        let antialias = self.active_selection_antialias();
-        options = options.child(
-            toggle_button("Antialias edges", antialias).on_click(cx.listener(
-                move |this, _, window, cx| this.set_selection_antialias(!antialias, window, cx),
-            )),
-        );
         if !(self.tool == Tool::OvalSelect && self.oval_circle) {
             options = options.child(self.aspect_options(false, cx));
         }
@@ -812,6 +806,34 @@ impl Workspace {
                 .child(self.selection_size_row(cx));
         }
         options
+    }
+
+    fn selection_creation_options(&self, cx: &Context<Self>) -> Div {
+        let antialias = self.active_selection_antialias();
+        div().flex().flex_col().gap_2()
+            .child(section_label("EDGES"))
+            .when(matches!(self.tool, Tool::Select | Tool::OvalSelect), |panel| panel.child(
+                toggle_button("Antialias edges", antialias).on_click(cx.listener(
+                    move |this, _, window, cx| this.set_selection_antialias(!antialias, window, cx),
+                ))
+            ))
+            .when(self.tool == Tool::FreeSelect, |panel| panel.child(
+                toggle_button("Antialias edges", self.free_antialias)
+                    .tooltip(tooltip("Use subpixel coverage when a new free selection closes"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.free_antialias = !this.free_antialias;
+                        cx.notify();
+                    }))
+            ))
+            .child(toggle_button("Feather new selections", self.selection_feather_enabled)
+                .tooltip(tooltip("Soften new selections when completed; keep the current selection unchanged"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.selection_feather_enabled = !this.selection_feather_enabled;
+                    cx.notify();
+                })))
+            .when(self.selection_feather_enabled, |panel| panel.child(
+                self.numeric_chip(NumericField::SelectionFeatherRadius, Some("Feather radius (px)"), cx)
+            ))
     }
 
     fn aspect_options(&self, crop: bool, cx: &Context<Self>) -> Div {
@@ -1609,7 +1631,7 @@ impl Workspace {
                                     let enabled = self.selection_command_enabled(
                                         super::selection::SelectionCommand::None,
                                     );
-                                    panel.child(
+                                    panel.child(self.selection_creation_options(cx)).child(
                                         div()
                                             .flex()
                                             .flex_col()

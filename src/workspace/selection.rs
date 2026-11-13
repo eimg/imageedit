@@ -53,6 +53,14 @@ enum SelectionHit {
 }
 
 impl Workspace {
+    fn creation_feather_radius(&self) -> u32 {
+        if self.selection_feather_enabled {
+            self.selection_feather_radius
+        } else {
+            0
+        }
+    }
+
     pub(super) fn active_selection_radius(&self) -> u32 {
         match self
             .selection_preview
@@ -287,8 +295,11 @@ impl Workspace {
         let preview = self.selection_preview.take();
         match (gesture, preview) {
             (Some(SelectionGesture::Create { op, .. }), Some(shape)) => {
+                let feather = self.creation_feather_radius();
                 self.update_selection(
-                    move |current, (width, height)| current.combine(shape, op, width, height),
+                    move |current, size| {
+                        combine_created_selection(current, shape, op, size, feather)
+                    },
                     window,
                     cx,
                 );
@@ -654,6 +665,8 @@ impl Workspace {
         self.free_drag_origin = None;
         self.free_dragging = false;
         let op = self.free_op;
+        let antialias = self.free_antialias;
+        let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, (width, height)| {
                 let points: Vec<_> = points
@@ -665,11 +678,11 @@ impl Workspace {
                         )
                     })
                     .collect();
-                let shape = Selection::polygon(&points, width, height);
+                let shape = Selection::polygon_quality(&points, width, height, antialias);
                 if shape == Selection::Empty {
                     current
                 } else {
-                    current.combine(shape, op, width, height)
+                    combine_created_selection(current, shape, op, (width, height), feather)
                 }
             },
             window,
@@ -715,6 +728,7 @@ impl Workspace {
         let layer = tab.active_layer;
         let op = selection_op(modifiers);
         let tolerance = self.tolerance;
+        let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, size| {
                 let Some(source) = wand_source(&content, layer, sample_all, (x, y)) else {
@@ -728,7 +742,7 @@ impl Workspace {
                     source.offset,
                     size,
                 );
-                current.combine(shape, op, size.0, size.1)
+                combine_created_selection(current, shape, op, size, feather)
             },
             window,
             cx,
@@ -850,6 +864,22 @@ struct WandSource {
     pixels: std::sync::Arc<image::RgbaImage>,
     offset: (i32, i32),
     point: (u32, u32),
+}
+
+fn combine_created_selection(
+    current: Selection,
+    incoming: Selection,
+    op: SelectionOp,
+    size: (u32, u32),
+    feather: u32,
+) -> Selection {
+    // Only soften the new region. Repeated additions must not blur old coverage.
+    current.combine(
+        incoming.feather(feather, size.0, size.1),
+        op,
+        size.0,
+        size.1,
+    )
 }
 
 fn wand_source(
@@ -1122,6 +1152,81 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_feather_softens_only_the_incoming_region_before_combining() {
+        let size = (20, 12);
+        let current = Selection::Rect(PixelRect::new(1, 1, 4, 4));
+        let incoming = Selection::Rect(PixelRect::new(10, 4, 4, 4));
+        let soft = incoming.clone().feather(1, size.0, size.1);
+        let added =
+            combine_created_selection(current.clone(), incoming.clone(), SelectionOp::Add, size, 1);
+        assert_eq!(added.coverage(1, 1, size.0, size.1), 255);
+        assert_eq!(added.coverage(0, 0, size.0, size.1), 0);
+        assert_eq!(
+            added.coverage(10, 4, size.0, size.1),
+            soft.coverage(10, 4, size.0, size.1)
+        );
+        assert!(added.coverage(9, 3, size.0, size.1) > 0);
+        let replaced = combine_created_selection(
+            current.clone(),
+            incoming.clone(),
+            SelectionOp::Replace,
+            size,
+            1,
+        );
+        assert_eq!(replaced, soft);
+        let subtracted = combine_created_selection(
+            Selection::Full,
+            incoming.clone(),
+            SelectionOp::Subtract,
+            size,
+            1,
+        );
+        let intersected = combine_created_selection(
+            Selection::Full,
+            incoming.clone(),
+            SelectionOp::Intersect,
+            size,
+            1,
+        );
+        for y in 0..size.1 {
+            for x in 0..size.0 {
+                let coverage = soft.coverage(i64::from(x), i64::from(y), size.0, size.1);
+                assert_eq!(
+                    subtracted.coverage(i64::from(x), i64::from(y), size.0, size.1),
+                    255 - coverage
+                );
+                assert_eq!(
+                    intersected.coverage(i64::from(x), i64::from(y), size.0, size.1),
+                    coverage
+                );
+            }
+        }
+        // Disabling feather is exactly the previous hard-selection combination.
+        assert_eq!(
+            combine_created_selection(current.clone(), incoming.clone(), SelectionOp::Add, size, 0),
+            current.combine(incoming, SelectionOp::Add, size.0, size.1)
+        );
+    }
+
+    #[test]
+    fn wand_creation_feather_preserves_coverage_at_layer_offsets_and_canvas_edges() {
+        use image::{Rgba, RgbaImage};
+        let pixels = RgbaImage::from_pixel(3, 3, Rgba([10, 20, 30, 255]));
+        let incoming = Selection::flood(&pixels, 0, 0, 0, (-1, 1), (6, 5));
+        let selected = combine_created_selection(
+            Selection::Unrestricted,
+            incoming,
+            SelectionOp::Replace,
+            (6, 5),
+            1,
+        );
+        assert_eq!(selected.coverage(0, 1, 6, 5), 113);
+        assert_eq!(selected.coverage(2, 2, 6, 5), 85);
+        assert_eq!(selected.coverage(-1, 2, 6, 5), 0);
+        assert_eq!(selected.coverage(4, 2, 6, 5), 0);
+    }
 
     #[test]
     fn soft_geometry_changes_and_undo_preserve_the_saved_revision() {

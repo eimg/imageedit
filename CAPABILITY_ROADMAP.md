@@ -23,11 +23,13 @@ is left to the maintainer. A checked item does not imply native interaction QA.
 ## Selection quality
 
 - [x] Optional antialiasing for oval/circle and rounded-rectangle edges.
-- [ ] Optional antialiasing for polygon and wand selection edges.
-- [ ] Optional feathering at selection creation with an explicit radius.
+- [x] Optional antialiasing for freehand/polygon selection edges.
+- [ ] Optional antialiasing for wand selection edges.
+- [x] Optional feathering at selection creation with an explicit radius.
 - [x] Preserve soft coverage through Grow/Shrink and combinations.
-- [ ] Define feathering at canvas boundaries consistently.
+- [x] Define feathering at canvas boundaries consistently.
 - [x] Exact geometric selection position/size controls and fixed-ratio constraints.
+- [ ] Retain editable source geometry for feathered geometric selections.
 
 Acceptance: fill, paint, clear, clipboard, adjustments, and filters consume the
 same coverage; selection-only changes preserve the saved revision; geometry
@@ -679,7 +681,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 10 — remembered and repeated effects
 
-Implemented; committed at the start of Pass 11:
+Implemented; committed as `8c9318c` at the start of Pass 11:
 
 - All seven adjustments and three filters reopen with their own last successfully
   applied parameters, shared across tabs for the app session. Color Balance keeps
@@ -730,3 +732,65 @@ Manual interaction testing stays with the maintainer. Useful checks:
   Repeat with a constrained destination stack and confirm it is rejected cleanly.
 - Leave a gradient/transform/crop/free-selection draft or an active pointer
   gesture and confirm Repeat/Reopen cannot silently discard that work.
+
+## Pass 11 — polygon edge quality and selection creation feathering
+
+Implemented; committed at the start of Pass 12:
+
+- Free Select has an independent Antialias edges preference for new closed
+  freehand/polygon selections, default off. Four vertical scans and four
+  horizontal subpixel samples produce fractional coverage using nonzero winding.
+  Clipped shapes, opposite winding, holes, crossings, thin shapes, and aligned
+  edges retain their geometry. Paths and antialias-off polygons keep hard
+  center sampling. The normal byte mask holds counts; no 4x-size image is built.
+- Rectangle Select, Oval Select, Free Select, and Magic Wand expose Feather new
+  selections, default off, with a shared explicit radius (0–128 image pixels,
+  initially 8). The setting is remembered for the workspace session. Empty text
+  and Escape restore its previous value; settings changes do not edit history or
+  dirty the image. A radius of zero bypasses feathering.
+- Only the incoming selection is feathered, then combined with the existing
+  mask. Shift/add, Control/subtract, and Shift-Control/intersect therefore retain
+  old coverage rather than repeatedly softening it. Existing geometry moves,
+  resizes, and typed dimensions do not apply creation feathering retroactively.
+  Free Select still closes on its start node/Return and rejects degenerate shapes.
+- Polygon coverage and feathering run inside the existing background selection
+  job when the new gesture finishes. Pointer gestures retain their ordinary
+  geometric outline; the final selection publishes with soft coverage in one
+  selection-only undo entry. Wand feathering honors layer offsets and clipping.
+  Pixel tools consume the same mask, retaining existing selection/history rules.
+- Canvas-boundary feathering is explicitly defined and checked: its square
+  averaging kernel treats outside-canvas coverage as zero and keeps its full
+  denominator. Bounded Full selections soften at the image boundary as well.
+  Unrestricted is no mask and remains unrestricted. Coverage cannot escape the
+  canvas; grow/shrink behavior is unchanged.
+- Feathered selections use the existing mask representation, so analytic
+  geometry fields/handles are unavailable afterward, as with Select → Feather.
+  Retaining editable source geometry is recorded separately. Wand antialiasing
+  remains planned; feathering does not claim color-aware edge recovery.
+- No toolbox tool, dependency, project-format, version, or publishing changes.
+
+Automatic validation: formatting, Clippy with warnings denied, all 324 tests,
+and both release benchmarks pass. Seven new regression tests compare subpixel
+winding and feather coverage to independent references, check thin/clipped/
+invalid shapes, exercise actual fill/clear alpha, preserve incoming-only
+combination semantics and offset wand coverage, and validate radius input.
+Existing selection history, saved revision, clipboard, paint, and effect tests
+remain passing. The macOS app is rebuilt and its signature verified.
+No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Close diagonal/thin/concave Free Select outlines with antialias on/off. Zoom in,
+  fill or clear, and compare edges. Confirm aligned rectangles stay crisp with
+  antialias on, and Escape still cancels an unfinished outline.
+- Enable creation feathering on each of the four selection tools. Change radius,
+  clear/Escape its field, then create a new selection. Verify the existing mask
+  stays unchanged until another selection is completed and the option survives
+  tool changes. Check that no creation setting alone changes the saved marker.
+- Add/subtract/intersect feathered regions repeatedly, including regions touching
+  the canvas edge and active layers with offsets. Confirm old edges do not fade
+  again. Undo/Redo selections and verify pixels/saved revisions remain unchanged.
+- Use feathered selections with paint, fill, Clear, clipboard, adjustments, and
+  filters. Compare alpha/coverage, including around the canvas border and after
+  Select All → Feather. Check that radius zero and disabled feather preserve
+  existing hard selection behavior and numeric geometry controls.
