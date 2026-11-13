@@ -56,6 +56,7 @@ pub struct DocumentContent {
     pub(super) layers: Vec<RasterLayer>,
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
+    guides: Vec<crate::guides::Guide>,
 }
 
 struct ScaledLayer {
@@ -82,6 +83,7 @@ impl DocumentContent {
             }],
             paths: Vec::new(),
             active_path: None,
+            guides: Vec::new(),
         }
     }
 
@@ -104,7 +106,22 @@ impl DocumentContent {
             layers,
             paths: Vec::new(),
             active_path: None,
+            guides: Vec::new(),
         })
+    }
+
+    pub fn guides(&self) -> &[crate::guides::Guide] {
+        &self.guides
+    }
+
+    pub fn set_guides(&mut self, guides: Vec<crate::guides::Guide>) -> Result<()> {
+        ensure!(
+            guides.len() <= crate::guides::MAX_GUIDES
+                && guides.iter().all(|guide| guide.valid(self.size())),
+            "Invalid or excessive image guides"
+        );
+        self.guides = guides;
+        Ok(())
     }
 
     pub fn paths(&self) -> &[crate::paths::VectorPath] {
@@ -546,6 +563,7 @@ impl DocumentContent {
     // One full-canvas layer with default properties and its import name.
     pub fn is_plain_raster(&self) -> bool {
         self.paths.is_empty()
+            && self.guides.is_empty()
             && self
                 .full_canvas_layer()
                 .is_some_and(|layer| layer.name == IMPORTED_LAYER_NAME && layer.text.is_none())
@@ -610,6 +628,16 @@ impl DocumentContent {
         (self.width, self.height) = (crop.width, crop.height);
         let origin = (f64::from(crop.x), f64::from(crop.y));
         self.map_paths(|point| (point.0 - origin.0, point.1 - origin.1));
+        self.guides = self
+            .guides
+            .iter()
+            .filter_map(|guide| {
+                guide.translated(
+                    (-i64::from(crop.x), -i64::from(crop.y)),
+                    (crop.width, crop.height),
+                )
+            })
+            .collect();
         true
     }
 
@@ -1568,6 +1596,9 @@ impl DocumentContent {
             layer.offset = offset;
         }
         self.map_paths(|point| crate::paths::turn_point(point, canvas, turn));
+        self.guides
+            .iter_mut()
+            .for_each(|guide| *guide = guide.turned(canvas, turn));
         (self.width, self.height) = crate::transform::turned_size(canvas.0, canvas.1, turn);
         true
     }
@@ -1597,6 +1628,9 @@ impl DocumentContent {
             layer.offset = offset;
         }
         self.map_paths(|point| crate::paths::mirror_point(point, canvas, mirror));
+        self.guides
+            .iter_mut()
+            .for_each(|guide| *guide = guide.mirrored(canvas, mirror));
         true
     }
 
@@ -1647,6 +1681,9 @@ impl DocumentContent {
             layer.offset = placement.offset;
         }
         self.map_paths(|point| crate::paths::scale_point(point, old, (width, height)));
+        self.guides
+            .iter_mut()
+            .for_each(|guide| *guide = guide.scaled(old, (width, height)));
         self.width = width;
         self.height = height;
         true
@@ -1759,6 +1796,13 @@ impl DocumentContent {
         }
         let shift = (f64::from(delta.0), f64::from(delta.1));
         self.map_paths(|point| crate::paths::translate_point(point, shift));
+        self.guides = self
+            .guides
+            .iter()
+            .filter_map(|guide| {
+                guide.translated((i64::from(delta.0), i64::from(delta.1)), (width, height))
+            })
+            .collect();
         self.width = width;
         self.height = height;
         Some(delta)
@@ -2097,6 +2141,85 @@ fn mix_fill(before: Rgba<u8>, color: Rgba<u8>, coverage: u8) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_operations_transform_guides_and_guides_require_project_saving() {
+        use crate::guides::{Axis, Guide, MAX_GUIDES};
+        use crate::transform::{Anchor, Mirror, Resample, Turn};
+        let mut content =
+            DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), RgbaImage::new(10, 6));
+        assert!(content.is_plain_raster());
+        let guides = vec![
+            Guide {
+                axis: Axis::Vertical,
+                position: 3,
+            },
+            Guide {
+                axis: Axis::Horizontal,
+                position: 2,
+            },
+        ];
+        content.set_guides(guides.clone()).unwrap();
+        assert!(!content.is_plain_raster());
+        assert!(
+            content
+                .set_guides(vec![Guide {
+                    axis: Axis::Vertical,
+                    position: 11
+                }])
+                .is_err()
+        );
+        assert!(content.set_guides(vec![guides[0]; MAX_GUIDES + 1]).is_err());
+        assert_eq!(content.guides(), guides);
+        assert!(content.turn_image(Turn::Right));
+        assert_eq!(
+            content.guides(),
+            &[
+                Guide {
+                    axis: Axis::Horizontal,
+                    position: 3
+                },
+                Guide {
+                    axis: Axis::Vertical,
+                    position: 4
+                }
+            ]
+        );
+        assert!(content.mirror_image(Mirror::Vertical));
+        assert_eq!(content.guides()[0].position, 7);
+        assert!(content.scale_image(12, 20, Resample::Nearest));
+        assert_eq!(content.guides()[0].position, 14);
+        assert_eq!(content.guides()[1].position, 8);
+        content.resize_canvas(16, 24, Anchor::Center).unwrap();
+        assert_eq!(content.guides()[0].position, 16);
+        assert_eq!(content.guides()[1].position, 10);
+        assert!(content.crop(CropRect {
+            x: 2,
+            y: 10,
+            width: 10,
+            height: 10
+        }));
+        assert_eq!(
+            content.guides(),
+            &[
+                Guide {
+                    axis: Axis::Horizontal,
+                    position: 6
+                },
+                Guide {
+                    axis: Axis::Vertical,
+                    position: 8
+                }
+            ]
+        );
+        assert!(content.crop(CropRect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4
+        }));
+        assert!(content.guides().is_empty());
+    }
 
     #[test]
     fn bucket_fill_crosses_hidden_rgb_on_clear_pixels_and_respects_a_soft_selection() {

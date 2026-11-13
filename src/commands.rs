@@ -90,6 +90,8 @@ actions!(
         PreviousTab,
         ToggleGrid,
         ToggleGuides,
+        ToggleSnapGrid,
+        ToggleSnapGuides,
         ToggleLayerBoundary,
         MinimizeWindow,
         ZoomWindow,
@@ -263,7 +265,7 @@ impl Tool {
     pub fn help(self) -> &'static str {
         match self {
             Self::Move => {
-                "Drag to move the active layer; Escape cancels. Type signed X/Y coordinates for a live preview; Return or leaving the field commits, and Escape or empty text restores the position. Arrow keys nudge one image pixel, or ten with Shift; releasing an arrow commits the key sequence. The alignment buttons place the layer against a canvas edge or center it. View → Toggle Layer Boundary shows its bounds."
+                "Drag to move the active layer; Escape cancels. Snap to Grid/Guides aligns layer edges and centers; Control temporarily bypasses snapping and guide grabs. Typed X/Y positions and arrow nudges stay exact. Return or leaving an X/Y field commits; Escape or empty text restores it. Arrows nudge one image pixel, or ten with Shift; release commits the sequence. View → Toggle Rulers and Guides shows pixel rulers: drag from the top/left ruler to create a horizontal/vertical guide, drag a guide to move it, or release outside the canvas workspace to remove it. Guides are saved in Lime projects."
             }
             Self::Pan => {
                 "Drag to move the canvas. Hold Space and drag to pan temporarily from another tool."
@@ -695,7 +697,9 @@ pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
                 tool(Tool::Pan),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Grid", ToggleGrid),
-                MenuItem::action("Toggle Guides", ToggleGuides),
+                MenuItem::action("Toggle Rulers and Guides", ToggleGuides),
+                MenuItem::action("Snap to Grid", ToggleSnapGrid),
+                MenuItem::action("Snap to Guides", ToggleSnapGuides),
                 MenuItem::action("Toggle Layer Boundary", ToggleLayerBoundary),
             ],
         ),
@@ -1012,7 +1016,9 @@ mod tests {
             "400%",
             "Pan",
             "Toggle Grid",
-            "Toggle Guides",
+            "Toggle Rulers and Guides",
+            "Snap to Grid",
+            "Snap to Guides",
             "Toggle Layer Boundary",
             "menu:Image",
             "menu:Mode",

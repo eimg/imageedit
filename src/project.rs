@@ -17,7 +17,7 @@ pub const EXTENSION: &str = "lime";
 pub const LEGACY_EXTENSION: &str = "imageedit";
 // Preserve the on-disk signature so existing projects remain readable.
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 fn default_true() -> bool {
     true
@@ -37,6 +37,8 @@ struct Manifest {
     layers: Vec<LayerEntry>,
     paths: Vec<PathEntry>,
     active_path: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    guides: Vec<crate::guides::Guide>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -141,7 +143,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let manifest: Manifest =
         serde_json::from_slice(&manifest).context("Invalid project manifest")?;
     ensure!(
-        manifest.version == VERSION,
+        matches!(manifest.version, 6 | VERSION),
         "Unsupported Lime project version {}",
         manifest.version
     );
@@ -237,13 +239,18 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         })
         .collect();
     content.set_paths(paths, manifest.active_path.map(crate::paths::PathId))?;
+    content.set_guides(manifest.guides)?;
     Ok(content)
 }
 
 pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
     let (width, height) = content.size();
     let manifest = Manifest {
-        version: VERSION,
+        version: if content.guides().is_empty() {
+            6
+        } else {
+            VERSION
+        },
         mode: content.mode(),
         width,
         height,
@@ -298,6 +305,7 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
             })
             .collect(),
         active_path: content.active_path_id().map(|id| id.0),
+        guides: content.guides().to_vec(),
     };
     check_limits(&manifest)?;
     let manifest = serde_json::to_vec(&manifest)?;
@@ -331,6 +339,18 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
 
 // Reads and writes share these checks, which run before any pixel buffer is allocated.
 fn check_limits(manifest: &Manifest) -> Result<()> {
+    ensure!(
+        manifest.guides.len() <= crate::guides::MAX_GUIDES
+            && manifest
+                .guides
+                .iter()
+                .all(|guide| guide.valid((manifest.width, manifest.height))),
+        "Invalid or excessive image guides"
+    );
+    ensure!(
+        manifest.version != 6 || manifest.guides.is_empty(),
+        "Version 6 does not support image guides"
+    );
     ensure!(
         pixel_bytes(manifest.width, manifest.height).is_some_and(|bytes| bytes <= MAX_IMAGE_BYTES),
         "The project canvas is empty or too large"
@@ -489,11 +509,56 @@ mod tests {
         }
         assert_eq!(actual.paths(), expected.paths());
         assert_eq!(actual.active_path_id(), expected.active_path_id());
+        assert_eq!(actual.guides(), expected.guides());
     }
 
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         serde_json::from_slice(&bytes[12..12 + length]).unwrap()
+    }
+
+    #[test]
+    fn v7_guides_round_trip_and_legacy_v6_stays_readable() {
+        use crate::guides::{Axis, Guide, MAX_GUIDES};
+        let mut content = two_layers();
+        assert!(read_bytes(GOLDEN).unwrap().guides().is_empty());
+        let plain = manifest_json(&write_bytes(&content).unwrap());
+        assert_eq!(plain["version"], json!(6));
+        assert!(plain.get("guides").is_none());
+        content
+            .set_guides(vec![
+                Guide {
+                    axis: Axis::Vertical,
+                    position: 1,
+                },
+                Guide {
+                    axis: Axis::Horizontal,
+                    position: 2,
+                },
+            ])
+            .unwrap();
+        let bytes = write_bytes(&content).unwrap();
+        let mut manifest = manifest_json(&bytes);
+        assert_eq!(manifest["version"], json!(7));
+        assert_same(&read_bytes(&bytes).unwrap(), &content);
+        for guides in [
+            json!([{"axis":"vertical","position": u32::MAX}]),
+            json!([{"axis":"horizontal","position": -1}]),
+            json!([{"axis":"diagonal","position": 0}]),
+            json!(vec![
+                Guide {
+                    axis: Axis::Vertical,
+                    position: 0
+                };
+                MAX_GUIDES + 1
+            ]),
+        ] {
+            manifest["guides"] = guides;
+            assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+        }
+        manifest = manifest_json(&bytes);
+        manifest["version"] = json!(6);
+        assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
     }
 
     // Replaces the manifest of a valid project and keeps its payloads.
@@ -616,7 +681,7 @@ mod tests {
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
         let edits: [Edit; 27] = [
-            ("unknown version", &|m| m["version"] = json!(7)),
+            ("unknown version", &|m| m["version"] = json!(8)),
             ("previous version", &|m| m["version"] = json!(5)),
             ("long layer name", &|m| {
                 m["layers"][0]["name"] = json!("x".repeat(65))

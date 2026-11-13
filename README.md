@@ -72,6 +72,24 @@ a source again after changing tabs/layers or moving/resizing the layer. Wand and
 connected Fill treat fully transparent pixels as the same color even when their
 stored RGB differs; other alpha and tolerance comparisons stay in effect.
 
+Use **View → Toggle Grid** for a dotted grid anchored to image pixels, with
+contrasting dots and a default spacing of 16 image pixels.
+**View → Toggle Rulers and Guides** shows pixel rulers. With **Move**, drag from
+the top ruler for a horizontal guide or from the left ruler for a vertical one.
+Drag an existing guide to reposition it; drag back onto a ruler or outside the
+canvas workspace to remove it. Escape cancels the drag. Guide edits undo/redo,
+and guides follow image crop, resize, scale, rotate, and flip.
+
+Move's **Snap to Grid** and **Snap to Guides** controls work independently of
+overlay visibility. They snap layer edges and centers within a small screen
+distance. Hold Control while dragging to bypass snapping and guide grabs.
+Typed positions and arrow nudges remain exact. Grid spacing is in image pixels;
+dots thin out at low zoom while snapping keeps the chosen spacing.
+
+Guides are stored in **`.lime`** projects, never flattened exports. A project
+containing guides uses format version 7 and needs this build or newer. Existing
+version 6 projects still open; projects without guides retain version 6 on save.
+
 | Action | macOS | Windows |
 | --- | --- | --- |
 | Open / Save | ⌘O / ⌘S | Ctrl+O / Ctrl+S |

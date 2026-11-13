@@ -34,6 +34,7 @@ pub(super) enum NumericField {
     RotateAngle,
     MoveX,
     MoveY,
+    GridSpacing,
 }
 
 impl NumericField {
@@ -60,6 +61,7 @@ impl NumericField {
             Self::RotateAngle => 18,
             Self::MoveX => 19,
             Self::MoveY => 20,
+            Self::GridSpacing => 21,
         }
     }
 
@@ -125,12 +127,14 @@ impl NumericField {
                 | Self::BrushOpacity
                 | Self::PathStrokeSize
                 | Self::RotateAngle
+                | Self::GridSpacing
         )
     }
 
     fn constrain(self, value: i64) -> i64 {
         let (min, max) = match self {
             Self::Tolerance => (0, 255),
+            Self::GridSpacing => (1, 4096),
             Self::RotateAngle => (-3600, 3600),
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
             Self::BrushSpacing => (1, 100),
@@ -325,6 +329,7 @@ impl Workspace {
                 .map(|degrees| (degrees * 10.).round() as i64),
             NumericField::MoveX => self.move_offset().map(|offset| i64::from(offset.0)),
             NumericField::MoveY => self.move_offset().map(|offset| i64::from(offset.1)),
+            NumericField::GridSpacing => Some(i64::from(self.grid_spacing)),
         }
     }
 
@@ -786,6 +791,7 @@ impl Workspace {
         let value = field.constrain(value);
         match field {
             NumericField::Tolerance => self.tolerance = value as u8,
+            NumericField::GridSpacing => self.grid_spacing = value as u32,
             NumericField::BrushSize => self.set_brush_value(BrushField::Size, value as u32, cx),
             NumericField::BrushSpacing => {
                 self.set_brush_value(BrushField::Spacing, value as u32, cx)

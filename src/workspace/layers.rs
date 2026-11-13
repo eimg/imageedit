@@ -408,6 +408,7 @@ impl Workspace {
             return;
         };
         if !tab.busy() && tab.active_layer != id && tab.document.content.layer(id).is_some() {
+            self.guide_drag = None;
             self.pending_nudge = None;
             self.clone_source = None;
             tab.active_layer = id;
@@ -899,7 +900,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.move_drag.is_some() || self.active_tab().is_none_or(|tab| tab.busy()) {
+        if self.guide_drag.is_some()
+            || self.move_drag.is_some()
+            || !self.viewport.get().contains(&position)
+            || self.active_tab().is_none_or(|tab| tab.busy())
+        {
             return;
         }
         let Some(anchor) = self.unclamped_pointer_pixel(position, scale) else {
@@ -971,6 +976,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.tool != crate::commands::Tool::Move
+            || self.guide_drag.is_some()
             || self.space_pan
             || self.numeric_edit.is_some()
             || self.form.is_some()
@@ -1145,6 +1151,7 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        bypass_snap: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self
@@ -1165,6 +1172,34 @@ impl Workspace {
                 shift_offset(drag.origin.0, pointer.0.saturating_sub(drag.anchor.0)),
                 shift_offset(drag.origin.1, pointer.1.saturating_sub(drag.anchor.1)),
             )
+        };
+        let offset = if !bypass_snap && offset != drag.origin {
+            self.active_tab()
+                .and_then(|tab| {
+                    let layer = tab.document.content.layer(drag.layer)?;
+                    let geometry = super::canvas_tools::PreviewGeometry::for_tab(
+                        tab,
+                        self.viewport.get(),
+                        scale,
+                    )?;
+                    let factor = f64::from(f32::from(geometry.bounds.size.width))
+                        / f64::from(tab.document.width());
+                    Some(crate::guides::snap_move(
+                        offset,
+                        layer.pixels.dimensions(),
+                        tab.document.content.size(),
+                        self.snap_grid.then_some(self.grid_spacing),
+                        if self.snap_guides {
+                            tab.document.content.guides()
+                        } else {
+                            &[]
+                        },
+                        6. / factor,
+                    ))
+                })
+                .unwrap_or(offset)
+        } else {
+            offset
         };
         self.update_move_offset(offset, cx);
     }

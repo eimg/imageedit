@@ -7,6 +7,7 @@ mod dialogs;
 mod files;
 mod filter_ui;
 mod gradient_ui;
+mod guide_ui;
 mod history;
 mod layers;
 mod numeric;
@@ -67,6 +68,7 @@ struct Tab {
     pending_text: Option<text_ui::TextDraft>,
     // Keep the slider at the released value while the canvas patch renders.
     pending_opacity: Option<(LayerId, u8)>,
+    pending_guides: Option<Vec<crate::guides::Guide>>,
 }
 
 impl Tab {
@@ -128,6 +130,7 @@ impl Tab {
     ) -> (bool, Vec<Arc<RenderImage>>) {
         self.editing = false;
         self.pending_opacity = None;
+        self.pending_guides = None;
         let Some((content, edited_layer, edited_selection, patch)) = result else {
             return (false, Vec::new());
         };
@@ -231,6 +234,10 @@ pub struct Workspace {
     recent_colors: Vec<u32>,
     show_grid: bool,
     show_guides: bool,
+    guide_drag: Option<guide_ui::GuideDrag>,
+    snap_grid: bool,
+    snap_guides: bool,
+    grid_spacing: u32,
     show_layer_bounds: bool,
     viewport: Rc<Cell<Bounds<Pixels>>>,
     canvas_cursor: Rc<CanvasCursor>,
@@ -347,6 +354,7 @@ impl Workspace {
                 workspace.canvas_cursor.leave();
                 workspace.pan_drag = None;
                 workspace.space_pan = false;
+                workspace.cancel_guide(cx);
                 workspace.pending_nudge = None;
                 workspace.crop_drag = None;
                 workspace.selection_drag = None;
@@ -452,6 +460,10 @@ impl Workspace {
             recent_colors: Vec::new(),
             show_grid: false,
             show_guides: false,
+            guide_drag: None,
+            snap_grid: false,
+            snap_guides: false,
+            grid_spacing: 16,
             show_layer_bounds: false,
             viewport: Rc::default(),
             canvas_cursor: Rc::default(),
@@ -600,6 +612,7 @@ impl Workspace {
             selection: Selection::Unrestricted,
             pending_text: None,
             pending_opacity: None,
+            pending_guides: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -620,6 +633,7 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let switched = self.active != Some(index);
         if switched {
+            self.cancel_guide(cx);
             self.pending_nudge = None;
             self.clone_source = None;
             self.commit_numeric_edit(window, cx);
@@ -664,6 +678,7 @@ impl Workspace {
         self.pan_drag = None;
         let closed_active = self.active == Some(index);
         if closed_active {
+            self.cancel_guide(cx);
             self.pending_nudge = None;
             self.clone_source = None;
             self.numeric_followup = None;
@@ -771,6 +786,7 @@ impl Workspace {
             });
             return;
         }
+        self.cancel_guide(cx);
         self.dismiss_effect_form(window, cx);
         self.clear_crop();
         self.clear_selection_gesture();
@@ -1046,6 +1062,7 @@ mod tests {
             selection: Selection::Unrestricted,
             pending_text: None,
             pending_opacity: None,
+            pending_guides: None,
         }
     }
 

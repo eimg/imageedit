@@ -19,8 +19,8 @@ use crate::commands::{
     ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
     InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, NudgeLayer, OPEN_HINT, OpenImage,
     PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
-    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary, Tool,
-    Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary,
+    ToggleSnapGrid, ToggleSnapGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -70,6 +70,12 @@ impl Render for Workspace {
             // cursor immediately, including while a numeric field has focus.
             .on_modifiers_changed(cx.listener(
                 |this, _: &gpui::ModifiersChangedEvent, window, cx| {
+                    this.extend_move(
+                        window.mouse_position(),
+                        window.scale_factor(),
+                        window.modifiers().control,
+                        cx,
+                    );
                     this.extend_warp_drag(
                         window.mouse_position(),
                         window.scale_factor(),
@@ -94,12 +100,26 @@ impl Render for Workspace {
                     this.commit_numeric_edit(window, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    this.extend_opacity_drag(event.position, cx);
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.extend_opacity_drag(event.position, cx);
+                        this.extend_guide(event.position, window.scale_factor(), cx);
+                    }
+                }),
+            )
+            .capture_any_mouse_up(cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                this.end_opacity_drag(event, window, cx);
+                if event.button == MouseButton::Left {
+                    this.finish_guide(event.position, window, cx);
                 }
             }))
-            .capture_any_mouse_up(cx.listener(Self::end_opacity_drag))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.finish_guide(event.position, window, cx)
+                }),
+            )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
@@ -127,6 +147,7 @@ impl Render for Workspace {
                         });
                     }
                     if changed {
+                        this.cancel_guide(cx);
                         this.pending_nudge = None;
                         this.commit_numeric_edit(window, cx);
                         this.numeric_followup = None;
@@ -373,7 +394,16 @@ impl Render for Workspace {
                     this.show_grid = !this.show_grid;
                     cx.notify();
                 }))
+                .on_action(cx.listener(|this, _: &ToggleSnapGrid, _, cx| {
+                    this.snap_grid = !this.snap_grid;
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSnapGuides, _, cx| {
+                    this.snap_guides = !this.snap_guides;
+                    cx.notify();
+                }))
                 .on_action(cx.listener(|this, _: &ToggleGuides, _, cx| {
+                    this.cancel_guide(cx);
                     this.show_guides = !this.show_guides;
                     cx.notify();
                 }))
@@ -903,6 +933,22 @@ impl Workspace {
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(SELECTED)))
             .map(|area| match self.active_tab() {
                 Some(tab) => area
+                    .capture_any_mouse_down(cx.listener(
+                        |this, event: &gpui::MouseDownEvent, window, cx| {
+                            if event.button == MouseButton::Left
+                                && !this.space_pan
+                                && ((!event.modifiers.control
+                                    && this.begin_guide(event.position, window.scale_factor(), cx))
+                                    || (this.show_guides
+                                        && super::guide_ui::ruler_hit(
+                                            this.viewport.get(),
+                                            event.position,
+                                        )))
+                            {
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
                     .on_scroll_wheel(cx.listener(
                         |this, event: &gpui::ScrollWheelEvent, window, cx| {
                             let delta = event.delta.pixel_delta(px(36.));
@@ -953,7 +999,12 @@ impl Workspace {
                                         window.scale_factor(),
                                         cx,
                                     );
-                                    this.extend_move(event.position, window.scale_factor(), cx);
+                                    this.extend_move(
+                                        event.position,
+                                        window.scale_factor(),
+                                        event.modifiers.control,
+                                        cx,
+                                    );
                                     this.extend_free(event.position, window.scale_factor(), cx);
                                     this.extend_scale(
                                         event.position,
@@ -1220,6 +1271,8 @@ impl Workspace {
                         CanvasDecorations {
                             show_grid: self.show_grid,
                             show_guides: self.show_guides,
+                            grid_spacing: self.grid_spacing,
+                            guides: self.displayed_guides(),
                             crop: self.crop,
                             layer_bounds: if self.show_layer_bounds {
                                 tab.document.content.layer(tab.active_layer).map(|layer| {
@@ -1272,8 +1325,10 @@ impl Workspace {
                     .when(show_tool_cursor, |area| {
                         // The painted cursor hides the system pointer. A selection that can
                         // be moved or resized needs that pointer, so the hand and arrows show.
-                        let native_cursor = (matches!(self.tool, Tool::Select | Tool::OvalSelect)
-                            && self.selection_cursor(scale) != CursorStyle::Crosshair)
+                        let guide_cursor = self.guide_cursor(scale);
+                        let native_cursor = guide_cursor.is_some()
+                            || (matches!(self.tool, Tool::Select | Tool::OvalSelect)
+                                && self.selection_cursor(scale) != CursorStyle::Crosshair)
                             || (self.tool == Tool::Crop
                                 && self.crop_cursor(scale) != CursorStyle::Crosshair)
                             || (self.tool == Tool::ScaleLayer
@@ -1281,13 +1336,18 @@ impl Workspace {
                         if native_cursor {
                             self.canvas_cursor.show_native(true);
                         }
-                        area.when(!native_cursor && !cfg!(target_os = "macos"), |area| {
-                            area.cursor(CursorStyle::None)
-                        })
-                        .when(!native_cursor, |area| {
-                            let brush = self.brush_cursor(tab, scale);
-                            area.child(tool_cursor(self.tool, self.canvas_cursor.clone(), brush))
-                        })
+                        area.when_some(guide_cursor, |area, cursor| area.cursor(cursor))
+                            .when(!native_cursor && !cfg!(target_os = "macos"), |area| {
+                                area.cursor(CursorStyle::None)
+                            })
+                            .when(!native_cursor, |area| {
+                                let brush = self.brush_cursor(tab, scale);
+                                area.child(tool_cursor(
+                                    self.tool,
+                                    self.canvas_cursor.clone(),
+                                    brush,
+                                ))
+                            })
                     }),
                 None => area.child(dot_grid()).child(
                     div()
@@ -1564,6 +1624,8 @@ impl Workspace {
                             .when(self.tool == Tool::Move, |panel| {
                                 let enabled = self.geometry_enabled();
                                 let offset = self.move_offset();
+                                let snap_grid = self.snap_grid;
+                                let snap_guides = self.snap_guides;
                                 panel
                                     .when_some(offset, |panel, _| {
                                         panel
@@ -1577,6 +1639,10 @@ impl Workspace {
                                             )
                                             .child(section_label("ALIGN"))
                                             .child(align_controls(enabled, cx))
+                                            .child(section_label("SNAPPING"))
+                                            .child(toggle_button("Snap to Grid", snap_grid).on_click(cx.listener(move |this, _, _, cx| { this.snap_grid = !snap_grid; cx.notify(); })))
+                                            .child(toggle_button("Snap to Guides", snap_guides).on_click(cx.listener(move |this, _, _, cx| { this.snap_guides = !snap_guides; cx.notify(); })))
+                                            .child(self.numeric_chip(NumericField::GridSpacing, Some("Grid spacing (px)"), cx))
                                     })
                             })
                             .when(self.tool == Tool::ScaleLayer, |panel| {
@@ -2382,6 +2448,8 @@ fn paint_brush_cursor(window: &mut Window, center: Point<Pixels>, brush: BrushCu
 struct CanvasDecorations {
     show_grid: bool,
     show_guides: bool,
+    grid_spacing: u32,
+    guides: Vec<crate::guides::Guide>,
     crop: Option<CropRect>,
     layer_bounds: Option<preview::PixelRect>,
     scale_frame: Option<preview::PixelRect>,
@@ -2407,6 +2475,8 @@ fn image_preview(
     let CanvasDecorations {
         show_grid,
         show_guides,
+        grid_spacing,
+        guides,
         crop,
         layer_bounds,
         scale_frame,
@@ -2438,17 +2508,22 @@ fn image_preview(
 
     canvas(
         move |bounds, window, _| {
+            let bounds = super::guide_ui::canvas_viewport(bounds, show_guides);
             viewport.set(bounds);
             PreviewGeometry::new(width, height, zoom, bounds, window.scale_factor())
                 .map(|geometry| geometry.panned(pan))
         },
-        move |viewport, geometry, window, _| {
+        move |bounds, geometry, window, cx| {
+            let viewport = super::guide_ui::canvas_viewport(bounds, show_guides);
             let Some(geometry) = geometry else {
                 return;
             };
             let image_bounds = geometry.bounds;
             let visible = image_bounds.intersect(&viewport);
             if visible.is_empty() {
+                if show_guides {
+                    super::guide_ui::paint_rulers(window, cx, viewport, &geometry, (width, height));
+                }
                 return;
             }
             if has_transparency || move_layer.is_some() {
@@ -2488,29 +2563,10 @@ fn image_preview(
             }
 
             if show_grid {
-                paint_grid(window, image_bounds, visible);
+                paint_grid(window, image_bounds, visible, width, grid_spacing);
             }
             if show_guides {
-                let center = image_bounds.center();
-                let color = rgba(0x69d4fff2);
-                if center.x >= visible.left() && center.x < visible.right() {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(center.x, visible.top()),
-                            size(px(1.), visible.size.height),
-                        ),
-                        color,
-                    ));
-                }
-                if center.y >= visible.top() && center.y < visible.bottom() {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(visible.left(), center.y),
-                            size(visible.size.width, px(1.)),
-                        ),
-                        color,
-                    ));
-                }
+                super::guide_ui::paint_guides(window, &geometry, visible, (width, height), &guides);
             }
             if let Some(bounds) = layer_bounds {
                 paint_layer_bounds(window, &geometry, width, height, visible, bounds);
@@ -2580,6 +2636,9 @@ fn image_preview(
                         height: crop.height,
                     },
                 );
+            }
+            if show_guides {
+                super::guide_ui::paint_rulers(window, cx, viewport, &geometry, (width, height));
             }
         },
     )
@@ -3605,28 +3664,34 @@ fn paint_crop(window: &mut Window, image: Bounds<Pixels>, crop: Bounds<Pixels>) 
     window.paint_quad(gpui::outline(crop, rgb(ACCENT), gpui::BorderStyle::Solid));
 }
 
-fn paint_grid(window: &mut Window, image: Bounds<Pixels>, visible: Bounds<Pixels>) {
-    let spacing = px(32.);
-    let color = rgba(0xd9e6ff55);
-    let first_line = |origin: Pixels, edge: Pixels| {
-        edge + px(f32::from(origin - edge).rem_euclid(f32::from(spacing)))
-    };
-
-    let mut x = first_line(image.left(), visible.left());
+fn paint_grid(
+    window: &mut Window,
+    image: Bounds<Pixels>,
+    visible: Bounds<Pixels>,
+    width: u32,
+    grid_spacing: u32,
+) {
+    let factor = f32::from(image.size.width) / width as f32;
+    let spacing = px(crate::guides::display_spacing(grid_spacing, factor, 8.) * factor);
+    let first =
+        |origin: Pixels, edge: Pixels| origin + spacing * ((edge - origin) / spacing).ceil();
+    let mut x = first(image.left(), visible.left());
     while x < visible.right() {
-        window.paint_quad(fill(
-            Bounds::new(point(x, visible.top()), size(px(1.), visible.size.height)),
-            color,
-        ));
+        let mut y = first(image.top(), visible.top());
+        while y < visible.bottom() {
+            let center = point(x, y);
+            // A pale rim keeps the solid dot visible on dark pixels too.
+            window.paint_quad(fill(
+                Bounds::centered_at(center, size(px(2.5), px(2.5))),
+                rgba(0xe5edff99),
+            ));
+            window.paint_quad(fill(
+                Bounds::centered_at(center, size(px(1.5), px(1.5))),
+                rgb(0x54657d),
+            ));
+            y += spacing;
+        }
         x += spacing;
-    }
-    let mut y = first_line(image.top(), visible.top());
-    while y < visible.bottom() {
-        window.paint_quad(fill(
-            Bounds::new(point(visible.left(), y), size(visible.size.width, px(1.))),
-            color,
-        ));
-        y += spacing;
     }
 }
 

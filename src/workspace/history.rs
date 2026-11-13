@@ -136,7 +136,7 @@ impl History {
         while self.retained_bytes(current, selection) > limits.tab_bytes && self.evict_oldest() {}
     }
 
-    // Shared pixels and masks count once; path and text metadata is owned by each snapshot.
+    // Shared pixels and masks count once; path, text, and guide metadata is owned per snapshot.
     pub fn retained_bytes(&self, current: &DocumentContent, selection: &Selection) -> u64 {
         let live: HashSet<*const RgbaImage> = current
             .layers()
@@ -178,7 +178,7 @@ impl History {
                         (text.source.len() + text.family.len() + text.resolved_family.len()) as u64
                     })
                     .sum();
-                paths_bytes + text_bytes
+                paths_bytes + text_bytes + std::mem::size_of_val(content.guides()) as u64
             })
             .sum();
         layer_bytes + mask_bytes + metadata_bytes
@@ -1117,10 +1117,18 @@ mod tests {
     }
 
     #[test]
-    fn history_budget_includes_owned_path_and_text_metadata() {
+    fn history_budget_includes_owned_path_text_and_guide_metadata() {
         use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
         let mut session = Session::new(true, 4);
         let id = session.current.active_layer;
+        session
+            .current
+            .content
+            .set_guides(vec![crate::guides::Guide {
+                axis: crate::guides::Axis::Vertical,
+                position: 1,
+            }])
+            .unwrap();
         session.current.content.upsert_path(VectorPath {
             id: PathId(0),
             visible: true,
@@ -1135,6 +1143,14 @@ mod tests {
         let once = session
             .history
             .retained_bytes(&session.current.content, &session.current.selection);
+        let mut without_guides = session.current.clone();
+        without_guides.content.set_guides(Vec::new()).unwrap();
+        let mut comparison = History::new(true);
+        comparison.commit(without_guides, 1, true);
+        assert_eq!(
+            once - comparison.retained_bytes(&session.current.content, &session.current.selection),
+            std::mem::size_of_val(session.current.content.guides()) as u64
+        );
         assert!(once >= "Some text".len() as u64 + std::mem::size_of::<Anchor>() as u64);
         session.history.commit(snapshot, 2, true);
         assert_eq!(

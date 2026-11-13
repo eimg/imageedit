@@ -140,12 +140,24 @@ paints 256 px tiles and builds a coarser level when the image is fitted or
 zoomed out. Transparent pixels show a checker on the canvas and in each layer
 thumbnail. A thumbnail keeps the layer's aspect ratio, and its finer checker
 fills only that area rather than the square row slot. It also supports a grid
-and center guides. Save and Save As handle
+and user-placed guides with pixel rulers. View → Toggle Rulers and Guides shows
+both rulers and guides. Move drags a horizontal guide from the top ruler or a
+vertical guide from the left; existing guides can be repositioned, and releasing
+outside the canvas workspace (including onto a ruler) removes them. Escape,
+deactivation, or a tab/layer/tool change cancels the drag. Guides use canvas pixel
+boundaries, follow image transforms/crop/resize, and have undo/redo and project
+persistence. The dotted grid is image-anchored, defaults to 16 image pixels, and
+uses solid dots with a pale rim for contrast on light/dark pixels. It thins dots
+below eight screen points of spacing at low zoom. Move's independent Snap to Grid/Guides toggles
+start off; they work even when overlays are hidden, align layer edges/centers
+within six screen points, and Control bypasses snapping and guide grabs. Exact
+numeric positions and arrow nudges bypass snapping. Grid spacing (1–4096 px) and
+overlay/snap preferences are session settings. Save and Save As handle
 Lime (`.lime`) projects (legacy `.imageedit` files remain readable),
-PNG, JPEG, and WebP. A project stores the layer stack, paths, and text with lossless pixels.
+PNG, JPEG, and WebP. A project stores the layer stack, paths, guides, and text with lossless pixels.
 Export writes flattened PNG, JPEG, or WebP copies to a separate destination
 and preserves the tab’s saved state. Raster Save is offered only while a
-document is a single plain layer without paths or editable text.
+document is a single plain layer without paths, guides, or editable text.
 
 ## Code map
 
@@ -237,14 +249,16 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   character boundary for drawing the caret, hit testing, and Up/Down.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
-- `src/project.rs` reads and writes the version 6 project format and applies
-  the same size limits in both directions. Lime has not shipped, so older
-  project versions are not supported. `fixtures/projects/` holds a golden
+- `src/project.rs` reads project versions 6 and 7 and applies the same size limits
+  in both directions. Projects containing guides write version 7; without guides
+  they retain version 6 and omit the guides field for compatibility with older
+  builds. Version 6 manifests may not contain nonempty guides. Versions before 6
+  are not supported. `fixtures/projects/` holds a golden
   project that the reader must keep opening. Regenerate it only when the
   format intentionally changes. The current fixture is version 6
   (`v6-two-layers.imageedit`); keep its legacy extension to exercise compatibility. New projects use `.lime`; the file magic
-  and version stay unchanged.
-  Text bold/italic flags are optional in version 6 and default to regular for
+  stays unchanged; the existing version 6 fixture remains unchanged.
+  Text bold/italic flags are optional in both supported versions and default to regular for
   projects written before those controls were added.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
@@ -282,6 +296,13 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   display-only until the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options align the layer to canvas edges or center it with icon
   buttons. The Layer menu has the fit and content-crop commands.
+  Pointer Move computes snapping from the unsnapped grab on every event, including
+  final release and Control changes; it never accumulates snapped deltas.
+  `src/guides.rs` owns bounded guide metadata, image transforms, grid density, and
+  deterministic snapping. `src/workspace/guide_ui.rs` owns rulers, guide hit tests,
+  and reversible guide drafts scoped to tab/revision. Guide commits refresh no
+  pixels/thumbnails; per-tab pending guides bridge asynchronous publication so
+  release does not flash the old position. History accounts for owned guide data.
   `src/workspace/dialogs.rs` renders the canvas dimensions, color, JPEG quality,
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.

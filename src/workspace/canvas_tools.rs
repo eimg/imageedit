@@ -113,7 +113,12 @@ impl Workspace {
             self.finish_free(event.position, window, cx);
         }
         if event.button == MouseButton::Left && self.move_pointer_dragging() {
-            self.extend_move(event.position, window.scale_factor(), cx);
+            self.extend_move(
+                event.position,
+                window.scale_factor(),
+                event.modifiers.control,
+                cx,
+            );
             self.finish_move(window, cx);
         }
         if event.button == MouseButton::Left

@@ -2047,6 +2047,7 @@ mod tests {
             selection: crate::selection::Selection::Unrestricted,
             pending_text: Some(draft(None)),
             pending_opacity: None,
+            pending_guides: None,
         };
         assert!(tab.settle_text_commit(false));
         assert!(tab.dirty());
