@@ -749,31 +749,22 @@ impl Workspace {
         let layer = tab.active_layer;
         let op = selection_op(modifiers);
         let matching = self.wand_match;
+        let antialias = self.wand_antialias;
         let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, size| {
                 let Some(source) = wand_source(&content, layer, sample_all, (x, y)) else {
                     return current;
                 };
-                let shape = if matching.gap_radius == 0 {
-                    Selection::flood(
-                        &source.pixels,
-                        source.point.0,
-                        source.point.1,
-                        matching.tolerance,
-                        source.offset,
-                        size,
-                    )
-                } else {
-                    Selection::flood_region(
-                        &source.pixels,
-                        source.point,
-                        matching,
-                        source.offset,
-                        size,
-                        None,
-                    )
-                };
+                let shape = Selection::flood_region_quality(
+                    &source.pixels,
+                    source.point,
+                    matching,
+                    source.offset,
+                    size,
+                    None,
+                    antialias,
+                );
                 combine_created_selection(current, shape, op, size, feather)
             },
             window,
@@ -1184,6 +1175,93 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wand_soft_edges_feather_before_combination_and_undo_without_dirtying_pixels() {
+        let image = image::RgbaImage::from_fn(2, 2, |x, y| {
+            image::Rgba(if (x, y) == (1, 1) {
+                [0, 0, 0, 255]
+            } else {
+                [255; 4]
+            })
+        });
+        let incoming = Selection::flood_region_quality(
+            &image,
+            (0, 0),
+            crate::selection::RegionMatch::default(),
+            (0, 0),
+            (2, 2),
+            None,
+            true,
+        );
+        assert!((1..255).contains(&incoming.coverage(1, 1, 2, 2)));
+        let feathered = incoming.clone().feather(1, 2, 2);
+        for op in [
+            SelectionOp::Replace,
+            SelectionOp::Add,
+            SelectionOp::Subtract,
+            SelectionOp::Intersect,
+        ] {
+            let current = Selection::Rect(PixelRect::new(1, 0, 1, 2));
+            assert_eq!(
+                combine_created_selection(current.clone(), incoming.clone(), op, (2, 2), 1),
+                current.combine(feathered.clone(), op, 2, 2)
+            );
+        }
+        let mut tab = super::super::tests::opacity_tab();
+        let source = tab
+            .document
+            .content
+            .layer(tab.active_layer)
+            .unwrap()
+            .pixels
+            .clone();
+        let state = tab.state();
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                tab.history.generation(),
+                super::super::Change::Selection,
+                Some((state.content, state.active_layer, incoming.clone(), patch)),
+                1
+            )
+            .0
+        );
+        assert!(!tab.history.is_dirty());
+        assert_eq!(tab.selection, incoming);
+        assert!(std::sync::Arc::ptr_eq(
+            &source,
+            &tab.document.content.layer(tab.active_layer).unwrap().pixels
+        ));
+        let target = tab.history.undo_target().unwrap().0.clone();
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &target.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                tab.history.generation(),
+                super::super::Change::Undo,
+                Some((target.content, target.active_layer, target.selection, patch)),
+                2
+            )
+            .0
+        );
+        assert_eq!(tab.selection, Selection::Unrestricted);
+        assert!(!tab.history.is_dirty());
+        assert_eq!(tab.history.redo_target().unwrap().0.selection, incoming);
+    }
 
     #[test]
     fn creation_feather_softens_only_the_incoming_region_before_combining() {

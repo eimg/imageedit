@@ -24,7 +24,7 @@ is left to the maintainer. A checked item does not imply native interaction QA.
 
 - [x] Optional antialiasing for oval/circle and rounded-rectangle edges.
 - [x] Optional antialiasing for freehand/polygon selection edges.
-- [ ] Optional antialiasing for wand selection edges.
+- [x] Optional antialiasing for wand selection edges.
 - [x] Optional feathering at selection creation with an explicit radius.
 - [x] Preserve soft coverage through Grow/Shrink and combinations.
 - [x] Define feathering at canvas boundaries consistently.
@@ -1385,7 +1385,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 22 — proportional Fit Layer to Canvas
 
-Implemented; pending commit:
+Implemented and committed as `2d46327`:
 
 - Reviewed [GitHub issue #1](https://github.com/eimg/lime/issues/1), “Layer resizing
   issues.” Aspect locking and Shift reversal were already implemented in Pass 1.
@@ -1444,3 +1444,64 @@ Manual interaction testing stays with the maintainer. Useful checks:
   target. Try hidden, position-locked, editable-text, and memory-limited layers.
 - Confirm aspect locking starts on, Shift reverses it during a handle drag, and
   turning the lock off allows Shift to constrain the original proportions.
+
+## Pass 23 — optional Magic Wand contour antialiasing
+
+Implemented; pending commit:
+
+- Magic Wand has an independent Antialias edges toggle in the existing Edges
+  options. It starts off, is remembered for the workspace session, and affects
+  new wand selections only. Toggling the preference does not alter the current
+  selection, source artwork, document revision, or undo history.
+- Region matching, transparent-RGB treatment, four-connected traversal, and gap
+  closure still determine a hard region first. Optional antialiasing then
+  reconstructs that contour with sixteen bilinear subpixel samples per pixel,
+  before creation feathering and Replace/Add/Subtract/Intersect combinations.
+  Fractional coverage never becomes input to flood connectivity.
+- Straight boundaries and uniform interiors stay sharp. Corners and thin details
+  can receive partial coverage; disable antialiasing for exact pixel coverage.
+  Sealed gap barriers and explicit selection limits remain strictly excluded.
+  This is contour reconstruction, separate from color-aware edge estimation or
+  source-color decontamination around already antialiased artwork; that roadmap
+  item remains unchecked. Bucket Fill keeps its existing hard matching behavior.
+- A 512-entry lookup handles 3×3 neighborhoods without a supersized intermediate
+  image. The flood's existing byte-per-pixel visitation buffer records admitted
+  pixels in place, and the clipped output is written into its existing mask.
+  Source-border neighborhoods clamp instead of fading; canvas clipping retains
+  off-canvas source neighbors so it cannot create a false soft seam.
+- Off retains the existing hard flood path, and zero gap radius still allocates
+  no gap barrier. Both active-layer and merged sampling keep their background
+  selection jobs and existing generation/cancellation rules. Soft coverage uses
+  the normal mask consumers, selection history, and saved-revision behavior.
+- Updated help, README, and AGENTS. No new toolbox tool, dependency, project
+  format, package version, publishing, installer, or app icon changes. The
+  GitHub issue remains untouched as requested.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 399 tests
+pass. Five new regression tests cover contour symmetry/complements, exact
+straight edges and uniform interiors, fractional corners, disconnected diagonal
+components, invalid seeds, one-pixel-wide sources, negative offsets and clipping,
+transparent hidden RGB and alpha boundaries, sealed gaps and strict limits,
+feather-before-combination ordering, and selection undo/redo targets without
+pixel mutation or dirtying the saved revision. Expanded existing fill/Clear and
+clipboard tests verify the same fractional coverage reaches real pixel writes.
+Existing hard flood/connectivity and independent gap-closing oracle tests pass.
+Both release benchmarks pass. `dist/Lime.app` is rebuilt and its signature
+verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Toggle Wand Antialias edges and select staircase/diagonal, curved, and very thin
+  regions on small images. Compare Off and On at high zoom; straight boundaries
+  and solid interiors should stay sharp, while corner coverage becomes partial.
+  Changing the toggle alone should leave the current ants/mask/history intact.
+- Try active-layer and Sample All Layers sampling on offset/partly off-canvas
+  layers and at Fit/fixed zoom after pan. Compare clipped canvas edges with the
+  same region before clipping; there should be no artificial softened seam.
+- Combine Antialias edges with Gap radius and creation Feather, then exercise
+  Replace/Add/Subtract/Intersect, fill, Clear, painting, and clipboard. Check
+  sealed gaps do not reopen and existing selection coverage remains unchanged
+  outside the incoming region. Undo/redo selections must preserve saved state.
+- Try fully transparent pixels with different hidden RGB, alpha boundaries,
+  tolerance endpoints, uniform sources, and one-pixel-wide images. Off should
+  preserve the earlier exact hard-selection behavior.

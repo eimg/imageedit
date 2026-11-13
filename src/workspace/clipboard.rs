@@ -658,11 +658,30 @@ mod tests {
     }
 
     #[test]
-    fn copied_feathered_pixels_keep_their_color_and_use_the_mask_alpha() {
+    fn copied_soft_masks_keep_their_color_and_use_the_same_coverage_alpha() {
         let pixels = RgbaImage::from_pixel(3, 3, Rgba([10, 20, 30, 128]));
         let mask = Selection::rectangle((1, 1), (1, 1), 3, 3).feather(1, 3, 3);
         let clipped = clip_layer((0, 0), &pixels, mask, (3, 3)).unwrap();
         assert_eq!(clipped.get_pixel(1, 1).0, [10, 20, 30, 14]);
+        let source = RgbaImage::from_fn(3, 3, |x, y| {
+            Rgba(if (x, y) == (1, 1) {
+                [255; 4]
+            } else {
+                [0, 0, 0, 255]
+            })
+        });
+        let wand = Selection::flood_region_quality(
+            &source,
+            (1, 1),
+            crate::selection::RegionMatch::default(),
+            (0, 0),
+            (3, 3),
+            None,
+            true,
+        );
+        let copied = clip_layer((0, 0), &pixels, wand, (3, 3)).unwrap();
+        assert_eq!(copied.dimensions(), (1, 1));
+        assert_eq!(copied.get_pixel(0, 0).0, [10, 20, 30, 96]);
     }
 
     #[test]

@@ -56,15 +56,20 @@ starting at zero. Zero tolerance matches exactly. Gap radius (0–8 image pixels
 closes small breaks in nonmatching boundaries before four-connected region
 traversal; 0 preserves the original fast path. A temporary hard boundary mask
 uses square max/min closing with neutral finite-source borders so gaps near
-image edges can close. Original nonmatching pixels always remain excluded;
-large radii may seal narrow passages or entire small regions. Active-layer
+image edges can close. With gap closure enabled, original nonmatching pixels
+always remain excluded; large radii may seal narrow passages or entire small regions. Active-layer
 fills retain layer-local/off-canvas behavior, and merged sampling uses canvas
 coordinates and edits only the active layer. The wand can sample the active
 layer or visible composite, independently of Bucket Fill. Both region tools
 ignore stored RGB when both compared pixels are fully transparent; other channel
-and alpha comparisons use the tool's own tolerance. Wand feathers the incoming
-region after gap closure and before combining it. Bucket's Selection mode hides
-and ignores matching/sampling controls without resetting them; mode switches
+and alpha comparisons use the tool's own tolerance. Wand has an independent,
+default-off Antialias edges preference for new selections. It reconstructs the
+completed connected region's contour with 4×4 bilinear subpixel samples, leaving
+straight boundaries and uniform interiors hard. It does not widen the matching
+threshold or propagate a flood through fractional coverage. Sealed gap barriers
+and explicit limits remain excluded. Feathering follows contour reconstruction
+and precedes combination; changing the preference alone edits no selection.
+Bucket's Selection mode hides and ignores matching/sampling controls without resetting them; mode switches
 finish inline numeric edits before hiding those fields.
 Feather, Grow, and Shrink edit the mask; Grow/Shrink preserve soft coverage.
 Free Select has an independent, default-off antialias preference for new closed
@@ -496,7 +501,7 @@ horizontal samples into the normal byte-per-pixel mask, without a supersized
 intermediate image. Hard polygon/path rasterization keeps its center-sample
 scanline path. `combine_created_selection` feathers new shapes/flood results
 before combining them, preserving previous coverage and one selection history
-entry. The Magic Wand shares the bucket tolerance. Its optional visible-composite
+entry. The Magic Wand keeps its own tolerance and gap radius, separate from Bucket Fill. Its optional visible-composite
 source is built in the background and floods in canvas coordinates; active-layer
 sampling maps through the layer offset.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control
@@ -505,6 +510,15 @@ crosshair gives way to a hand or resize cursor. The outline is a dashed
 contour. Stroke polylines follow that contour, including a hole. Mask
 transforms avoid per-pixel coordinate lists; feathering uses running sums and
 Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
+- `src/selection/antialias.rs` reconstructs wand contours from the completed hard
+  flood. A 512-entry table maps 3×3 neighborhoods to sixteen bilinear subpixel
+  tests, preserving reflection/rotation symmetry and straight edges. Source
+  borders clamp their neighbors, while canvas clipping retains the whole source
+  neighborhood. The flood's byte-per-source-pixel visitation state records
+  admitted pixels in place; there is no second source-sized mask or supersized
+  raster. The output uses the existing canvas-bounded coverage mask and history.
+  Gap/limit exclusions are rechecked when writing soft coverage, so contour
+  reconstruction never reopens a sealed passage. Bucket paths remain hard.
 - `RegionMatch` in `src/selection.rs` closes temporary boundary masks using the
   shared separable running extrema kernel: dilation uses outside 0, erosion uses
   neutral outside 255, while ordinary Grow/Shrink keep outside 0. Original

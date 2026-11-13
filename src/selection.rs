@@ -1,3 +1,5 @@
+mod antialias;
+
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -947,7 +949,7 @@ impl Selection {
         offset: (i32, i32),
         canvas: (u32, u32),
     ) -> Self {
-        flood_selection(image, x, y, tolerance, offset, canvas, |_, _| true)
+        flood_selection(image, (x, y), tolerance, offset, canvas, |_, _| true, false)
     }
 
     pub fn flood_region(
@@ -958,11 +960,27 @@ impl Selection {
         canvas: (u32, u32),
         limit: Option<&Selection>,
     ) -> Self {
+        Self::flood_region_quality(image, seed, matching, offset, canvas, limit, false)
+    }
+
+    // Connectivity and gap closure are always hard; antialiasing only rebuilds
+    // the completed region's contour before it is clipped to canvas coverage.
+    pub fn flood_region_quality(
+        image: &RgbaImage,
+        seed: (u32, u32),
+        matching: RegionMatch,
+        offset: (i32, i32),
+        canvas: (u32, u32),
+        limit: Option<&Selection>,
+        antialias: bool,
+    ) -> Self {
+        if !antialias && matching.gap_radius == 0 && limit.is_none() {
+            return Self::flood(image, seed.0, seed.1, matching.tolerance, offset, canvas);
+        }
         let barrier = matching.gap_barrier(image, seed);
         flood_selection(
             image,
-            seed.0,
-            seed.1,
+            seed,
             matching.tolerance,
             offset,
             canvas,
@@ -978,6 +996,7 @@ impl Selection {
                     )
                 })
             },
+            antialias,
         )
     }
 
@@ -989,9 +1008,15 @@ impl Selection {
         selection: &Selection,
     ) -> Self {
         let canvas = image.dimensions();
-        flood_selection(image, x, y, tolerance, (0, 0), canvas, |px, py| {
-            selection.covers(i64::from(px), i64::from(py), canvas.0, canvas.1)
-        })
+        flood_selection(
+            image,
+            (x, y),
+            tolerance,
+            (0, 0),
+            canvas,
+            |px, py| selection.covers(i64::from(px), i64::from(py), canvas.0, canvas.1),
+            false,
+        )
     }
 
     pub fn grow(self, radius: u32, width: u32, height: u32) -> Self {
@@ -1711,13 +1736,14 @@ fn fill_span(
 
 fn flood_selection(
     image: &RgbaImage,
-    x: u32,
-    y: u32,
+    seed: (u32, u32),
     tolerance: u8,
     offset: (i32, i32),
     canvas: (u32, u32),
     included: impl Fn(u32, u32) -> bool,
+    antialias: bool,
 ) -> Selection {
+    let (x, y) = seed;
     if x >= image.width() || y >= image.height() {
         return Selection::Empty;
     }
@@ -1733,14 +1759,18 @@ fn flood_selection(
     let local_x = (bounds.x - i64::from(offset.0)) as u32;
     let local_y = (bounds.y - i64::from(offset.1)) as u32;
     let mut pixels = vec![0; bounds.width as usize * bounds.height as usize];
-    let mut seen = vec![false; width as usize * height as usize];
+    // 0 = unseen, 1 = queued/rejected, 2 = admitted. Antialiasing reuses
+    // these states instead of allocating another source-sized coverage mask.
+    let mut seen = vec![0u8; width as usize * height as usize];
     let mut stack = vec![(x, y)];
-    seen[(y * width + x) as usize] = true;
+    seen[(y * width + x) as usize] = 1;
     while let Some((px, py)) = stack.pop() {
         if !included(px, py) || !within_tolerance(*image.get_pixel(px, py), target, tolerance) {
             continue;
         }
-        if (local_x..local_x + bounds.width).contains(&px)
+        seen[(py * width + px) as usize] = antialias::ACCEPTED;
+        if !antialias
+            && (local_x..local_x + bounds.width).contains(&px)
             && (local_y..local_y + bounds.height).contains(&py)
         {
             pixels[((py - local_y) * bounds.width + (px - local_x)) as usize] = 255;
@@ -1752,12 +1782,26 @@ fn flood_selection(
                 continue;
             }
             let index = (next_y as u32 * width + next_x as u32) as usize;
-            if seen[index] {
+            if seen[index] != 0 {
                 continue;
             }
-            seen[index] = true;
+            seen[index] = 1;
             stack.push((next_x as u32, next_y as u32));
         }
+    }
+    if antialias {
+        antialias::apply(
+            &mut pixels,
+            &seen,
+            (width, height),
+            PixelRect::new(
+                i64::from(local_x),
+                i64::from(local_y),
+                bounds.width,
+                bounds.height,
+            ),
+            included,
+        );
     }
     finish_mask(
         bounds.x as i32,
@@ -2085,6 +2129,155 @@ fn invert_mask(mask: &Mask, width: u32, height: u32) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wand_antialias_smooths_corners_without_blurring_straight_edges_or_crossing_components() {
+        let select = |image: &RgbaImage, seed, aa| {
+            Selection::flood_region_quality(
+                image,
+                seed,
+                RegionMatch::default(),
+                (0, 0),
+                image.dimensions(),
+                None,
+                aa,
+            )
+        };
+        let corner = RgbaImage::from_fn(3, 3, |x, y| {
+            Rgba(if (x, y) == (1, 1) {
+                [255; 4]
+            } else {
+                [0, 0, 0, 255]
+            })
+        });
+        let hard = select(&corner, (1, 1), false);
+        let soft = select(&corner, (1, 1), true);
+        assert_eq!(hard.coverage(1, 1, 3, 3), 255);
+        assert_eq!(soft.coverage(1, 1, 3, 3), 191);
+        assert_eq!(soft.coverage(1, 0, 3, 3), 0); // No feather-like halo.
+        for size in [(7, 5), (7, 1), (1, 7)] {
+            let image = RgbaImage::from_fn(size.0, size.1, |x, y| {
+                Rgba(if (if size.0 == 1 { y } else { x }) < 3 {
+                    [255; 4]
+                } else {
+                    [0, 0, 0, 255]
+                })
+            });
+            assert_eq!(select(&image, (0, 0), true), select(&image, (0, 0), false));
+        }
+        let diagonal = RgbaImage::from_fn(5, 5, |x, y| {
+            Rgba(if x == y { [255; 4] } else { [0, 0, 0, 255] })
+        });
+        let soft = select(&diagonal, (0, 0), true);
+        for index in 1..5 {
+            assert_eq!(soft.coverage(index, index, 5, 5), 0);
+        }
+        assert_eq!(select(&diagonal, (5, 0), true), Selection::Empty);
+    }
+
+    #[test]
+    fn wand_antialias_is_clipped_after_source_space_reconstruction_and_keeps_transparent_matching()
+    {
+        let image = RgbaImage::from_fn(9, 9, |x, y| {
+            Rgba(if x + y <= 8 { [255; 4] } else { [0, 0, 0, 255] })
+        });
+        let full = Selection::flood_region_quality(
+            &image,
+            (0, 0),
+            RegionMatch::default(),
+            (0, 0),
+            (9, 9),
+            None,
+            true,
+        );
+        assert!((0..9).any(|y| (0..9).any(|x| (1..255).contains(&full.coverage(x, y, 9, 9)))));
+        for offset in [(-3, -2), (2, 1), (-8, -8)] {
+            let clipped = Selection::flood_region_quality(
+                &image,
+                (0, 0),
+                RegionMatch::default(),
+                offset,
+                (6, 5),
+                None,
+                true,
+            );
+            for y in 0..5 {
+                for x in 0..6 {
+                    assert_eq!(
+                        clipped.coverage(x, y, 6, 5),
+                        full.coverage(x - i64::from(offset.0), y - i64::from(offset.1), 9, 9)
+                    );
+                }
+            }
+            assert_eq!(clipped.coverage(-1, 0, 6, 5), 0);
+            assert_eq!(clipped.coverage(6, 0, 6, 5), 0);
+        }
+        let clear = RgbaImage::from_fn(5, 3, |x, y| Rgba([x as u8 * 40, y as u8 * 70, 120, 0]));
+        assert_eq!(
+            Selection::flood_region_quality(
+                &clear,
+                (0, 0),
+                RegionMatch::default(),
+                (0, 0),
+                (5, 3),
+                None,
+                true
+            ),
+            Selection::Full
+        );
+        let alpha_edge = RgbaImage::from_fn(4, 1, |x, _| {
+            Rgba([x as u8 * 20, 0, 0, if x < 2 { 0 } else { 1 }])
+        });
+        for aa in [false, true] {
+            let region = Selection::flood_region_quality(
+                &alpha_edge,
+                (0, 0),
+                RegionMatch::default(),
+                (0, 0),
+                (4, 1),
+                None,
+                aa,
+            );
+            assert_eq!(region.coverage(1, 0, 4, 1), 255);
+            assert_eq!(region.coverage(2, 0, 4, 1), 0);
+        }
+    }
+
+    #[test]
+    fn wand_antialias_respects_sealed_gaps_and_strict_selection_limits() {
+        let image = RgbaImage::from_fn(9, 9, |x, y| {
+            let wall = ((x == 1 || x == 7) && (1..=7).contains(&y))
+                || ((y == 1 || y == 7) && (1..=7).contains(&x));
+            Rgba(if wall && (x, y) != (4, 1) {
+                [0, 0, 0, 255]
+            } else {
+                [255; 4]
+            })
+        });
+        let matching = RegionMatch {
+            tolerance: 0,
+            gap_radius: 1,
+        };
+        let soft =
+            Selection::flood_region_quality(&image, (4, 4), matching, (0, 0), (9, 9), None, true);
+        assert_eq!(soft.coverage(4, 4, 9, 9), 255);
+        for point in [(0, 0), (4, 0), (4, 1), (1, 4)] {
+            assert_eq!(soft.coverage(point.0, point.1, 9, 9), 0);
+        }
+        let uniform = RgbaImage::from_pixel(5, 5, Rgba([255; 4]));
+        let limit = Selection::Inverse(PixelRect::new(2, 2, 1, 1));
+        let soft = Selection::flood_region_quality(
+            &uniform,
+            (0, 0),
+            RegionMatch::default(),
+            (0, 0),
+            (5, 5),
+            Some(&limit),
+            true,
+        );
+        assert_eq!(soft.coverage(2, 2, 5, 5), 0);
+        assert_eq!(soft.coverage(0, 0, 5, 5), 255);
+    }
 
     #[test]
     fn gap_radius_seals_small_breaks_but_preserves_larger_openings_and_original_ink() {
@@ -2813,43 +3006,57 @@ mod tests {
     }
 
     #[test]
-    fn soft_polygon_coverage_is_shared_by_fill_and_clear() {
+    fn soft_polygon_and_wand_coverage_is_shared_by_fill_and_clear() {
         use crate::document::{DocumentContent, FillMode, FillRequest};
         let selection =
             Selection::polygon_quality(&[(0.21, 0.32), (6.43, 1.27), (1.74, 7.86)], 8, 8, true)
                 .feather(1, 8, 8);
-        let mut filled = DocumentContent::single_layer("fill".into(), RgbaImage::new(8, 8));
-        let fill_layer = filled.top_layer_id();
-        filled.fill_bucket(
-            fill_layer,
-            1,
-            1,
-            Rgba([255; 4]),
-            &selection,
-            FillRequest {
-                mode: FillMode::Selection,
-                sample_all: false,
-                tolerance: 0,
-                gap_radius: 0,
-            },
+        let wand_image = RgbaImage::from_fn(8, 8, |x, y| {
+            Rgba(if x + y < 8 { [255; 4] } else { [0, 0, 0, 255] })
+        });
+        let wand = Selection::flood_region_quality(
+            &wand_image,
+            (0, 0),
+            RegionMatch::default(),
+            (0, 0),
+            (8, 8),
+            None,
+            true,
         );
-        let mut cleared = DocumentContent::single_layer(
-            "clear".into(),
-            RgbaImage::from_pixel(8, 8, Rgba([255; 4])),
-        );
-        let clear_layer = cleared.top_layer_id();
-        cleared.clear(clear_layer, &selection);
-        for y in 0..8 {
-            for x in 0..8 {
-                let coverage = selection.coverage(i64::from(x), i64::from(y), 8, 8);
-                assert_eq!(
-                    filled.layer(fill_layer).unwrap().pixels.get_pixel(x, y)[3],
-                    coverage
-                );
-                assert_eq!(
-                    cleared.layer(clear_layer).unwrap().pixels.get_pixel(x, y)[3],
-                    255 - coverage
-                );
+        for selection in [selection, wand] {
+            let mut filled = DocumentContent::single_layer("fill".into(), RgbaImage::new(8, 8));
+            let fill_layer = filled.top_layer_id();
+            filled.fill_bucket(
+                fill_layer,
+                1,
+                1,
+                Rgba([255; 4]),
+                &selection,
+                FillRequest {
+                    mode: FillMode::Selection,
+                    sample_all: false,
+                    tolerance: 0,
+                    gap_radius: 0,
+                },
+            );
+            let mut cleared = DocumentContent::single_layer(
+                "clear".into(),
+                RgbaImage::from_pixel(8, 8, Rgba([255; 4])),
+            );
+            let clear_layer = cleared.top_layer_id();
+            cleared.clear(clear_layer, &selection);
+            for y in 0..8 {
+                for x in 0..8 {
+                    let coverage = selection.coverage(i64::from(x), i64::from(y), 8, 8);
+                    assert_eq!(
+                        filled.layer(fill_layer).unwrap().pixels.get_pixel(x, y)[3],
+                        coverage
+                    );
+                    assert_eq!(
+                        cleared.layer(clear_layer).unwrap().pixels.get_pixel(x, y)[3],
+                        255 - coverage
+                    );
+                }
             }
         }
     }

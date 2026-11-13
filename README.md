@@ -226,8 +226,16 @@ the connected region. Larger radii can also seal narrow passages or small
 regions, so start low. The boundary mask is temporary; the artwork is unchanged
 until you fill, and original nonmatching pixels are never included in the fill.
 
-Wand applies new-selection feathering after gap closure, then combines the new
-region with the existing selection. Bucket's Selection mode fills the whole
+Magic Wand has an independent **Antialias edges** option, initially off. It
+smooths the contour of each new connected selection with fractional edge coverage;
+straight boundaries and uniform interiors stay sharp. Color matching and gap
+closure find the connected region first, so smoothing cannot spread the flood
+into another region. Sealed gap barriers stay excluded. Small corners and very
+thin features can receive partial coverage; turn it off for exact pixel edges.
+Changing the option leaves the current selection and history unchanged.
+
+Wand applies new-selection feathering after contour antialiasing, then combines
+the new region with the existing selection. Bucket's Selection mode fills the whole
 selection and hides the connected-only tolerance, gap, and sampling controls;
 their remembered values return when you choose Connected.
 

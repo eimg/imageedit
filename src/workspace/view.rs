@@ -830,6 +830,14 @@ impl Workspace {
                         cx.notify();
                     }))
             ))
+            .when(self.tool == Tool::MagicWand, |panel| panel.child(
+                toggle_button("Antialias edges", self.wand_antialias)
+                    .tooltip(tooltip("Smooth new wand contours after region matching; keep the current selection unchanged"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.wand_antialias = !this.wand_antialias;
+                        cx.notify();
+                    }))
+            ))
             .child(toggle_button("Feather new selections", self.selection_feather_enabled)
                 .tooltip(tooltip("Soften new selections when completed; keep the current selection unchanged"))
                 .on_click(cx.listener(|this, _, _, cx| {
