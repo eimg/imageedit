@@ -116,12 +116,17 @@ impl LayerDestination {
 
     fn prepare(
         mut self,
-        first: usize,
+        page_numbers: &[usize],
         pages: Vec<image::RgbaImage>,
         control: &PdfControl,
         progress: impl Fn(PdfProgress),
     ) -> anyhow::Result<super::PreparedChange> {
         control.check()?;
+        pdf::validate_page_numbers(page_numbers, pdf::MAX_PDF_PAGES)?;
+        anyhow::ensure!(
+            page_numbers.len() == pages.len(),
+            "The PDF import did not render the complete page selection."
+        );
         let total = pages.len() + 1;
         progress(PdfProgress::Preparing { done: 0, total });
         control.check()?;
@@ -139,7 +144,7 @@ impl LayerDestination {
             let inserted = self.state.content.insert_centered_layers(
                 above,
                 vec![ImageLayer {
-                    name: format!("Page {}", first + index),
+                    name: format!("Page {}", page_numbers[index]),
                     pixels,
                 }],
             );
@@ -443,7 +448,7 @@ impl Workspace {
                 let added = pages.len();
                 PdfResult::Layers {
                     change: Box::new(destination.prepare(
-                        job_options.first,
+                        &job_options.pages,
                         pages,
                         &control,
                         progress,
@@ -517,14 +522,10 @@ fn prepare_documents(
         pages.len() <= document::MAX_LAYERS,
         "The PDF import has too many pages."
     );
+    pdf::validate_page_numbers(&options.pages, pdf::MAX_PDF_PAGES)?;
     anyhow::ensure!(
-        options.first > 0
-            && options
-                .last
-                .checked_sub(options.first)
-                .and_then(|count| count.checked_add(1))
-                == Some(pages.len()),
-        "The PDF import did not render the complete page range."
+        options.pages.len() == pages.len(),
+        "The PDF import did not render the complete page selection."
     );
     for page in &pages {
         Document::validate_size(page.width(), page.height())?;
@@ -550,11 +551,11 @@ fn prepare_documents(
             let title = if count == 1 {
                 name.clone()
             } else {
-                format!("{stem} ({})", options.first + index)
+                format!("{stem} ({})", options.pages[index])
             };
             let document = Document::from_content(
                 title,
-                DocumentContent::single_layer(format!("Page {}", options.first + index), pixels),
+                DocumentContent::single_layer(format!("Page {}", options.pages[index]), pixels),
             );
             control.check()?;
             documents.push(document);
@@ -578,13 +579,18 @@ fn document_from_layers(
     pages: Vec<image::RgbaImage>,
     options: &PdfOptions,
 ) -> anyhow::Result<DocumentContent> {
+    pdf::validate_page_numbers(&options.pages, pdf::MAX_PDF_PAGES)?;
+    anyhow::ensure!(
+        options.pages.len() == pages.len(),
+        "The PDF import did not render the complete page selection."
+    );
     let sizes: Vec<_> = pages.iter().map(image::RgbaImage::dimensions).collect();
     let canvas = pdf::layered_canvas_size(&sizes, options.canvas)?;
     let mut pages = pages.into_iter();
     let first = pages
         .next()
         .ok_or_else(|| anyhow::anyhow!("The PDF import has no pages."))?;
-    let mut content = DocumentContent::single_layer(format!("Page {}", options.first), first);
+    let mut content = DocumentContent::single_layer(format!("Page {}", options.pages[0]), first);
     if canvas != content.size() {
         anyhow::ensure!(
             content
@@ -603,7 +609,7 @@ fn document_from_layers(
     let layers = pages
         .enumerate()
         .map(|(index, pixels)| ImageLayer {
-            name: format!("Page {}", options.first + index + 1),
+            name: format!("Page {}", options.pages[index + 1]),
             pixels,
         })
         .collect();
@@ -624,8 +630,7 @@ mod tests {
     fn fit_all_pages_centers_lossless_page_layers_and_separate_images_keep_their_own_sizes() {
         let options = PdfOptions {
             path: "mixed.pdf".into(),
-            first: 4,
-            last: 6,
+            pages: (4..=6).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::Transparent,
@@ -684,8 +689,7 @@ mod tests {
     fn incomplete_or_over_budget_pdf_stacks_never_prepare_a_partial_document() {
         let mut options = PdfOptions {
             path: "pages.pdf".into(),
-            first: 2,
-            last: 3,
+            pages: (2..=3).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::White,
@@ -696,8 +700,7 @@ mod tests {
             prepare_documents(&options, vec![page.clone()], &PdfControl::default(), |_| {})
                 .is_err()
         );
-        options.first = 1;
-        options.last = document::MAX_LAYERS + 1;
+        options.pages = (1..=document::MAX_LAYERS + 1).collect();
         assert!(
             prepare_documents(
                 &options,
@@ -707,7 +710,7 @@ mod tests {
             )
             .is_err()
         );
-        options.last = 1;
+        options.pages = vec![1];
         assert!(
             prepare_documents(
                 &options,
@@ -717,6 +720,14 @@ mod tests {
             )
             .is_err()
         );
+        for numbers in [vec![], vec![0, 2], vec![1, 1], vec![4, 3], vec![3]] {
+            options.pages = numbers;
+            let pages = vec![page.clone(), page.clone()];
+            assert!(
+                prepare_documents(&options, pages.clone(), &PdfControl::default(), |_| {}).is_err()
+            );
+            assert!(document_from_layers(pages, &options).is_err());
+        }
     }
 
     #[test]
@@ -729,8 +740,7 @@ mod tests {
         assert_eq!(preferences.mode, PdfMode::Layers);
         let mut options = PdfOptions {
             path: "art.pdf".into(),
-            first: 3,
-            last: 8,
+            pages: (3..=8).collect(),
             dpi: 300,
             mode: PdfMode::Separate,
             background: PdfBackground::Transparent,
@@ -805,8 +815,7 @@ mod tests {
         for mode in [PdfMode::Separate, PdfMode::Layers] {
             let options = PdfOptions {
                 path: "source.pdf".into(),
-                first: 1,
-                last: 2,
+                pages: (1..=2).collect(),
                 dpi: 72,
                 mode,
                 background: PdfBackground::White,
@@ -841,7 +850,7 @@ mod tests {
         for stop_done in 0..=3 {
             let control = PdfControl::default();
             let result =
-                LayerDestination::new(&tab, above).prepare(3, pages(), &control, |stage| {
+                LayerDestination::new(&tab, above).prepare(&[3, 9], pages(), &control, |stage| {
                     if matches!(stage, PdfProgress::Preparing { done, .. } if done == stop_done) {
                         control.cancel();
                     }
@@ -852,7 +861,7 @@ mod tests {
             assert!(!tab.history.is_dirty());
         }
         let change = LayerDestination::new(&tab, above)
-            .prepare(3, pages(), &PdfControl::default(), |_| {})
+            .prepare(&[3, 9], pages(), &PdfControl::default(), |_| {})
             .unwrap();
         assert!(
             tab.publish_change(generation, super::super::Change::Edit, Some(change), 1)
@@ -864,7 +873,7 @@ mod tests {
         assert_eq!(tab.document.content.layers()[1].pixels.dimensions(), (2, 3));
         assert_eq!(tab.document.content.layers()[2].pixels.dimensions(), (3, 2));
         assert_eq!(tab.document.content.layers()[1].name, "Page 3");
-        assert_eq!(tab.document.content.layers()[2].name, "Page 4");
+        assert_eq!(tab.document.content.layers()[2].name, "Page 9");
         assert_eq!(tab.active_layer, tab.document.content.layers()[2].id);
         assert_eq!(tab.history.generation(), generation + 1);
         assert!(tab.history.is_dirty());
@@ -877,8 +886,7 @@ mod tests {
     fn prepared_pdf_documents_keep_page_names_order_and_unsaved_project_destinations() {
         let options = PdfOptions {
             path: "art.pdf".into(),
-            first: 3,
-            last: 4,
+            pages: vec![2, 7],
             dpi: 72,
             mode: PdfMode::Separate,
             background: PdfBackground::White,
@@ -893,8 +901,8 @@ mod tests {
         let separate =
             prepare_documents(&options, pages(), &PdfControl::default(), |_| {}).unwrap();
         assert_eq!(separate.len(), 2);
-        assert_eq!(separate[0].name, "art (3)");
-        assert_eq!(separate[1].name, "art (4)");
+        assert_eq!(separate[0].name, "art (2)");
+        assert_eq!(separate[1].name, "art (7)");
         for doc in &separate {
             assert!(doc.path.is_none());
             assert_eq!(doc.format, document::FileFormat::Project);
@@ -912,7 +920,7 @@ mod tests {
         .unwrap();
         assert_eq!(layered.len(), 1);
         assert_eq!(layered[0].content.size(), (3, 2));
-        assert_eq!(layered[0].content.layers()[0].name, "Page 3");
-        assert_eq!(layered[0].content.layers()[1].name, "Page 4");
+        assert_eq!(layered[0].content.layers()[0].name, "Page 2");
+        assert_eq!(layered[0].content.layers()[1].name, "Page 7");
     }
 }

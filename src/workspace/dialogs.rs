@@ -117,8 +117,8 @@ enum FormKind {
         path: PathBuf,
         source: Arc<PdfSource>,
         dpi: Field,
-        from: Field,
-        to: Field,
+        page_selection: Field,
+        page_scroll: gpui::ScrollHandle,
         all_pages: bool,
         mode: PdfMode,
         background: PdfBackground,
@@ -301,6 +301,7 @@ pub(super) enum FieldMode {
     Hex,
     Name,
     FontQuery,
+    PdfPages,
 }
 
 #[derive(Clone)]
@@ -441,10 +442,14 @@ impl Field {
             FieldMode::Hex => 6,
             FieldMode::Name => MAX_LAYER_NAME_CHARS,
             FieldMode::FontQuery => crate::text::MAX_FAMILY_CHARS,
+            FieldMode::PdfPages => pdf::MAX_PAGE_SELECTION_CHARS,
         };
         let ok = match mode {
             FieldMode::Digits { .. } => text.bytes().all(|byte| byte.is_ascii_digit()),
             FieldMode::Hex => text.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            FieldMode::PdfPages => text
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, ',' | '-' | '–' | '—' | ' ')),
             FieldMode::Name | FieldMode::FontQuery => text.chars().all(|ch| !ch.is_control()),
         };
         if !text.is_empty() && existing + text.chars().count() <= allowed && ok {
@@ -774,8 +779,12 @@ impl Workspace {
             FormKind::PdfImport {
                 path,
                 dpi: Field::new(self.pdf_preferences.dpi.to_string()),
-                from: Field::new("1".into()),
-                to: Field::new(source.info.pages.to_string()),
+                page_selection: Field::new(if source.info.pages == 1 {
+                    "1".into()
+                } else {
+                    format!("1-{}", source.info.pages)
+                }),
+                page_scroll: gpui::ScrollHandle::new(),
                 all_pages: true,
                 mode: if target == PdfTarget::NewDocument {
                     self.pdf_preferences.mode
@@ -1223,8 +1232,7 @@ impl Workspace {
                 path,
                 source,
                 dpi,
-                from,
-                to,
+                page_selection,
                 all_pages,
                 mode,
                 background,
@@ -1238,17 +1246,18 @@ impl Workspace {
                     cx.notify();
                     return;
                 };
-                let (first, last) = if *all_pages {
-                    (1, info.pages)
+                let page_text = if *all_pages {
+                    format!("1-{}", info.pages)
                 } else {
-                    let (Ok(first), Ok(last)) =
-                        (from.text.parse::<usize>(), to.text.parse::<usize>())
-                    else {
-                        form.error = Some("Enter a page range.".into());
+                    page_selection.text.clone()
+                };
+                let pages = match pdf::parse_page_selection(&page_text, info.pages) {
+                    Ok(pages) => pages,
+                    Err(error) => {
+                        form.error = Some(error.to_string());
                         cx.notify();
                         return;
-                    };
-                    (first, last)
+                    }
                 };
                 let mode = if matches!(target, PdfTarget::Layers { .. }) {
                     PdfMode::Layers
@@ -1257,8 +1266,7 @@ impl Workspace {
                 };
                 let options = PdfOptions {
                     path: path.clone(),
-                    first,
-                    last,
+                    pages,
                     dpi,
                     mode,
                     background: *background,
@@ -1334,32 +1342,25 @@ impl Workspace {
                     }
                     FormKind::PdfImport {
                         dpi,
-                        from,
-                        to,
+                        page_selection,
+                        page_scroll,
                         all_pages,
                         active,
                         ..
                     } => {
                         if key == "tab" {
-                            if *all_pages {
-                                *all_pages = false;
-                                *active = 1;
-                                from.selected = true;
+                            *active = if *all_pages { 0 } else { (*active + 1) % 2 };
+                            if *active == 0 {
+                                dpi.selected = true;
                             } else {
-                                *active = (*active + 1) % 3;
-                                match *active {
-                                    0 => dpi.selected = true,
-                                    1 => from.selected = true,
-                                    _ => to.selected = true,
-                                }
+                                page_selection.selected = true;
                             }
+                        } else if *active == 0 || *all_pages {
+                            dpi.handle_key(event, FieldMode::Digits { max: 4 }, cx);
                         } else {
-                            match *active {
-                                0 => dpi.handle_key(event, FieldMode::Digits { max: 4 }, cx),
-                                1 => from.handle_key(event, FieldMode::Digits { max: 4 }, cx),
-                                _ => to.handle_key(event, FieldMode::Digits { max: 4 }, cx),
-                            }
+                            page_selection.handle_key(event, FieldMode::PdfPages, cx);
                         }
+                        page_scroll.scroll_to_item(page_selection.caret_item());
                     }
                     FormKind::Scale {
                         width,
@@ -1977,8 +1978,8 @@ impl Workspace {
                     path,
                     source,
                     dpi,
-                    from,
-                    to,
+                    page_selection,
+                    page_scroll,
                     all_pages,
                     mode,
                     background,
@@ -1994,14 +1995,10 @@ impl Workspace {
                     };
                     let preview = (|| -> Result<_, String> {
                         let dpi = dpi.text.parse::<u32>().map_err(|_| "Enter a resolution in DPI.".to_owned())?;
-                        let (first, last) = if *all_pages { (1, info.pages) }
-                            else {
-                                let first = from.text.parse::<usize>().map_err(|_| "Enter a page range.".to_owned())?;
-                                let last = to.text.parse::<usize>().map_err(|_| "Enter a page range.".to_owned())?;
-                                (first, last)
-                            };
+                        let page_text = if *all_pages { format!("1-{}", info.pages) } else { page_selection.text.clone() };
+                        let pages = pdf::parse_page_selection(&page_text, info.pages).map_err(|error| error.to_string())?;
                         let options = PdfOptions {
-                            path: path.clone(), first, last, dpi,
+                            path: path.clone(), pages, dpi,
                             mode: if *target == PdfTarget::NewDocument { *mode } else { PdfMode::Layers },
                             background: *background,
                             canvas: if *target == PdfTarget::NewDocument { *canvas } else { PdfCanvas::FirstPage },
@@ -2019,9 +2016,9 @@ impl Workspace {
                         |error| error.clone(),
                         |(options, sizes)| {
                             if *target == PdfTarget::NewDocument && let Some((width, height)) = target_canvas {
-                                format!("Canvas: {width} × {height} px at {} DPI", options.dpi)
+                                format!("{} selected · Canvas: {width} × {height} px at {} DPI", options.pages.len(), options.dpi)
                             } else {
-                                format!("Page {} at {} DPI: {} × {} px", options.first, options.dpi, sizes[0].0, sizes[0].1)
+                                format!("{} selected · Page {} at {} DPI: {} × {} px", options.pages.len(), options.pages[0], options.dpi, sizes[0].0, sizes[0].1)
                             }
                         },
                     );
@@ -2053,13 +2050,14 @@ impl Workspace {
                                 }
                             },
                         )))
-                        .child(form_button("Page Range", !*all_pages).on_click(cx.listener(
+                        .child(form_button("Choose Pages", !*all_pages).on_click(cx.listener(
                             |this, _, _, cx| {
                                 if let Some(Form {
                                     kind:
                                         FormKind::PdfImport {
                                             all_pages,
-                                            from,
+                                            page_selection,
+                                            page_scroll,
                                             active,
                                             ..
                                         },
@@ -2068,7 +2066,8 @@ impl Workspace {
                                 {
                                     *all_pages = false;
                                     *active = 1;
-                                    from.selected = true;
+                                    page_selection.selected = true;
+                                    page_scroll.scroll_to_item(0);
                                     cx.notify();
                                 }
                             },
@@ -2076,44 +2075,16 @@ impl Workspace {
                     let fields = if *all_pages {
                         div()
                     } else {
-                        div()
-                            .flex()
-                            .gap_3()
-                            .child(
-                                div().flex_1().child("From").child(
-                                    from.view(*active == 1).id("pdf-from").mt_1().on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            if let Some(Form {
-                                                kind:
-                                                    FormKind::PdfImport { from, active, .. },
-                                                ..
-                                            }) = &mut this.form
-                                            {
-                                                *active = 1;
-                                                from.selected = true;
-                                                cx.notify();
-                                            }
-                                        }),
-                                    ),
-                                ),
-                            )
-                            .child(
-                                div().flex_1().child("To").child(
-                                    to.view(*active == 2).id("pdf-to").mt_1().on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            if let Some(Form {
-                                                kind: FormKind::PdfImport { to, active, .. },
-                                                ..
-                                            }) = &mut this.form
-                                            {
-                                                *active = 2;
-                                                to.selected = true;
-                                                cx.notify();
-                                            }
-                                        }),
-                                    ),
-                                ),
-                            )
+                        div().flex().flex_col().gap_1()
+                            .child(page_selection.view(*active == 1).id("pdf-pages").w_full().min_w_0().overflow_x_scroll().track_scroll(page_scroll).whitespace_nowrap().on_scroll_wheel(|_, _, cx| cx.stop_propagation()).on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(Form { kind: FormKind::PdfImport { page_selection, page_scroll, active, .. }, .. }) = &mut this.form {
+                                    *active = 1;
+                                    page_selection.selected = true;
+                                    page_scroll.scroll_to_item(0);
+                                    cx.notify();
+                                }
+                            })))
+                            .child(div().text_xs().text_color(rgb(MUTED)).child("Example: 1, 3-5, 8. Pages open in document order."))
                     };
                     let modes = div().flex().gap_2().child(
                         form_button("As Layers", *mode == PdfMode::Layers).on_click(cx.listener(
@@ -3281,6 +3252,37 @@ fn hit_curve_point(bounds: Bounds<Pixels>, position: Point<Pixels>, curve: Curve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_page_field_preserves_ranges_and_unicode_dashes_and_rejects_bad_pastes_atomically() {
+        let mut field = Field::new("1".into());
+        field.insert("1, 3–5, 8", FieldMode::PdfPages);
+        assert_eq!(field.text, "1, 3–5, 8");
+        assert_eq!(
+            pdf::parse_page_selection(&field.text, 10).unwrap(),
+            vec![1, 3, 4, 5, 8]
+        );
+        for invalid in [
+            "1, two", "1
+2", "1	2", "1.2",
+        ] {
+            field.selected = true;
+            field.insert(invalid, FieldMode::PdfPages);
+            assert_eq!(field.text, "1, 3–5, 8");
+            assert!(field.selected);
+        }
+        field.insert(
+            &"1".repeat(pdf::MAX_PAGE_SELECTION_CHARS + 1),
+            FieldMode::PdfPages,
+        );
+        assert_eq!(field.text, "1, 3–5, 8");
+        field.insert("2—4", FieldMode::PdfPages);
+        assert_eq!(field.text, "2—4");
+        assert_eq!(
+            pdf::parse_page_selection(&field.text, 10).unwrap(),
+            vec![2, 3, 4]
+        );
+    }
 
     #[test]
     fn remembered_adjustment_controls_round_trip_all_channels_and_reset_to_defaults() {

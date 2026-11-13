@@ -22,7 +22,10 @@ use hayro::{
 };
 use image::RgbaImage;
 
-use crate::document::{Document, MAX_LAYERS, MAX_STACK_BYTES};
+use crate::document::{Document, MAX_STACK_BYTES};
+
+mod pages;
+pub use pages::{MAX_PAGE_SELECTION_CHARS, parse_page_selection, validate_page_numbers};
 
 pub const MAX_PDF_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PDF_PAGES: usize = 10_000;
@@ -109,8 +112,7 @@ pub enum PdfProgress {
 #[derive(Clone, Debug)]
 pub struct PdfOptions {
     pub path: PathBuf,
-    pub first: usize,
-    pub last: usize,
+    pub pages: Vec<usize>,
     pub dpi: u32,
     pub mode: PdfMode,
     pub background: PdfBackground,
@@ -188,20 +190,11 @@ pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32
         (MIN_DPI..=MAX_DPI).contains(&options.dpi),
         "Enter a resolution from {MIN_DPI} to {MAX_DPI} DPI."
     );
-    ensure!(
-        options.first >= 1 && options.last >= options.first && options.last <= info.pages,
-        "Choose pages between 1 and {}.",
-        info.pages
-    );
-    let count = options.last - options.first + 1;
-    ensure!(
-        count <= MAX_LAYERS,
-        "Choose at most {MAX_LAYERS} pages at a time."
-    );
-
-    let mut sizes = Vec::with_capacity(count);
+    validate_page_numbers(&options.pages, info.pages)?;
+    let mut sizes = Vec::with_capacity(options.pages.len());
     let mut total_bytes = 0u64;
-    for index in options.first - 1..options.last {
+    for &page in &options.pages {
+        let index = page - 1;
         ensure!(
             info.sizes[index].0.is_finite()
                 && info.sizes[index].1.is_finite()
@@ -211,7 +204,6 @@ pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32
             index + 1
         );
         let size = scaled_page_size(info.sizes[index], options.dpi);
-        let page = index + 1;
         ensure!(
             (1..=u32::from(u16::MAX)).contains(&size.0)
                 && (1..=u32::from(u16::MAX)).contains(&size.1),
@@ -332,8 +324,8 @@ fn render_data(
     let mut rendered = Vec::with_capacity(expected.len());
     let mut total_bytes = 0u64;
 
-    for (index, page) in pages[options.first - 1..options.last].iter().enumerate() {
-        let page_number = options.first + index;
+    for (index, &page_number) in options.pages.iter().enumerate() {
+        let page = &pages[page_number - 1];
         control.check()?;
         progress(PdfProgress::Rendering {
             page: page_number,
@@ -390,6 +382,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn noncontiguous_render_preflights_only_selected_pages_and_reports_source_numbers() {
+        let source = test_pdf(&[(12., 10.), (100_000., 100_000.), (14., 14.), (20., 16.)]);
+        let options = PdfOptions {
+            path: "subset.pdf".into(),
+            pages: parse_page_selection("4, 1, 4", 4).unwrap(),
+            dpi: 72,
+            mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FitAllPages,
+        };
+        let info = PdfInfo {
+            pages: 4,
+            sizes: vec![(12., 10.), (100_000., 100_000.), (14., 14.), (20., 16.)],
+        };
+        assert_eq!(
+            validate_options(&info, &options).unwrap(),
+            vec![(12, 10), (20, 16)]
+        );
+        let progress = std::cell::RefCell::new(Vec::new());
+        let pages = render_data(
+            source.clone().into(),
+            &options,
+            &PdfControl::default(),
+            &|stage| progress.borrow_mut().push(stage),
+        )
+        .unwrap();
+        assert_eq!(
+            pages.iter().map(RgbaImage::dimensions).collect::<Vec<_>>(),
+            vec![(12, 10), (20, 16)]
+        );
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.get_pixel(5, 5).0 == [255, 0, 0, 255])
+        );
+        let rendered = progress
+            .into_inner()
+            .into_iter()
+            .filter_map(|stage| match stage {
+                PdfProgress::Rendering { page, done, total } => Some((page, done, total)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec![(1, 0, 2), (1, 1, 2), (4, 1, 2), (4, 2, 2)]);
+        let selected_bad = PdfOptions {
+            pages: vec![2],
+            ..options.clone()
+        };
+        assert!(validate_options(&info, &selected_bad).is_err());
+        let control = PdfControl::default();
+        let canceled = render_data(source.into(), &options, &control, &|stage| {
+            if matches!(
+                stage,
+                PdfProgress::Rendering {
+                    page: 4,
+                    done: 1,
+                    ..
+                }
+            ) {
+                control.cancel();
+            }
+        });
+        assert!(canceled.err().unwrap().is::<PdfCanceled>());
+    }
+
+    #[test]
     fn transparent_and_white_backgrounds_preserve_real_pdf_alpha_and_painted_white() {
         let data = test_pdf_with(
             &[(16., 16.)],
@@ -398,8 +456,7 @@ mod tests {
         );
         let mut options = PdfOptions {
             path: "alpha.pdf".into(),
-            first: 1,
-            last: 1,
+            pages: (1..=1).collect(),
             dpi: 72,
             mode: PdfMode::Separate,
             background: PdfBackground::Transparent,
@@ -447,8 +504,7 @@ mod tests {
         };
         let mut options = PdfOptions {
             path: "mixed.pdf".into(),
-            first: 1,
-            last: 2,
+            pages: (1..=2).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::White,
@@ -461,7 +517,7 @@ mod tests {
         options.mode = PdfMode::Separate;
         assert!(validate_options(&info, &options).is_ok());
         options.mode = PdfMode::Layers;
-        options.first = 2;
+        options.pages = vec![2];
         assert_eq!(
             validate_options(&info, &options).unwrap(),
             vec![(1, 16_000)]
@@ -487,8 +543,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let options = PdfOptions {
             path,
-            first: 1,
-            last: 2,
+            pages: (1..=2).collect(),
             dpi: 72,
             mode: PdfMode::Separate,
             background: PdfBackground::White,
@@ -538,8 +593,7 @@ mod tests {
         };
         let options = PdfOptions {
             path: "source.pdf".into(),
-            first: 1,
-            last: 2,
+            pages: (1..=2).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::White,
@@ -570,8 +624,7 @@ mod tests {
     fn renderer_limits_and_invalid_probe_dimensions_are_rejected_before_rendering() {
         let options = PdfOptions {
             path: "test.pdf".into(),
-            first: 1,
-            last: 1,
+            pages: (1..=1).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::White,
@@ -602,7 +655,7 @@ mod tests {
                     sizes: vec![(10., 10.)]
                 },
                 &PdfOptions {
-                    last: 2,
+                    pages: vec![1, 2],
                     ..options.clone()
                 }
             )
@@ -717,8 +770,7 @@ mod tests {
     fn rendering_scales_pages_and_honors_the_page_range() {
         let options = PdfOptions {
             path: PathBuf::from("test.pdf"),
-            first: 2,
-            last: 2,
+            pages: (2..=2).collect(),
             dpi: 144,
             mode: PdfMode::Separate,
             background: PdfBackground::White,
@@ -744,8 +796,7 @@ mod tests {
         };
         let options = |first, last, dpi| PdfOptions {
             path: PathBuf::from("test.pdf"),
-            first,
-            last,
+            pages: (first..=last).collect(),
             dpi,
             mode: PdfMode::Layers,
             background: PdfBackground::White,
@@ -766,8 +817,7 @@ mod tests {
         };
         let options = PdfOptions {
             path: PathBuf::from("test.pdf"),
-            first: 1,
-            last: 1,
+            pages: (1..=1).collect(),
             dpi: 72,
             mode: PdfMode::Layers,
             background: PdfBackground::White,

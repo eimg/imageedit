@@ -60,12 +60,17 @@ check offers a retry and a link to the releases page if it cannot connect.
 ## Getting started
 
 Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.
-PDF files open an import dialog: choose all pages or a range, set the resolution
-in DPI, and add the pages as layers or as separate images. **Page background**
+PDF files open an import dialog: choose **All Pages** or **Choose Pages**, set
+the resolution in DPI, and add the pages as layers or as separate images.
+Choose Pages accepts individual pages and inclusive ranges, such as
+`1, 3-5, 8` (en/em dashes also work). Overlapping entries and duplicates import
+once, in document order. The dialog shows the selected count; page names and
+progress retain the original PDF page numbers. The page field scrolls to its
+caret for longer lists. Page selection resets for each source PDF. **Page background**
 can be White (the default) or Transparent. Transparent keeps unpainted page
 areas clear and preserves PDF opacity; white shapes painted in the PDF stay
-white. For a new layered image, **Canvas size** offers First Page or **Fit All
-Pages**, which fits the greatest selected width and height. Every page stays at
+white. For a new layered image, **Canvas size** offers First Page (the first
+selected page) or **Fit All Pages**, which fits the greatest selected width and height. Every page stays at
 its rendered size and is centered. The dialog shows the canvas size and warns
 when selected pages extend outside it; those layer pixels are retained.
 Separate images keep each page's own size, and Open as Layers keeps the existing
@@ -83,9 +88,9 @@ Canceling one file leaves later queued files available to open.
 
 Each PDF is inspected when its turn opens, and its bytes are retained for that
 import. Replacing or deleting the original file afterward does not change the
-pages being imported. Open as Layers checks the whole selected range against
+pages being imported. Open as Layers checks the whole selected page set against
 the destination's remaining layer and memory capacity before rendering. If it
-does not fit, reduce the page range or DPI; a successful import adds all selected
+does not fit, select fewer pages or reduce the DPI; a successful import adds all selected
 pages in one undo step.
 Pick a tool on the left and adjust its settings on the right. Hover the **?**
 beside a tool name for gestures and shortcuts.

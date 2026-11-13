@@ -313,18 +313,24 @@ can scale the canvas, resize it from a nine-point anchor,
 or switch between RGB and grayscale. Copy and Cut use the active layer inside the
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. File → Open also imports PDFs through a dialog that selects all
-pages or a range, sets a resolution from 1 to 1200 DPI, and renders pages as
-layers on the first page's canvas, layers on a Fit All Pages canvas, or separate
+pages or a page list, sets a resolution from 1 to 1200 DPI, and renders pages as
+layers on the first selected page's canvas, layers on a Fit All Pages canvas, or separate
 tabs at each page's own size. White is the default page background; Transparent
 preserves unpainted areas and source opacity without removing painted white.
-Fit All Pages takes the maximum width and height across the selected range after
+Fit All Pages takes the maximum width and height across the selected pages after
 DPI rounding, and validates the combined canvas before rendering. All imported
 layers retain their pixels and use the same integer centering rule, including
 the first page. The dialog shows canvas dimensions and warns about pages extending
 outside the first-page or existing canvas. Open as Layers never resizes its target.
 Successful imports remember DPI/background during the session, and successful
 new-document imports also remember mode/canvas choice. Failed/canceled imports
-do not change defaults; page ranges reset per source. PDF imports use the
+do not change defaults; page selection resets per source. Choose Pages accepts
+comma-separated one-based pages and inclusive ranges, with hyphen/en/em dashes.
+Duplicates/overlaps import once in ascending document order. Page names,
+numbered tab titles, and progress use actual source page numbers rather than ordinal positions.
+The page field accepts at most 2048 characters, scrolls to its caret, and keeps
+clipboard and keyboard navigation in the dialog. Tab switches DPI/page fields
+only in Choose Pages; it does not change the selection mode. PDF imports use the
 normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
 save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
 one PDF at a time. PDF read/inspection/render/preparation jobs show progress and
@@ -333,7 +339,7 @@ page render, or image-preparation call finishes before cancellation settles;
 its results are discarded. New documents and Open as Layers publish no partial
 prefix. PDF bytes are retained from inspection through rendering, independent
 of later source-file replacement/deletion. Open as Layers preflights the entire
-range against remaining layer count, IDs, and stack bytes before rendering and
+page set against remaining layer count, IDs, and stack bytes before rendering and
 publishes all selected layers as one undo step. Each tab can undo and redo crops, fills, selections and
 layer changes, path edits, strokes, text edits, and rasterizing text. Selection changes preserve the saved revision, and undoing
 back to the saved state clears the unsaved marker.
@@ -584,6 +590,13 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   `v8-layer-locks.lime` additionally covers the lock-bearing format.
   Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.
+- `src/pdf/pages.rs` parses bounded page-list expressions after checking source
+  count and endpoints, canonicalizes duplicates in document order, and validates
+  nonempty, unique ascending page numbers against the import page cap. Preview
+  and Apply share its parser for All Pages and Choose Pages. `PdfOptions.pages`
+  is an explicit source-page list, and preparation checks its count/order before
+  constructing a document or inserting layers. Only selected pages contribute
+  dimensions, memory, and canvas bounds; unselected pages are never rendered.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
   a white or transparent page background. Its `layered_canvas_size` validates
@@ -596,7 +609,7 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   inspection/rendering, and document preparation; renderer/parser calls themselves
   remain uninterruptible. `src/workspace/pdf_ui.rs` owns probe and render jobs and
   turns the result into new documents or layers above the active layer. New
-  layered preparation checks the complete rendered range and stack admission,
+  layered preparation checks the complete rendered page set and stack admission,
   rejects incomplete insertions, and centers every page consistently even for
   odd dimensions. Session `PdfPreferences` update only after successful document
   or existing-layer publication; importing into layers preserves the remembered

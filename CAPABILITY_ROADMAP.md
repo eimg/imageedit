@@ -141,7 +141,8 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
 - [x] Preflight the destination stack budget before Open as Layers renders pages.
 - [ ] Consider incremental rendering/preparation to lower peak working memory,
       while retaining deliberate publication and undo semantics.
-- [ ] Preview page thumbnails and allow noncontiguous page selection.
+- [x] Allow noncontiguous page selection with individual pages and ranges.
+- [ ] Preview page thumbnails.
 - [x] Offer white versus transparent page background and remember import options
       for the session.
 - [x] Offer layered canvas sizing (first page versus fitting all selected pages), with
@@ -1447,7 +1448,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 23 — optional Magic Wand contour antialiasing
 
-Implemented; pending commit:
+Implemented and committed as `ebe7b19`:
 
 - Magic Wand has an independent Antialias edges toggle in the existing Edges
   options. It starts off, is remembered for the workspace session, and affects
@@ -1505,3 +1506,61 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Try fully transparent pixels with different hidden RGB, alpha boundaries,
   tolerance endpoints, uniform sources, and one-pixel-wide images. Off should
   preserve the earlier exact hard-selection behavior.
+
+## Pass 24 — noncontiguous PDF page selection
+
+Implemented; pending commit:
+
+- PDF import now offers All Pages or Choose Pages. The custom field accepts
+  comma-separated one-based pages and inclusive ranges, for example `1, 3-5, 8`.
+  Hyphen, en dash, and em dash work as range separators. Duplicates and overlapping
+  ranges import once, in ascending document order; this does not reorder pages.
+- Replaced contiguous first/last options with an explicit selected-source-page
+  list throughout preflight, rendering, new-document preparation, and existing
+  layer insertion. Only selected pages contribute dimensions, memory, and canvas
+  bounds or get rendered. First Page means the first selected page. Page layer
+  names, numbered image titles, and render progress retain source page numbers.
+- A bounded parser checks the source count and endpoints before range expansion,
+  rejects incomplete/reversed/out-of-range syntax, and caps input at 2048
+  characters. Core import validation independently requires a nonempty unique
+  ascending list within the existing 128-page import limit and source bounds.
+  Preparation also rejects mismatched page counts before creating documents or
+  inserting layers, keeping publication atomic.
+- Live estimates and Import share the same page parser for both selection modes.
+  The dialog shows selected count alongside dimensions/clipping information.
+  The page field scrolls to its caret for long lists and supports the existing
+  clipboard/navigation behavior. Tab cycles DPI/page fields in Choose Pages;
+  it no longer changes All Pages into a custom selection by itself.
+- Existing source snapshots, cancellation checks, target-generation checks,
+  destination stack preflight, one-step Open as Layers undo, remembered import
+  settings, and unsaved-project destinations remain in use. Page choices reset
+  per source. Thumbnail previews remain an unchecked, separate follow-up.
+- Updated README and AGENTS. No new toolbox tool, dependency, project format,
+  package version, publishing, installer, app icon, or GitHub issue changes.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 404 tests
+pass. Five new regression tests cover range normalization, Unicode dashes,
+ordering/deduplication, malformed/incomplete/bounded input, direct page-list
+validation, atomic field paste rejection, selected-only rendering/canvas
+preflight with an oversized unselected page, source-page progress, and
+cancellation before a later selected page. Existing preparation checks now use
+noncontiguous page numbers for document/layer names and cancellation/one-step
+undo, and reject duplicate, unsorted, invalid, and incomplete preparation lists.
+Both release benchmarks pass. `dist/Lime.app` is rebuilt and its signature
+verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Import `1, 3-5, 8`, duplicate/overlapping entries, reversed input order, and
+  pasted en/em-dash ranges through Open and Open as Layers. Check source page
+  numbers in progress, layer names, image titles, and ascending stack order.
+- Compare All Pages and Choose Pages, type incomplete/out-of-range expressions,
+  and exercise Tab/Shift-Tab, arrows, Home/End, selection, and copy/cut/paste.
+  Long lists should stay within the field and follow the caret. Switching modes
+  must keep the hidden custom text while All Pages ignores it.
+- Omit a large page and compare First Page/Fit All Pages canvas sizes, clipping
+  warnings, page backgrounds, and memory admission. Choose a first page other
+  than PDF page 1; its dimensions should establish the First Page canvas.
+- Cancel during a later selected page, cancel preparation, change the target
+  while work is pending, and undo/redo a successful layer import. Check no
+  partial pages publish and that one undo removes the whole imported subset.
