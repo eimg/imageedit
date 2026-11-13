@@ -43,7 +43,9 @@ Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new ima
 PDF files open an import dialog: choose all pages or a range, set the resolution
 in DPI, and add the pages as layers or as separate images. A PDF import becomes a
 new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
-not supported. Open as Layers accepts one PDF at a time.
+not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
+together keep their import dialogs queued. Pages are rasterized at the chosen
+DPI; PDF text and vector objects do not become editable text or paths.
 Pick a tool on the left and adjust its settings on the right. Hover the **?**
 beside a tool name for gestures and shortcuts.
 
@@ -93,6 +95,14 @@ dots thin out at low zoom while snapping keeps the chosen spacing.
 Guides are stored in **`.lime`** projects, never flattened exports. A project
 containing guides uses format version 7 and needs this build or newer. Existing
 version 6 projects still open; projects without guides retain version 6 on save.
+
+In **Text**, drag over characters, Shift-click, or use Shift+arrows to select a
+range. Copy/Cut use that range; typing and Paste replace it. Selection highlights
+follow individual lines. Option+Left/Right and Option+Backspace/Delete on macOS
+(Ctrl on Windows) move or delete by word; Shift extends word selections. Normal
+arrows and deletion keep combining characters and emoji sequences together.
+Font/style controls still affect the entire text layer. Undo/Redo restore typing
+and its selection before falling through to document history.
 
 | Action | macOS | Windows |
 | --- | --- | --- |

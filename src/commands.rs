@@ -322,7 +322,7 @@ impl Tool {
                 "Drag a line to preview the gradient, then adjust its endpoints. FG → BG blends the foreground and background colors; FG → Clear fades to transparency. The selection limits the fill. Return applies it; Escape cancels."
             }
             Self::Text => {
-                "Click empty canvas to add text, or click a text layer to edit it. Type, use the arrow keys, and press Return for a new line. Font and style controls affect the whole text layer. In the font picker, type to filter; arrows browse, Return chooses, and Escape closes it. Outside the picker, Escape, Cmd/Ctrl-Enter, clicking outside, or changing tools, layers, or tabs commits the edit. Undo steps through typing first. Rasterize Text enables pixel tools."
+                "Click empty canvas to add text, or click a text layer to edit it. Drag, Shift-click, or Shift+arrows select a range; Copy/Cut use it and typing/Paste replace it. Option+Left/Right and Option+Backspace/Delete on macOS (Ctrl on Windows) work by word; Shift extends the selection. Return adds a line. Font/style controls affect the whole layer. In the font picker, type to filter; arrows browse, Return chooses, and Escape closes it. Outside the picker, Escape, Cmd/Ctrl-Enter, clicking outside, or changing tools/layers/tabs commits. Undo steps through typing first. Rasterize Text enables pixel tools."
             }
             Self::Path => {
                 "Click to add anchors; drag to pull their handles. Click the first anchor to close the path. Escape or changing tools ends the current path; the next click starts a new one. Use the Paths tab to select, show, hide, delete, convert, or stroke paths. Stroke uses the foreground color and needs a visible path and a paintable raster layer."
@@ -594,6 +594,39 @@ pub fn register(cx: &mut App) {
         KeyBinding::new(&format!("{primary}-enter"), FinishText, Some("Text")),
         KeyBinding::new("escape", FinishText, Some("Text")),
     ]);
+
+    let word_modifier = if cfg!(target_os = "macos") {
+        "alt"
+    } else {
+        "ctrl"
+    };
+    for key in [
+        "left",
+        "right",
+        "up",
+        "down",
+        "home",
+        "end",
+        "backspace",
+        "delete",
+    ] {
+        cx.bind_keys([
+            KeyBinding::new(&format!("{word_modifier}-{key}"), NoAction, Some("Text")),
+            KeyBinding::new(
+                &format!("{word_modifier}-shift-{key}"),
+                NoAction,
+                Some("Text"),
+            ),
+        ]);
+    }
+    if cfg!(target_os = "macos") {
+        for key in ["left", "right", "up", "down"] {
+            cx.bind_keys([
+                KeyBinding::new(&format!("cmd-{key}"), NoAction, Some("Text")),
+                KeyBinding::new(&format!("cmd-shift-{key}"), NoAction, Some("Text")),
+            ]);
+        }
+    }
 
     // Window actions run while GPUI has the active window borrowed.
     cx.on_action(|_: &OpenImage, cx| cx.defer(crate::open_dialog));

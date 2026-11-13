@@ -19,7 +19,53 @@ pub(super) enum PdfTarget {
     },
 }
 
+pub(super) enum PendingOpen {
+    Pdf { path: PathBuf, info: pdf::PdfInfo },
+    Raster(Document),
+}
+
+enum PdfResult {
+    Documents(Vec<Document>),
+    Layers(Vec<image::RgbaImage>),
+}
+
 impl Workspace {
+    pub(super) fn schedule_pending_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_scheduled
+            || self.pending_opens.is_empty()
+            || self.dialog_open
+            || self.form.is_some()
+            || self.creating
+            || self.pdf_busy
+            || self.active_tab().is_some_and(super::Tab::busy)
+        {
+            return;
+        }
+        self.open_scheduled = true;
+        let entity = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = entity.update(cx, |this, cx| {
+                this.open_scheduled = false;
+                if this.dialog_open
+                    || this.form.is_some()
+                    || this.creating
+                    || this.pdf_busy
+                    || this.active_tab().is_some_and(super::Tab::busy)
+                {
+                    return;
+                }
+                if let Some(pending) = this.pending_opens.pop_front() {
+                    match pending {
+                        PendingOpen::Pdf { path, info } => {
+                            this.pdf_import_form(path, info, PdfTarget::NewDocument, window, cx);
+                        }
+                        PendingOpen::Raster(document) => this.show_document(document, window, cx),
+                    }
+                }
+            });
+        });
+    }
+
     pub(super) fn request_pdf_import(
         &mut self,
         path: PathBuf,
@@ -78,9 +124,14 @@ impl Workspace {
         }
         let name = document::file_name(&options.path);
         let job_options = options.clone();
-        let job = cx
-            .background_executor()
-            .spawn(async move { pdf::render_pages(&job_options) });
+        let job = cx.background_executor().spawn(async move {
+            let pages = pdf::render_pages(&job_options)?;
+            Ok::<_, anyhow::Error>(if new_document {
+                PdfResult::Documents(prepare_documents(&job_options, pages))
+            } else {
+                PdfResult::Layers(pages)
+            })
+        });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -92,14 +143,14 @@ impl Workspace {
                     workspace.creating = false;
                 }
                 match result {
-                    Ok(pages) => match target {
-                        PdfTarget::NewDocument => {
-                            workspace.show_pdf_documents(&options, pages, window, cx);
+                    Ok(PdfResult::Documents(documents)) => {
+                        for document in documents {
+                            workspace.show_document(document, window, cx);
                         }
-                        PdfTarget::Layers { .. } => {
-                            workspace.insert_pdf_layers(target, options.first, pages, window, cx)
-                        }
-                    },
+                    }
+                    Ok(PdfResult::Layers(pages)) => {
+                        workspace.insert_pdf_layers(target, options.first, pages, window, cx)
+                    }
                     Err(error) => {
                         let message = format!("{name}: {error:#}");
                         if new_document {
@@ -114,39 +165,6 @@ impl Workspace {
         })
         .detach();
         cx.notify();
-    }
-
-    fn show_pdf_documents(
-        &mut self,
-        options: &PdfOptions,
-        pages: Vec<image::RgbaImage>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = document::file_name(&options.path);
-        if options.mode == PdfMode::Separate {
-            let count = pages.len();
-            let stem = Path::new(&name)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .unwrap_or("PDF");
-            for (index, pixels) in pages.into_iter().enumerate() {
-                let title = if count == 1 {
-                    name.clone()
-                } else {
-                    format!("{stem} ({})", options.first + index)
-                };
-                let content = DocumentContent::single_layer(
-                    format!("Page {}", options.first + index),
-                    pixels,
-                );
-                self.show_document(Document::from_content(title, content), window, cx);
-            }
-        } else {
-            let content = document_from_layers(pages, options.first);
-            self.show_document(Document::from_content(name, content), window, cx);
-        }
     }
 
     fn insert_pdf_layers(
@@ -249,6 +267,41 @@ impl Workspace {
     }
 }
 
+fn prepare_documents(options: &PdfOptions, pages: Vec<image::RgbaImage>) -> Vec<Document> {
+    let name = document::file_name(&options.path);
+    if options.mode == PdfMode::Separate {
+        let count = pages.len();
+        let stem = Path::new(&name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.trim().is_empty())
+            .unwrap_or("PDF");
+        pages
+            .into_iter()
+            .enumerate()
+            .map(|(index, pixels)| {
+                let title = if count == 1 {
+                    name.clone()
+                } else {
+                    format!("{stem} ({})", options.first + index)
+                };
+                Document::from_content(
+                    title,
+                    DocumentContent::single_layer(
+                        format!("Page {}", options.first + index),
+                        pixels,
+                    ),
+                )
+            })
+            .collect()
+    } else {
+        vec![Document::from_content(
+            name,
+            document_from_layers(pages, options.first),
+        )]
+    }
+}
+
 fn document_from_layers(mut pages: Vec<image::RgbaImage>, first_page: usize) -> DocumentContent {
     let first = pages.remove(0);
     let mut content = DocumentContent::single_layer(format!("Page {first_page}"), first);
@@ -263,4 +316,47 @@ fn document_from_layers(mut pages: Vec<image::RgbaImage>, first_page: usize) -> 
         .collect();
     content.insert_centered_layers(above, layers);
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn prepared_pdf_documents_keep_page_names_order_and_unsaved_project_destinations() {
+        let options = PdfOptions {
+            path: "art.pdf".into(),
+            first: 3,
+            last: 4,
+            dpi: 72,
+            mode: PdfMode::Separate,
+        };
+        let pages = || {
+            vec![
+                RgbaImage::from_pixel(3, 2, Rgba([255, 0, 0, 255])),
+                RgbaImage::from_pixel(2, 3, Rgba([0, 0, 255, 255])),
+            ]
+        };
+        let separate = prepare_documents(&options, pages());
+        assert_eq!(separate.len(), 2);
+        assert_eq!(separate[0].name, "art (3)");
+        assert_eq!(separate[1].name, "art (4)");
+        for doc in &separate {
+            assert!(doc.path.is_none());
+            assert_eq!(doc.format, document::FileFormat::Project);
+            assert_eq!(doc.canvas.pixels.dimensions(), doc.content.size());
+        }
+        let layered = prepare_documents(
+            &PdfOptions {
+                mode: PdfMode::Layers,
+                ..options
+            },
+            pages(),
+        );
+        assert_eq!(layered.len(), 1);
+        assert_eq!(layered[0].content.size(), (3, 2));
+        assert_eq!(layered[0].content.layers()[0].name, "Page 3");
+        assert_eq!(layered[0].content.layers()[1].name, "Page 4");
+    }
 }

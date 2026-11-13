@@ -52,27 +52,31 @@ pub fn is_pdf_path(path: &Path) -> bool {
 
 pub fn read_info(path: &Path) -> Result<PdfInfo> {
     let bytes = read_pdf(path)?;
-    let pdf = load_pdf(bytes)?;
-    info_from_pdf(&pdf)
+    catch_unwind(AssertUnwindSafe(|| {
+        let pdf = load_pdf(bytes)?;
+        info_from_pdf(&pdf)
+    }))
+    .map_err(|_| anyhow!("The PDF could not be read."))?
 }
 
 pub fn render_pages(options: &PdfOptions) -> Result<Vec<RgbaImage>> {
     let bytes = read_pdf(&options.path)?;
-    render_bytes(bytes, options)
+    catch_unwind(AssertUnwindSafe(|| render_bytes(bytes, options)))
+        .map_err(|_| anyhow!("The PDF could not be rendered."))?
 }
 
 pub fn scaled_page_size(size: (f32, f32), dpi: u32) -> (u32, u32) {
-    let scale = f64::from(dpi) / 72.0;
-    let width = (f64::from(size.0) * scale).ceil().max(1.0);
-    let height = (f64::from(size.1) * scale).ceil().max(1.0);
-    (
-        width.min(f64::from(u32::MAX)) as u32,
-        height.min(f64::from(u32::MAX)) as u32,
-    )
+    // Match hayro's f32 scale and truncated integer pixmap dimensions exactly.
+    let scale = dpi as f32 / 72.0;
+    ((size.0 * scale) as u32, (size.1 * scale) as u32)
 }
 
 pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32, u32)>> {
     ensure!(!info.sizes.is_empty(), "The PDF has no pages.");
+    ensure!(
+        info.pages == info.sizes.len() && info.pages <= MAX_PDF_PAGES,
+        "The PDF page information is invalid."
+    );
     ensure!(
         (MIN_DPI..=MAX_DPI).contains(&options.dpi),
         "Enter a resolution from {MIN_DPI} to {MAX_DPI} DPI."
@@ -91,8 +95,22 @@ pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32
     let mut sizes = Vec::with_capacity(count);
     let mut total_bytes = 0u64;
     for index in options.first - 1..options.last {
+        ensure!(
+            info.sizes[index].0.is_finite()
+                && info.sizes[index].1.is_finite()
+                && info.sizes[index].0 > 0.
+                && info.sizes[index].1 > 0.,
+            "Page {} has invalid dimensions.",
+            index + 1
+        );
         let size = scaled_page_size(info.sizes[index], options.dpi);
         let page = index + 1;
+        ensure!(
+            (1..=u32::from(u16::MAX)).contains(&size.0)
+                && (1..=u32::from(u16::MAX)).contains(&size.1),
+            "Page {page} at {} DPI is outside the renderer's pixel limits. Choose another resolution.",
+            options.dpi
+        );
         Document::validate_size(size.0, size.1)
             .with_context(|| format!("Page {page} at {} DPI is too large", options.dpi))?;
         let bytes = u64::from(size.0)
@@ -191,6 +209,10 @@ fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> 
         }))
         .map_err(|_| anyhow!("Page {page_number} could not be rendered."))?;
         let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+        ensure!(
+            (width, height) == expected[index],
+            "Page {page_number} did not render at the requested dimensions."
+        );
         Document::validate_size(width, height)
             .with_context(|| format!("Page {page_number} at {} DPI is too large", options.dpi))?;
         let bytes = pixmap.take_rgba8(ImageAlphaType::Alpha);
@@ -209,6 +231,61 @@ fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renderer_limits_and_invalid_probe_dimensions_are_rejected_before_rendering() {
+        let options = PdfOptions {
+            path: "test.pdf".into(),
+            first: 1,
+            last: 1,
+            dpi: 72,
+            mode: PdfMode::Layers,
+        };
+        for size in [
+            (f32::NAN, 10.),
+            (f32::INFINITY, 10.),
+            (-1., 10.),
+            (0.1, 10.),
+            (65_536., 1.),
+        ] {
+            assert!(
+                validate_options(
+                    &PdfInfo {
+                        pages: 1,
+                        sizes: vec![size]
+                    },
+                    &options
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_options(
+                &PdfInfo {
+                    pages: 2,
+                    sizes: vec![(10., 10.)]
+                },
+                &PdfOptions {
+                    last: 2,
+                    ..options.clone()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_options(
+                &PdfInfo {
+                    pages: 1,
+                    sizes: vec![(16_384., 1.)]
+                },
+                &options
+            )
+            .is_ok()
+        );
+        assert_eq!(scaled_page_size((72.5, 73.5), 72), (72, 73));
+        let pages = render_bytes(test_pdf(&[(72.5, 73.5)]), &options).unwrap();
+        assert_eq!(pages[0].dimensions(), (72, 73));
+    }
 
     fn add_object(body: &mut String, offsets: &mut Vec<usize>, object: String) {
         offsets.push(body.len());

@@ -89,8 +89,8 @@ preview/commit match; no performance regression on sparse dirty-tile strokes.
 
 ## Text editing
 
-- [ ] Partial range selection using dragging and Shift+arrows.
-- [ ] Word navigation and deletion, with Unicode-aware boundaries.
+- [x] Partial range selection using dragging, Shift-click, and Shift+arrows.
+- [x] Word navigation and deletion, with Unicode-aware boundaries.
 - [ ] Fixed text boxes, wrapping, and paragraph alignment.
 - [ ] Consider mixed styles only after ordinary editing is complete.
 
@@ -111,6 +111,37 @@ preserve source and layout; failed commits retain recoverable drafts.
 - [ ] Position lock for protected backgrounds.
 - [ ] A small useful blend-mode set: Multiply, Screen, Overlay.
 - [ ] Layer masks as a separately scoped architectural milestone.
+
+## PDF import — review of the other agent's feature
+
+Baseline: `91c8a48` adds raster PDF import, contiguous page ranges, DPI selection,
+pages as layers or separate tabs, and single-PDF Open as Layers. Imports are new
+unsaved projects; the first page sets the layered canvas size. PDF remains import
+only, renders onto white, and does not preserve editable PDF text/vector objects.
+
+- [x] Keep multiple PDF import dialogs queued instead of dropping later requests.
+- [x] Queue raster publication too, so a mixed Open operation cannot dismiss a
+      pending PDF form when its raster tab opens.
+- [x] Build imported composites, tiles, previews, and thumbnails off the UI thread.
+- [x] Match the renderer's fractional pixel rounding during DPI preflight; reject
+      invalid/subpixel page dimensions and inconsistent probe data. Preserve
+      existing document/page/stack budgets and convert probe/render panics to errors.
+- [ ] Add per-page progress and cancellation, including long probes/renders.
+- [ ] Preflight the destination stack budget before Open as Layers renders pages;
+      consider incremental rendering/publication to bound peak working memory.
+- [ ] Preview page thumbnails and allow noncontiguous page selection.
+- [ ] Offer white versus transparent page background and remember import options.
+- [ ] Offer layered canvas sizing (first page versus largest selected page), with
+      an indication when larger page layers extend outside the first-page canvas.
+- [ ] Detect a source PDF changed between probe and render, or retain a consistent
+      source snapshot for the import session.
+- [ ] Expand automated fixtures for CropBox/rotation, fonts, transparency, images,
+      and representative malformed/encrypted documents on macOS and Windows.
+- [ ] Consider storing source/page/DPI metadata for explicit reimport later.
+
+The fixes above are part of Pass 4. Cancellation, previews, source tracking, and
+the other unchecked options are follow-up capabilities rather than claims of
+current support. Existing source PDFs are never overwritten by Save.
 
 ## Adjustments and filters
 
@@ -233,7 +264,7 @@ No interactive or visual smoke tests were run.
 
 ## Pass 3 — dotted grid, ruler guides, and snapping
 
-Implemented, uncommitted:
+Implemented; subsequently committed as `a38b0ce` and `7c8ffc5` before the PDF review:
 
 - Replaced grid lines with dots anchored to image coordinates. After maintainer
   feedback that the initial grid was too faint and loose, dots now have a solid
@@ -268,8 +299,8 @@ Implemented, uncommitted:
 Automated: 268 tests, formatting, Clippy, and both release benchmarks pass.
 Eight regression tests were added and the history-budget check now includes guide
 ownership. macOS bundling and signature verification pass; `dist/Lime.app` was
-rebuilt. All Pass 3 changes remain uncommitted, including the new guide modules;
-the roadmap itself remains untracked as requested.
+rebuilt. These implementation changes and the roadmap were subsequently committed
+by the other agent; the changes in the current pass are left uncommitted.
 
 Manual checks left to the maintainer:
 
@@ -285,3 +316,48 @@ Manual checks left to the maintainer:
   and export a raster to verify overlays are excluded.
 
 No interactive or visual smoke testing was performed.
+
+## Pass 4 — PDF reliability and ordinary text editing
+
+Implemented, uncommitted:
+
+- Reviewed PDF import and fixed the four checked reliability items in its section
+  above. Large imported documents no longer prepare their rendered canvases on
+  the UI thread; mixed PDF/raster Open requests publish in order around dialogs.
+- Text now has an anchored partial selection instead of an all-or-nothing flag.
+  Dragging, Shift-click, Shift+arrows, and Shift+word movement extend it. Copy/Cut
+  use the selected range; typing/Paste replace it. Highlights follow individual
+  selected line segments and include selected newlines.
+- Arrow motion and ordinary deletion respect Unicode graphemes (including
+  combining marks and joined emoji). Word navigation/deletion uses Option on
+  macOS and Ctrl on Windows; line/document edge navigation follows the platform
+  gestures described in README. `unicode-segmentation` was already in Cargo.lock
+  transitively; it is now declared directly without introducing a new package.
+- Typing undo/redo keeps the selection anchor and caret. Delayed layout can
+  resolve a released drag; source edits and caret navigation clear its pending
+  pointer hit so it cannot move a later edit's caret. Window deactivation ends
+  pointer dragging. Modified navigation cannot leak out of the font query and
+  edit canvas text. Font/style controls still apply to the entire text layer.
+- No new toolbox tool or project-format change. Fixed text boxes, paragraph
+  alignment, rich text, IME/AltGr refinement, and deeper bidirectional selection
+  validation remain later work.
+
+Automatic validation: formatting, Clippy with warnings denied, all 281 tests,
+and both release benchmarks pass. Seven regression tests were added for PDF
+dimension/preparation contracts, partial text replacement/history, grapheme and
+word deletion, delayed pointer selection, selection rectangles, and font-query
+navigation isolation. macOS bundling and signature verification pass;
+`dist/Lime.app` was rebuilt. All Pass 4 edits, including this roadmap update,
+remain uncommitted. No interactive or visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Open multiple PDFs, then a mixed PDF/raster batch; cancel/import each PDF and
+  confirm later requests still appear. Try a fractional page size at low DPI.
+- In Text, drag across lines, Shift-click, extend/reverse selections with arrows
+  and word keys, copy/cut/paste, replace a range, and undo/redo. Include accented
+  text, combining accents, emoji, CJK, and right-to-left text.
+- Click/drag immediately after opening text or changing font/size, release before
+  the preview catches up, then type or navigate. Confirm the caret remains stable.
+- Exercise the font query's clipboard/history and modified navigation, and ensure
+  it never changes canvas text. Confirm styles still affect the whole layer.

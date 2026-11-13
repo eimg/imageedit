@@ -2852,6 +2852,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tempfile",
+ "unicode-segmentation",
  "url",
  "windows-sys 0.61.2",
 ]

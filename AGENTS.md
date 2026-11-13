@@ -105,8 +105,19 @@ it, and a click inside the current text moves the caret. A click within
 a few screen points of a text box still edits that text. A dashed frame marks
 the text being edited, and the caret blinks. Typing, Return, the
 arrow keys, and the text clipboard edit the draft and show it on the canvas at
-once. Native Edit menu actions and Undo/Redo step through the typing first,
-then fall through to image history. There is no Apply or Discard: Escape,
+once. Dragging, Shift-click, or Shift+arrows select partial ranges across lines.
+Copy/Cut use the range and typing/Paste replace it. Option+Left/Right and
+Option+Backspace/Delete on macOS (Ctrl on Windows) navigate/delete by Unicode
+word boundaries; Shift extends those selections. Normal moves/deletes use
+graphemes, preserving combining characters and emoji clusters. Home/End move
+within a line, Windows Ctrl+Home/End and macOS Cmd+Up/Down move through the
+document, and macOS Cmd+Left/Right move to line edges. Typing history retains
+selection anchors. Pointer selection uses the latest matching caret map;
+late layout may resolve a released drag, but edits/navigation invalidate its
+old pending hit. Deactivation ends a pointer drag. Modified navigation in the
+font filter remains in that filter and cannot affect canvas text. Styles still
+apply to the whole text layer. Native Edit menu actions and Undo/Redo step through
+typing first, then fall through to image history. There is no Apply or Discard: Escape,
 Cmd/Ctrl-Enter, a click outside the text, or changing tools, layers, tabs, or
 any image command commits a modified draft as one undo step, and a command
 that depends on the result resolves its active layer after that commit lands.
@@ -251,7 +262,9 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   the whole layer. The cached bitmap is what the canvas and export paint, and
   the project also stores the source so a machine with different fonts can
   still open the pixels. It also builds a caret map with a stop at every
-  character boundary for drawing the caret, hit testing, and Up/Down.
+  grapheme boundary for drawing the caret, hit testing, and Up/Down, with
+  per-line selection rectangles. `unicode-segmentation` was already transitive
+  and is now a direct dependency for these grapheme and word boundaries.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
 - `src/project.rs` reads project versions 6 and 7 and applies the same size limits
@@ -270,6 +283,14 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   a white background. `src/workspace/pdf_ui.rs` owns probe and render jobs and
   turns the result into new documents or layers above the active layer. Import
   results publish only while their import token and target tab are current.
+  Probe/page-tree and rendering panics are converted into import errors. Page
+  preflight uses the renderer's f32/truncated dimensions, rejects nonfinite or
+  subpixel dimensions, and retains the tighter document size/memory budgets.
+  Preparing new Documents (composite, tiles, preview, thumbnails) stays on the
+  background executor. Ordinary PDF and raster opens share a publication queue;
+  frame callbacks show them in order after modal UI, document edits, and PDF work
+  settle, so neither a second PDF nor a raster tab dismisses a pending PDF form.
+  Open as Layers still accepts a single PDF and validates its target.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it

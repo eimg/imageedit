@@ -53,6 +53,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "windows")]
         crate::windows_menu::request_sync(cx);
+        self.schedule_pending_open(window, cx);
         self.request_preview_level(window, cx);
         let interactive = self.form.is_none() && !self.dialog_open;
         let active = self.active_tab();
@@ -105,6 +106,7 @@ impl Render for Workspace {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.extend_opacity_drag(event.position, cx);
                         this.extend_guide(event.position, window.scale_factor(), cx);
+                        this.extend_text_selection(event.position, window.scale_factor(), cx);
                     }
                 }),
             )
@@ -112,12 +114,14 @@ impl Render for Workspace {
                 this.end_opacity_drag(event, window, cx);
                 if event.button == MouseButton::Left {
                     this.finish_guide(event.position, window, cx);
+                    this.finish_text_selection(event.position, window.scale_factor(), cx);
                 }
             }))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
-                    this.finish_guide(event.position, window, cx)
+                    this.finish_guide(event.position, window, cx);
+                    this.finish_text_selection(event.position, window.scale_factor(), cx);
                 }),
             )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
@@ -1208,16 +1212,18 @@ impl Workspace {
                         ))
                     })
                     .when(self.tool == Tool::Text && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::IBeam).on_click(cx.listener(
-                            |this, event: &gpui::ClickEvent, window, cx| {
+                        area.cursor(CursorStyle::IBeam).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.place_text(
-                                    event.position(),
+                                    event.position,
                                     window.scale_factor(),
+                                    event.modifiers.shift,
                                     window,
                                     cx,
                                 );
-                            },
-                        ))
+                            }),
+                        )
                     })
                     .when(self.tool == Tool::Path && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
@@ -2604,7 +2610,7 @@ fn image_preview(
             if let Some(rect) = handle_rect {
                 paint_handles(window, &geometry, width, height, rect);
             }
-            if let Some(caret) = text_caret {
+            if let Some(caret) = text_caret.as_ref() {
                 paint_text_caret(window, &geometry, width, height, visible, caret);
             }
             if let Some(frame) = scale_frame {
@@ -3570,14 +3576,14 @@ fn paint_text_caret(
     width: u32,
     height: u32,
     visible: Bounds<Pixels>,
-    caret: super::text_ui::TextCaret,
+    caret: &super::text_ui::TextCaret,
 ) {
     if width == 0 || height == 0 {
         return;
     }
     let project = |x: f32, y: f32| geometry.project(point(x / width as f32, y / height as f32));
     window.with_content_mask(Some(ContentMask { bounds: visible }), |window| {
-        if let Some((x, y, w, h)) = caret.selection {
+        for &(x, y, w, h) in &caret.selection {
             let bounds = Bounds::from_corners(project(x, y), project(x + w, y + h));
             window.paint_quad(fill(bounds, rgba(0xacc6ff40)));
         }

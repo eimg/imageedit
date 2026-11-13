@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{
     ClipboardItem, Context, CursorStyle, Div, KeyDownEvent, Keystroke, MouseButton, Window, div,
@@ -26,6 +27,14 @@ use crate::text::{
 
 fn text_command_key(key: &Keystroke, windows: bool) -> bool {
     key.modifiers.control || key.modifiers.platform || (windows && key.modifiers.alt)
+}
+
+fn font_query_navigation_key(key: &Keystroke) -> bool {
+    (key.modifiers.alt || key.modifiers.control || key.modifiers.platform)
+        && matches!(
+            key.key.as_str(),
+            "left" | "right" | "up" | "down" | "home" | "end" | "backspace" | "delete"
+        )
 }
 
 fn typed_text(key: &Keystroke, windows: bool) -> Option<&str> {
@@ -132,13 +141,13 @@ impl Default for TextDefaults {
 pub(super) type TextContinuation =
     Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
 
-/// A caret, and the box of selected text, in canvas pixels.
-#[derive(Clone, Copy)]
+/// A caret and selection rectangles in canvas pixels.
+#[derive(Clone)]
 pub(super) struct TextCaret {
     pub x: f32,
     pub top: f32,
     pub height: f32,
-    pub selection: Option<(f32, f32, f32, f32)>,
+    pub selection: Vec<(f32, f32, f32, f32)>,
     // The box of the text being edited, so a click that starts new text is obvious.
     pub frame: (f32, f32, f32, f32),
     pub visible: bool,
@@ -155,7 +164,7 @@ pub(super) struct TextDraft {
     anchor: (i32, i32),
     source: String,
     cursor: usize,
-    selected: bool,
+    selection_anchor: Option<usize>,
     family: String,
     face: FontFace,
     size: f32,
@@ -165,6 +174,9 @@ pub(super) struct TextDraft {
     carets: Arc<CaretMap>,
     // A click that opened this draft places the caret once the layout is known.
     pending_hit: Option<(f32, f32)>,
+    pending_extend: bool,
+    pending_drag_hit: Option<(f32, f32)>,
+    dragging: bool,
     baseline: Arc<text::RenderedText>,
     baseline_anchor: (i32, i32),
     undo: Vec<TextEdit>,
@@ -175,7 +187,7 @@ pub(super) struct TextDraft {
 struct TextEdit {
     source: String,
     cursor: usize,
-    selected: bool,
+    selection_anchor: Option<usize>,
     family: String,
     face: FontFace,
     size: f32,
@@ -195,6 +207,86 @@ struct TextPreviewInput {
 }
 
 impl TextDraft {
+    fn selected_range(&self) -> Option<std::ops::Range<usize>> {
+        let anchor = self.selection_anchor?;
+        (anchor != self.cursor).then(|| anchor.min(self.cursor)..anchor.max(self.cursor))
+    }
+
+    fn move_to(&mut self, byte: usize, extend: bool) {
+        if byte > self.source.len() || !self.source.is_char_boundary(byte) {
+            return;
+        }
+        if extend {
+            self.selection_anchor.get_or_insert(self.cursor);
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor = byte;
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        self.stop_pointer();
+        let Some(range) = self.selected_range() else {
+            self.selection_anchor = None;
+            return false;
+        };
+        self.cursor = range.start;
+        self.source.replace_range(range, "");
+        self.selection_anchor = None;
+        true
+    }
+
+    fn delete(&mut self, backward: bool, word: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        let target = if word {
+            word_boundary(&self.source, self.cursor, !backward)
+        } else {
+            grapheme_boundary(&self.source, self.cursor, !backward)
+        };
+        if target == self.cursor {
+            return false;
+        }
+        let range = target.min(self.cursor)..target.max(self.cursor);
+        self.cursor = range.start;
+        self.source.replace_range(range, "");
+        true
+    }
+
+    fn replace_selection(&mut self, text: &str) {
+        self.delete_selection();
+        self.source.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    fn stop_pointer(&mut self) {
+        self.dragging = false;
+        self.pending_hit = None;
+        self.pending_drag_hit = None;
+    }
+
+    pub(super) fn end_pointer_drag(&mut self) {
+        self.dragging = false;
+        self.pending_drag_hit = None;
+    }
+
+    fn resolve_pending_pointer(&mut self) {
+        if !self.carets.matches(&self.spec()) {
+            return;
+        }
+        if let Some((x, y)) = self.pending_hit.take()
+            && let Some(byte) = self.carets.hit(x, y)
+        {
+            self.move_to(byte, self.pending_extend);
+            if let Some((x, y)) = self.pending_drag_hit.take()
+                && let Some(byte) = self.carets.hit(x, y)
+            {
+                self.move_to(byte, true);
+            }
+        }
+    }
+
     fn spec(&self) -> TextSpec {
         TextSpec {
             source: self.source.clone(),
@@ -222,7 +314,7 @@ impl TextDraft {
         TextEdit {
             source: self.source.clone(),
             cursor: self.cursor,
-            selected: self.selected,
+            selection_anchor: self.selection_anchor,
             family: self.family.clone(),
             face: self.face,
             size: self.size,
@@ -235,13 +327,14 @@ impl TextDraft {
     fn restore(&mut self, state: TextEdit) {
         self.source = state.source;
         self.cursor = state.cursor;
-        self.selected = state.selected;
+        self.selection_anchor = state.selection_anchor;
         self.family = state.family;
         self.face = state.face;
         self.size = state.size;
         self.color = state.color;
         self.spacing = state.spacing;
         self.anchor = state.anchor;
+        self.stop_pointer();
     }
 
     fn record(&mut self, previous: TextEdit) {
@@ -341,6 +434,42 @@ impl TextDraft {
 }
 
 impl Workspace {
+    pub(super) fn extend_text_selection(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pixel) = self.unclamped_pointer_pixel(position, scale) else {
+            return;
+        };
+        let Some(draft) = self.text_draft.as_mut().filter(|draft| draft.dragging) else {
+            return;
+        };
+        if draft.pending_hit.is_some() {
+            draft.pending_drag_hit = Some((
+                pixel.0 as f32 + 0.5 - draft.anchor.0 as f32,
+                pixel.1 as f32 + 0.5 - draft.anchor.1 as f32,
+            ));
+        } else if let Some(byte) = draft.hit(pixel) {
+            draft.move_to(byte, true);
+        }
+        self.caret_shown_at = std::time::Instant::now();
+        cx.notify();
+    }
+
+    pub(super) fn finish_text_selection(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_text_selection(position, scale, cx);
+        if let Some(draft) = self.text_draft.as_mut() {
+            draft.dragging = false;
+        }
+    }
+
     pub(super) fn bind_text_actions(&self, root: Div, cx: &Context<Self>) -> Div {
         let drafting = self.text_draft.is_some();
         let rasterize = self
@@ -606,6 +735,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // These bindings also exist for canvas text. Keep them in the query
+        // even though the single-line Field does not implement word movement.
+        if font_query_navigation_key(key) {
+            return true;
+        }
         if cfg!(target_os = "windows") && key.modifiers.alt {
             self.close_font_picker(window, cx);
             return false;
@@ -1061,16 +1195,21 @@ impl Workspace {
         };
         let stop = draft.carets.at(draft.cursor);
         let (x, top) = stop.map_or((0.0, 0.0), |stop| (stop.x, stop.top));
-        let selection = (draft.selected && !draft.source.is_empty()).then(|| {
-            let offset = draft.rendered.style.offset_for(draft.anchor);
-            let (width, height) = draft.rendered.image.dimensions();
-            (
-                offset.0 as f32,
-                offset.1 as f32,
-                width as f32,
-                height as f32,
-            )
-        });
+        let selection = if draft.carets.matches(&draft.spec()) {
+            draft
+                .selected_range()
+                .map(|range| {
+                    draft
+                        .carets
+                        .selection_rects(range)
+                        .into_iter()
+                        .map(|(x, y, w, h)| (ax + x, ay + y, w, h))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let phase = self.caret_shown_at.elapsed().as_millis() / CARET_BLINK_MS;
         Some(TextCaret {
             x: ax + x,
@@ -1086,6 +1225,7 @@ impl Workspace {
         &mut self,
         position: gpui::Point<gpui::Pixels>,
         scale: f32,
+        extend: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1104,13 +1244,17 @@ impl Workspace {
             })
             .unwrap_or(SLOP)
             .max(2.0);
-        self.place_text_at(pixel, pad, window, cx);
+        self.place_text_at(pixel, pad, extend, window, cx);
+        if let Some(draft) = self.text_draft.as_mut() {
+            draft.dragging = true;
+        }
     }
 
     fn place_text_at(
         &mut self,
         pixel: (i64, i64),
         pad: f32,
+        extend: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1123,8 +1267,15 @@ impl Workspace {
             && draft.contains(pixel, pad)
         {
             if let Some(byte) = draft.hit(pixel) {
-                draft.cursor = byte;
-                draft.selected = false;
+                draft.stop_pointer();
+                draft.move_to(byte, extend);
+            } else {
+                draft.pending_hit = Some((
+                    pixel.0 as f32 + 0.5 - draft.anchor.0 as f32,
+                    pixel.1 as f32 + 0.5 - draft.anchor.1 as f32,
+                ));
+                draft.pending_extend = extend;
+                draft.pending_drag_hit = None;
             }
             self.caret_shown_at = std::time::Instant::now();
             cx.notify();
@@ -1133,7 +1284,7 @@ impl Workspace {
         // Anywhere else finishes that text first.
         if self.finish_text(window, cx) {
             self.defer_after_text(move |this, window, cx| {
-                this.place_text_at(pixel, pad, window, cx)
+                this.place_text_at(pixel, pad, extend, window, cx)
             });
             return;
         }
@@ -1246,76 +1397,74 @@ impl Workspace {
             return;
         }
         let key = &event.keystroke;
-        if text_command_key(key, cfg!(target_os = "windows")) {
+        let word = if cfg!(target_os = "macos") {
+            key.modifiers.alt && !key.modifiers.platform && !key.modifiers.control
+        } else {
+            key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform
+        };
+        let command_navigation = cfg!(target_os = "macos")
+            && key.modifiers.platform
+            && !key.modifiers.control
+            && !key.modifiers.alt
+            && matches!(key.key.as_str(), "left" | "right" | "up" | "down");
+        let editing_key = matches!(
+            key.key.as_str(),
+            "left" | "right" | "up" | "down" | "home" | "end" | "backspace" | "delete"
+        );
+        if text_command_key(key, cfg!(target_os = "windows"))
+            && !command_navigation
+            && !(word && editing_key)
+        {
             return;
         }
         match key.key.as_str() {
-            "backspace" => self.change_text(window, cx, |draft| {
-                if draft.selected {
-                    draft.source.clear();
-                    draft.cursor = 0;
-                    draft.selected = false;
-                    return true;
-                }
-                let Some(previous) = draft.source[..draft.cursor].chars().next_back() else {
-                    return false;
-                };
-                let start = draft.cursor - previous.len_utf8();
-                draft.source.replace_range(start..draft.cursor, "");
-                draft.cursor = start;
-                true
+            "backspace" | "delete" => self.change_text(window, cx, |draft| {
+                draft.delete(key.key == "backspace", word)
             }),
-            "delete" => self.change_text(window, cx, |draft| {
-                if draft.selected {
-                    draft.source.clear();
-                    draft.cursor = 0;
-                    draft.selected = false;
-                    return true;
-                }
-                let Some(next) = draft.source[draft.cursor..].chars().next() else {
-                    return false;
-                };
-                let end = draft.cursor + next.len_utf8();
-                draft.source.replace_range(draft.cursor..end, "");
-                true
-            }),
-            "left" | "home" => self.move_caret(cx, |draft| {
-                if draft.selected {
-                    return 0;
-                }
-                if key.key == "home" {
-                    return draft.source[..draft.cursor]
-                        .rfind('\n')
-                        .map_or(0, |at| at + 1);
-                }
-                draft.source[..draft.cursor]
-                    .chars()
-                    .next_back()
-                    .map_or(draft.cursor, |ch| draft.cursor - ch.len_utf8())
-            }),
-            "right" | "end" => self.move_caret(cx, |draft| {
-                if draft.selected {
-                    return draft.source.len();
-                }
-                if key.key == "end" {
-                    return draft.source[draft.cursor..]
-                        .find('\n')
-                        .map_or(draft.source.len(), |at| draft.cursor + at);
-                }
-                draft.source[draft.cursor..]
-                    .chars()
-                    .next()
-                    .map_or(draft.cursor, |ch| draft.cursor + ch.len_utf8())
-            }),
-            "up" | "down" => {
-                let down = key.key == "down";
-                self.move_caret(cx, |draft| {
-                    draft
-                        .carets
-                        .matches(&draft.spec())
-                        .then(|| draft.carets.vertical(draft.cursor, down))
-                        .flatten()
-                        .unwrap_or(draft.cursor)
+            "left" | "right" | "home" | "end" | "up" | "down" => {
+                self.move_caret(key.modifiers.shift, cx, |draft| {
+                    let key_name = key.key.as_str();
+                    if !key.modifiers.shift
+                        && !word
+                        && !command_navigation
+                        && let Some(range) = draft.selected_range()
+                    {
+                        if key_name == "left" {
+                            return range.start;
+                        }
+                        if key_name == "right" {
+                            return range.end;
+                        }
+                    }
+                    if (word && key_name == "home") || (command_navigation && key_name == "up") {
+                        return 0;
+                    }
+                    if (word && key_name == "end") || (command_navigation && key_name == "down") {
+                        return draft.source.len();
+                    }
+                    if key_name == "home" || (command_navigation && key_name == "left") {
+                        return draft.source[..draft.cursor]
+                            .rfind('\n')
+                            .map_or(0, |at| at + 1);
+                    }
+                    if key_name == "end" || (command_navigation && key_name == "right") {
+                        return draft.source[draft.cursor..]
+                            .find('\n')
+                            .map_or(draft.source.len(), |at| draft.cursor + at);
+                    }
+                    if matches!(key_name, "up" | "down") {
+                        return draft
+                            .carets
+                            .matches(&draft.spec())
+                            .then(|| draft.carets.vertical(draft.cursor, key_name == "down"))
+                            .flatten()
+                            .unwrap_or(draft.cursor);
+                    }
+                    if word {
+                        word_boundary(&draft.source, draft.cursor, key_name == "right")
+                    } else {
+                        grapheme_boundary(&draft.source, draft.cursor, key_name == "right")
+                    }
                 });
             }
             "enter" => self.insert_text("\n", window, cx),
@@ -1328,14 +1477,17 @@ impl Workspace {
         }
     }
 
-    fn move_caret(&mut self, cx: &mut Context<Self>, target: impl FnOnce(&TextDraft) -> usize) {
+    fn move_caret(
+        &mut self,
+        extend: bool,
+        cx: &mut Context<Self>,
+        target: impl FnOnce(&TextDraft) -> usize,
+    ) {
         self.caret_shown_at = std::time::Instant::now();
         if let Some(draft) = self.text_draft.as_mut() {
-            let byte = target(draft).min(draft.source.len());
-            if draft.source.is_char_boundary(byte) {
-                draft.cursor = byte;
-            }
-            draft.selected = false;
+            let byte = target(draft);
+            draft.stop_pointer();
+            draft.move_to(byte, extend);
         }
         cx.notify();
     }
@@ -1555,7 +1707,7 @@ impl Workspace {
             anchor,
             source: rendered.style.source.clone(),
             cursor: rendered.style.source.len(),
-            selected: false,
+            selection_anchor: None,
             family: rendered.style.family.clone(),
             face: rendered.style.face,
             size: rendered.style.size,
@@ -1566,6 +1718,9 @@ impl Workspace {
             rendered,
             carets: Arc::new(CaretMap::default()),
             pending_hit,
+            pending_extend: false,
+            pending_drag_hit: None,
+            dragging: false,
             undo: Vec::new(),
             redo: Vec::new(),
         });
@@ -1623,6 +1778,7 @@ impl Workspace {
             if !mutate(draft) {
                 return false;
             }
+            draft.stop_pointer();
             draft.record(previous);
             true
         });
@@ -1640,23 +1796,16 @@ impl Workspace {
         let Some(draft) = self.text_draft.as_ref() else {
             return;
         };
-        let existing = if draft.selected {
-            0
-        } else {
-            draft.source.chars().count()
-        };
+        let existing = draft.source.chars().count()
+            - draft
+                .selected_range()
+                .map_or(0, |range| draft.source[range].chars().count());
         if existing + cleaned.chars().count() > MAX_TEXT_CHARS {
             self.notice(TextError::TooLong.message(), cx);
             return;
         }
         self.change_text(window, cx, |draft| {
-            if draft.selected {
-                draft.source.clear();
-                draft.cursor = 0;
-                draft.selected = false;
-            }
-            draft.source.insert_str(draft.cursor, &cleaned);
-            draft.cursor += cleaned.len();
+            draft.replace_selection(&cleaned);
             true
         });
     }
@@ -1665,8 +1814,8 @@ impl Workspace {
         let Some(draft) = self.text_draft.as_ref() else {
             return;
         };
-        if draft.selected && !draft.source.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(draft.source.clone()));
+        if let Some(range) = draft.selected_range() {
+            cx.write_to_clipboard(ClipboardItem::new_string(draft.source[range].to_owned()));
         }
     }
 
@@ -1675,14 +1824,9 @@ impl Workspace {
         if self
             .text_draft
             .as_ref()
-            .is_some_and(|draft| draft.selected && !draft.source.is_empty())
+            .is_some_and(|draft| draft.selected_range().is_some())
         {
-            self.change_text(window, cx, |draft| {
-                draft.source.clear();
-                draft.cursor = 0;
-                draft.selected = false;
-                true
-            });
+            self.change_text(window, cx, |draft| draft.delete_selection());
         }
     }
 
@@ -1697,7 +1841,9 @@ impl Workspace {
         if let Some(draft) = self.text_draft.as_mut()
             && !draft.source.is_empty()
         {
-            draft.selected = true;
+            draft.stop_pointer();
+            draft.selection_anchor = Some(0);
+            draft.cursor = draft.source.len();
             cx.notify();
         }
     }
@@ -1776,11 +1922,7 @@ impl Workspace {
                             draft.rendered = rendered;
                             draft.carets = carets;
                             draft.substitution = substitution;
-                            if let Some((x, y)) = draft.pending_hit.take()
-                                && let Some(byte) = draft.carets.hit(x, y)
-                            {
-                                draft.cursor = byte;
-                            }
+                            draft.resolve_pending_pointer();
                             if let Some(existing) = workspace.text_overlay.as_mut() {
                                 let previous =
                                     std::mem::replace(&mut existing.sprite, overlay.sprite);
@@ -1809,6 +1951,34 @@ impl Workspace {
             });
         })
         .detach();
+    }
+}
+
+fn grapheme_boundary(text: &str, cursor: usize, forward: bool) -> usize {
+    if forward {
+        text[cursor..]
+            .grapheme_indices(true)
+            .nth(1)
+            .map_or(text.len(), |(at, _)| cursor + at)
+    } else {
+        text[..cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(at, _)| at)
+    }
+}
+
+fn word_boundary(text: &str, cursor: usize, forward: bool) -> usize {
+    if forward {
+        text.unicode_word_indices()
+            .map(|(at, word)| at + word.len())
+            .find(|&at| at > cursor)
+            .unwrap_or(text.len())
+    } else {
+        text.unicode_word_indices()
+            .map(|(at, _)| at)
+            .rfind(|&at| at < cursor)
+            .unwrap_or(0)
     }
 }
 
@@ -1911,7 +2081,7 @@ mod tests {
             anchor: (2, 3),
             source: rendered.style.source.clone(),
             cursor: rendered.style.source.len(),
-            selected: false,
+            selection_anchor: None,
             family: "sans-serif".into(),
             face: FontFace::default(),
             size: 24.0,
@@ -1922,6 +2092,9 @@ mod tests {
             rendered,
             carets: Arc::new(CaretMap::default()),
             pending_hit: None,
+            pending_extend: false,
+            pending_drag_hit: None,
+            dragging: false,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -1981,7 +2154,8 @@ mod tests {
     #[test]
     fn pending_text_detects_source_spacing_and_anchor_changes_but_not_selection() {
         let mut existing = draft(Some(LayerId(1)));
-        existing.selected = true;
+        existing.selection_anchor = Some(0);
+        existing.cursor = existing.source.len();
         existing.cursor = 0;
         assert!(!existing.changed());
         existing.anchor.0 += 1;
@@ -1995,6 +2169,88 @@ mod tests {
         assert!(!new.changed());
         new.source.push('上');
         assert!(new.changed());
+    }
+
+    #[test]
+    fn font_query_retains_modified_navigation_without_reaching_canvas_text() {
+        for key in [
+            "alt-left",
+            "alt-shift-right",
+            "cmd-left",
+            "cmd-shift-down",
+            "ctrl-backspace",
+            "ctrl-home",
+        ] {
+            assert!(font_query_navigation_key(&Keystroke::parse(key).unwrap()));
+        }
+        for key in ["cmd-s", "ctrl-c", "alt-o", "a"] {
+            assert!(!font_query_navigation_key(&Keystroke::parse(key).unwrap()));
+        }
+    }
+
+    #[test]
+    fn partial_selection_replaces_only_its_range_and_history_restores_that_selection() {
+        let mut draft = draft(Some(LayerId(1)));
+        let pixels = draft.rendered.image.clone();
+        draft.move_to(3, false);
+        draft.move_to(draft.source.len(), true);
+        assert_eq!(&draft.source[draft.selected_range().unwrap()], "é 上");
+        let previous = draft.state();
+        draft.replace_selection("new");
+        draft.record(previous);
+        assert_eq!(draft.source, "cafnew");
+        assert_eq!(draft.cursor, 6);
+        assert_eq!(draft.selected_range(), None);
+        assert!(draft.step_history(false));
+        assert_eq!(draft.source, "café 上");
+        assert_eq!(draft.selected_range(), Some(3..9));
+        assert!(draft.step_history(true));
+        assert_eq!(draft.source, "cafnew");
+        assert!(Arc::ptr_eq(&pixels, &draft.rendered.image));
+        draft.move_to(1, false);
+        draft.move_to(0, true);
+        assert!(draft.delete(false, false));
+        assert_eq!(draft.source, "afnew");
+    }
+
+    #[test]
+    fn grapheme_and_word_deletion_preserve_unicode_clusters() {
+        let mut draft = draft(None);
+        draft.source = "a\u{301} 👩‍💻 café 上".into();
+        draft.cursor = "a\u{301} 👩‍💻".len();
+        assert!(draft.delete(true, false));
+        assert_eq!(draft.source, "a\u{301}  café 上");
+        draft.move_to(0, false);
+        assert!(draft.delete(false, false));
+        assert_eq!(draft.source, "  café 上");
+        assert_eq!(word_boundary(&draft.source, 0, true), "  café".len());
+        draft.move_to(draft.source.len(), false);
+        assert!(draft.delete(true, true));
+        assert_eq!(draft.source, "  café ");
+        assert!(draft.delete(true, true));
+        assert_eq!(draft.source, "  ");
+        assert_eq!(grapheme_boundary("a\u{301}b", 0, true), "a\u{301}".len());
+        assert_eq!(grapheme_boundary("a\u{301}b", "a\u{301}".len(), false), 0);
+    }
+
+    #[test]
+    fn delayed_pointer_selection_resolves_after_release_and_edits_cancel_old_hits() {
+        let mut draft = draft(None);
+        draft.carets = Arc::new(text::caret_map(&draft.spec()).unwrap());
+        let start = draft.carets.at(3).unwrap();
+        let end = draft.carets.at(draft.source.len()).unwrap();
+        draft.pending_hit = Some((start.x, start.top));
+        draft.pending_drag_hit = Some((end.x, end.top));
+        draft.dragging = false;
+        draft.resolve_pending_pointer();
+        assert_eq!(draft.selected_range(), Some(3..9));
+        draft.pending_hit = Some((0., 0.));
+        draft.replace_selection("X");
+        let cursor = draft.cursor;
+        draft.resolve_pending_pointer();
+        assert_eq!(draft.source, "cafX");
+        assert_eq!(draft.cursor, cursor);
+        assert!(draft.pending_hit.is_none());
     }
 
     #[test]

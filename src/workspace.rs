@@ -39,7 +39,6 @@ use self::{
     cursor::CanvasCursor,
     dialogs::Form,
     history::{History, LIMITS, State},
-    pdf_ui::PdfTarget,
 };
 
 const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
@@ -328,6 +327,8 @@ pub struct Workspace {
     paste_token: u64,
     pdf_import_token: u64,
     pdf_busy: bool,
+    pending_opens: std::collections::VecDeque<pdf_ui::PendingOpen>,
+    open_scheduled: bool,
     dialog_open: bool,
     form: Option<Form>,
     creating: bool,
@@ -358,6 +359,9 @@ impl Workspace {
                 workspace.canvas_cursor.leave();
                 workspace.pan_drag = None;
                 workspace.space_pan = false;
+                if let Some(draft) = workspace.text_draft.as_mut() {
+                    draft.end_pointer_drag();
+                }
                 workspace.cancel_guide(cx);
                 workspace.pending_nudge = None;
                 workspace.crop_drag = None;
@@ -438,17 +442,13 @@ impl Workspace {
                         .spawn(async move { crate::pdf::read_info(&probe_path) })
                         .await;
                     if workspace
-                        .update_in(cx, |workspace, window, cx| {
+                        .update_in(cx, |workspace, _window, cx| {
                             workspace.pending -= 1;
                             match info {
                                 Ok(info) => {
-                                    workspace.pdf_import_form(
-                                        path,
-                                        info,
-                                        PdfTarget::NewDocument,
-                                        window,
-                                        cx,
-                                    );
+                                    workspace
+                                        .pending_opens
+                                        .push_back(pdf_ui::PendingOpen::Pdf { path, info });
                                 }
                                 Err(error) => {
                                     workspace.errors.push(format!("{name}: {error:#}"));
@@ -464,10 +464,12 @@ impl Workspace {
                 }
                 let result = executor.spawn(async move { Document::open(&path) }).await;
                 if workspace
-                    .update_in(cx, |workspace, window, cx| {
+                    .update_in(cx, |workspace, _window, cx| {
                         workspace.pending -= 1;
                         match result {
-                            Ok(document) => workspace.show_document(document, window, cx),
+                            Ok(document) => workspace
+                                .pending_opens
+                                .push_back(pdf_ui::PendingOpen::Raster(document)),
                             Err(error) => workspace.errors.push(format!("{name}: {error}")),
                         }
                         cx.notify();
@@ -585,6 +587,8 @@ impl Workspace {
             paste_token: 0,
             pdf_import_token: 0,
             pdf_busy: false,
+            pending_opens: Default::default(),
+            open_scheduled: false,
             dialog_open: false,
             form: None,
             creating: false,

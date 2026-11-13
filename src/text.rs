@@ -363,7 +363,7 @@ pub struct CaretStop {
     pub top: f32,
 }
 
-/// Caret positions for every character boundary of one layout.
+/// Caret positions for every grapheme boundary of one layout.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CaretMap {
     pub spec: Option<TextSpec>,
@@ -372,6 +372,46 @@ pub struct CaretMap {
 }
 
 impl CaretMap {
+    pub fn selection_rects(&self, range: std::ops::Range<usize>) -> Vec<(f32, f32, f32, f32)> {
+        let mut rectangles = Vec::new();
+        for pair in self.stops.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            if start.byte < range.start || start.byte >= range.end {
+                continue;
+            }
+            let width = if start.line == end.line {
+                (end.x - start.x).abs()
+            } else {
+                self.line_height * 0.35
+            };
+            if width > 0. {
+                rectangles.push((
+                    if start.line == end.line {
+                        start.x.min(end.x)
+                    } else {
+                        start.x
+                    },
+                    start.top,
+                    width,
+                    self.line_height,
+                ));
+            }
+        }
+        rectangles.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+        let mut merged: Vec<(f32, f32, f32, f32)> = Vec::new();
+        for (x, top, width, height) in rectangles {
+            if let Some(last) = merged.last_mut()
+                && last.1 == top
+                && x <= last.0 + last.2 + 0.1
+            {
+                last.2 = (x + width).max(last.0 + last.2) - last.0;
+            } else {
+                merged.push((x, top, width, height));
+            }
+        }
+        merged
+    }
+
     pub fn matches(&self, spec: &TextSpec) -> bool {
         self.spec.as_ref().is_some_and(|own| {
             own.source == spec.source
@@ -444,9 +484,9 @@ pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
             let top = run
                 .as_ref()
                 .map_or(line as f32 * line_height, |run| run.line_top);
-            for (index, _) in text
-                .char_indices()
-                .chain(std::iter::once((text.len(), ' ')))
+            for (index, _) in
+                unicode_segmentation::UnicodeSegmentation::grapheme_indices(text, true)
+                    .chain(std::iter::once((text.len(), "")))
             {
                 let cursor = cosmic_text::Cursor::new(line, index);
                 let x = run
@@ -778,6 +818,25 @@ mod tests {
         assert_eq!(map.hit(-10.0, 1.0), Some(0));
         assert_eq!(map.hit(1000.0, map.line_height * 1.5), Some(7));
         assert_eq!(map.vertical(0, false), None);
+    }
+
+    #[test]
+    fn selection_rectangles_follow_selected_lines_and_carets_stop_at_graphemes() {
+        let spec = spec("a\u{301}b\ncd", Spacing::default());
+        let map = caret_map(&spec).unwrap();
+        assert!(!map.stops.iter().any(|stop| stop.byte == 1));
+        let first = "a\u{301}".len();
+        let selected = map.selection_rects(first..spec.source.len());
+        assert_eq!(selected.len(), 2);
+        assert!(selected[0].0 > 0.);
+        assert_eq!(selected[1].0, 0.);
+        assert!(selected[1].1 > selected[0].1);
+        assert!(
+            selected
+                .iter()
+                .all(|(_, _, width, height)| *width > 0. && *height > 0.)
+        );
+        assert!(map.selection_rects(0..0).is_empty());
     }
 
     #[test]
