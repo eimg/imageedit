@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Context, Div, Pixels, Point, Window, point, prelude::*};
+use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*, px, rgb};
 use image::RgbaImage;
 
 use super::Workspace;
@@ -293,6 +293,7 @@ fn layer_mirror(action: LayerAdjust) -> Mirror {
 }
 
 const PREVIEW_EDGE: u32 = 256;
+pub(super) const MAX_PIVOT_COORD: f64 = i32::MAX as f64 + document::MAX_NEW_EDGE as f64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WarpKind {
@@ -305,6 +306,9 @@ enum WarpDrag {
     Rotate {
         start_degrees: f64,
         start_angle: f64,
+    },
+    Pivot {
+        grab: (f64, f64),
     },
     Flip {
         origin: Point<Pixels>,
@@ -322,6 +326,7 @@ pub(super) struct WarpSession {
     opacity: u8,
     kind: WarpKind,
     degrees: f64,
+    pivot: (f64, f64),
     mirror: Mirror,
     corners: [(f64, f64); 4],
     drag: Option<WarpDrag>,
@@ -334,6 +339,7 @@ pub(super) struct WarpFrame {
     pub grips: [(f64, f64); 4],
     pub grip_count: usize,
     pub invalid: bool,
+    pub pivot: Option<(f64, f64)>,
 }
 
 pub(super) struct WarpStatus {
@@ -395,6 +401,10 @@ impl Workspace {
             opacity: layer.opacity,
             kind,
             degrees: 0.0,
+            pivot: (
+                f64::from(offset.0) + f64::from(size.0) / 2.,
+                f64::from(offset.1) + f64::from(size.1) / 2.,
+            ),
             mirror: Mirror::Horizontal,
             corners: transform::layer_corners(offset, size),
             drag: None,
@@ -407,7 +417,7 @@ impl Workspace {
         if self
             .numeric_edit
             .as_ref()
-            .is_some_and(|edit| edit.field == super::numeric::NumericField::RotateAngle)
+            .is_some_and(|edit| edit.field.is_warp())
         {
             self.numeric_edit = None;
         }
@@ -430,6 +440,7 @@ impl Workspace {
     }
 
     pub(super) fn apply_warp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_numeric_edit(window, cx);
         if !self.can_apply_warp() {
             return;
         }
@@ -492,6 +503,126 @@ impl Workspace {
         self.request_warp_preview(window, cx);
     }
 
+    pub(super) fn rotation_pivot(&self) -> Option<(f64, f64)> {
+        self.warp
+            .as_ref()
+            .filter(|session| session.kind == WarpKind::Rotate)
+            .map(|session| session.pivot)
+    }
+
+    pub(super) fn set_rotation_pivot(
+        &mut self,
+        pivot: (f64, f64),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.warp_applying {
+            return;
+        }
+        let Some(session) = self
+            .warp
+            .as_mut()
+            .filter(|session| session.kind == WarpKind::Rotate && !session.dragging())
+        else {
+            return;
+        };
+        if !session.set_pivot(pivot) {
+            return;
+        }
+        if session.changed() {
+            self.request_warp_preview(window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn set_rotation_anchor(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_numeric_edit(window, cx);
+        let Some(pivot) = self
+            .warp
+            .as_ref()
+            .and_then(|session| session.pivot_anchor(index))
+        else {
+            return;
+        };
+        self.set_rotation_pivot(pivot, window, cx);
+    }
+
+    pub(super) fn rotation_pivot_options(&self, cx: &Context<Self>) -> Div {
+        use super::numeric::NumericField;
+        use super::tooltip::tooltip;
+        use super::view::{ACCENT, BORDER, CANVAS, HOVER, MUTED, TEXT};
+        let names = [
+            "Top left",
+            "Top center",
+            "Top right",
+            "Left center",
+            "Center",
+            "Right center",
+            "Bottom left",
+            "Bottom center",
+            "Bottom right",
+        ];
+        let grid = div().flex().flex_col().gap_1().children((0..3).map(|row| {
+            div().flex().gap_1().children((0..3).map(|column| {
+                let index = row * 3 + column;
+                let selected = self
+                    .warp
+                    .as_ref()
+                    .is_some_and(|session| session.pivot_anchor(index) == Some(session.pivot));
+                div()
+                    .id(("rotation-anchor", index))
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(if selected { ACCENT } else { BORDER }))
+                    .bg(rgb(CANVAS))
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgb(HOVER)))
+                    .tooltip(tooltip(names[index]))
+                    .child(div().size(px(4.)).rounded_full().bg(rgb(if selected {
+                        ACCENT
+                    } else {
+                        TEXT
+                    })))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_rotation_anchor(index, window, cx)
+                    }))
+            }))
+        }));
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child("Pivot"),
+            )
+            .child(
+                div().flex().gap_2().child(grid).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            self.numeric_chip(NumericField::RotatePivotX, Some("X"), cx)
+                                .tooltip(tooltip("Pivot X in canvas pixels")),
+                        )
+                        .child(
+                            self.numeric_chip(NumericField::RotatePivotY, Some("Y"), cx)
+                                .tooltip(tooltip("Pivot Y in canvas pixels")),
+                        ),
+                ),
+            )
+    }
+
     pub(super) fn set_warp_mirror(
         &mut self,
         mirror: Mirror,
@@ -534,6 +665,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.commit_numeric_edit(window, cx);
         if self.warp_applying {
             return;
         }
@@ -543,14 +675,18 @@ impl Workspace {
         let Some(canvas) = self.canvas_point(position, scale) else {
             return;
         };
+        let pivot_hit = self.rotation_pivot_hit(position, scale);
         let grip = self.grip_at(position, scale);
         let Some(session) = self.warp.as_mut() else {
             return;
         };
         session.drag = match session.kind {
+            WarpKind::Rotate if pivot_hit => Some(WarpDrag::Pivot {
+                grab: (session.pivot.0 - canvas.0, session.pivot.1 - canvas.1),
+            }),
             WarpKind::Rotate => Some(WarpDrag::Rotate {
                 start_degrees: session.degrees,
-                start_angle: pointer_angle(session.center(), canvas),
+                start_angle: pointer_angle(session.pivot, canvas),
             }),
             WarpKind::Flip => Some(WarpDrag::Flip { origin: position }),
             WarpKind::Perspective => grip.map(|index| WarpDrag::Corner {
@@ -592,11 +728,15 @@ impl Workspace {
                     let degrees = drag_degrees(
                         start_degrees,
                         start_angle,
-                        pointer_angle(session.center(), canvas),
+                        pointer_angle(session.pivot, canvas),
                         shift,
                     );
                     changed = degrees != session.degrees;
                     session.degrees = degrees;
+                }
+                Some(WarpDrag::Pivot { grab }) => {
+                    changed = session.set_pivot((canvas.0 + grab.0, canvas.1 + grab.1))
+                        && session.changed();
                 }
                 Some(WarpDrag::Flip { origin }) => {
                     let dx = f32::from(position.x - origin.x).abs();
@@ -642,8 +782,7 @@ impl Workspace {
         let center = session.center();
         Some(match session.kind {
             WarpKind::Rotate => {
-                let outline =
-                    transform::placed_rotation_outline(session.offset, size, session.degrees);
+                let outline = session.rotation_outline();
                 let mid = (
                     (outline[0].0 + outline[1].0) / 2.0,
                     (outline[0].1 + outline[1].1) / 2.0,
@@ -655,6 +794,7 @@ impl Workspace {
                     grips: [grip, grip, grip, grip],
                     grip_count: 1,
                     invalid: self.warp_error.is_some(),
+                    pivot: Some(session.pivot),
                 }
             }
             WarpKind::Flip => {
@@ -668,6 +808,7 @@ impl Workspace {
                     grips: source,
                     grip_count: 4,
                     invalid: self.warp_error.is_some(),
+                    pivot: None,
                 }
             }
             WarpKind::Perspective => WarpFrame {
@@ -676,6 +817,7 @@ impl Workspace {
                 grips: session.corners,
                 grip_count: 4,
                 invalid: self.warp_error.is_some(),
+                pivot: None,
             },
         })
     }
@@ -865,6 +1007,23 @@ impl Workspace {
         ))
     }
 
+    fn rotation_pivot_hit(&self, position: Point<Pixels>, scale: f32) -> bool {
+        let Some(pivot) = self.rotation_pivot() else {
+            return false;
+        };
+        let Some(tab) = self.active_tab() else {
+            return false;
+        };
+        let Some(geometry) = PreviewGeometry::for_tab(tab, self.viewport.get(), scale) else {
+            return false;
+        };
+        let projected = geometry.project(point(
+            (pivot.0 / f64::from(tab.document.width())) as f32,
+            (pivot.1 / f64::from(tab.document.height())) as f32,
+        ));
+        f32::from(projected.x - position.x).hypot(f32::from(projected.y - position.y)) <= 8.
+    }
+
     fn grip_at(&self, position: Point<Pixels>, scale: f32) -> Option<usize> {
         let tab = self.active_tab()?;
         let geometry = PreviewGeometry::for_tab(tab, self.viewport.get(), scale)?;
@@ -901,9 +1060,51 @@ impl WarpSession {
 
     fn spec(&self) -> Warp {
         match self.kind {
-            WarpKind::Rotate => Warp::Rotate(self.degrees),
+            WarpKind::Rotate if self.pivot == self.center() => Warp::Rotate(self.degrees),
+            WarpKind::Rotate => Warp::RotateAround {
+                degrees: self.degrees,
+                pivot: self.pivot,
+            },
             WarpKind::Flip => Warp::Flip(self.mirror),
             WarpKind::Perspective => Warp::Perspective(self.corners),
+        }
+    }
+
+    fn set_pivot(&mut self, pivot: (f64, f64)) -> bool {
+        if !pivot.0.is_finite()
+            || !pivot.1.is_finite()
+            || pivot.0.abs() > MAX_PIVOT_COORD
+            || pivot.1.abs() > MAX_PIVOT_COORD
+        {
+            return false;
+        }
+        let pivot = ((pivot.0 * 10.).round() / 10., (pivot.1 * 10.).round() / 10.);
+        if self.pivot == pivot {
+            return false;
+        }
+        self.pivot = pivot;
+        true
+    }
+
+    fn pivot_anchor(&self, index: usize) -> Option<(f64, f64)> {
+        (index < 9).then(|| {
+            let (width, height) = self.source.dimensions();
+            (
+                f64::from(self.offset.0) + f64::from(width) * (index % 3) as f64 / 2.,
+                f64::from(self.offset.1) + f64::from(height) * (index / 3) as f64 / 2.,
+            )
+        })
+    }
+
+    fn rotation_outline(&self) -> [(f64, f64); 4] {
+        if self.pivot == self.center() {
+            transform::placed_rotation_outline(self.offset, self.source.dimensions(), self.degrees)
+        } else {
+            transform::rotate_corners_about(
+                transform::layer_corners(self.offset, self.source.dimensions()),
+                self.degrees,
+                self.pivot,
+            )
         }
     }
 
@@ -959,6 +1160,146 @@ fn drop_preview(preview: WarpPreview, window: &mut Window, cx: &mut Context<Work
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pivot_anchors_precision_and_default_center_leave_source_and_pending_state_intact() {
+        let mut session = WarpSession {
+            layer: LayerId(7),
+            source: Arc::new(RgbaImage::new(5, 2)),
+            offset: (-3, 4),
+            opacity: 180,
+            kind: WarpKind::Rotate,
+            degrees: 0.,
+            pivot: (-0.5, 5.),
+            mirror: Mirror::Horizontal,
+            corners: transform::layer_corners((-3, 4), (5, 2)),
+            drag: None,
+        };
+        let pixels = session.source.clone();
+        assert_eq!(session.spec(), Warp::Rotate(0.));
+        let expected = [
+            (-3., 4.),
+            (-0.5, 4.),
+            (2., 4.),
+            (-3., 5.),
+            (-0.5, 5.),
+            (2., 5.),
+            (-3., 6.),
+            (-0.5, 6.),
+            (2., 6.),
+        ];
+        for (index, point) in expected.into_iter().enumerate() {
+            assert_eq!(session.pivot_anchor(index), Some(point));
+            session.set_pivot(point);
+            assert!(!session.changed());
+            assert!(Arc::ptr_eq(&pixels, &session.source));
+            assert_eq!(session.offset, (-3, 4));
+        }
+        assert_eq!(session.pivot_anchor(9), None);
+        assert!(session.set_pivot((1.234, -4.567)));
+        assert_eq!(session.pivot, (1.2, -4.6));
+        assert!(!session.set_pivot((1.2, -4.6)));
+        for bad in [
+            (f64::NAN, 0.),
+            (0., f64::INFINITY),
+            (MAX_PIVOT_COORD + 1., 0.),
+        ] {
+            assert!(!session.set_pivot(bad));
+            assert_eq!(session.pivot, (1.2, -4.6));
+        }
+        session.set_pivot(session.center());
+        session.degrees = 90.;
+        assert_eq!(session.spec(), Warp::Rotate(90.));
+        let placed =
+            transform::warp_bounds(session.offset, session.source.dimensions(), session.spec())
+                .unwrap();
+        let outline = session.rotation_outline();
+        let left = outline
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let top = outline
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        assert!((left - f64::from(placed.offset.0)).abs() < 1e-9);
+        assert!((top - f64::from(placed.offset.1)).abs() < 1e-9);
+        session.set_pivot(expected[0]);
+        assert_eq!(
+            session.spec(),
+            Warp::RotateAround {
+                degrees: 90.,
+                pivot: expected[0]
+            }
+        );
+        assert_eq!(session.rotation_outline()[0], expected[0]);
+    }
+
+    #[test]
+    fn applying_pivot_rotation_is_one_undo_step_and_keeps_selection_in_canvas_coordinates() {
+        use super::super::{Change, Tab, history::State};
+        fn publish(tab: &mut Tab, state: State, change: Change) {
+            let patch = document::RenderedCanvas::prepare_patch(
+                &tab.document.canvas.pixels,
+                tab.document.canvas.preview.has_transparency,
+                tab.document.canvas.level_caches(),
+                &state.content,
+                Dirty::Canvas,
+            )
+            .unwrap();
+            assert!(
+                tab.publish_change(
+                    tab.history.generation(),
+                    change,
+                    Some((state.content, state.active_layer, state.selection, patch)),
+                    1
+                )
+                .0
+            );
+        }
+        let mut tab = super::super::tests::opacity_tab();
+        tab.selection = Selection::Rect(PixelRect::new(0, 0, 1, 2));
+        let selection = tab.selection.clone();
+        let layer = tab.active_layer;
+        let before = tab.document.content.layer(layer).unwrap().pixels.clone();
+        let placed = transform::warp_layer(
+            &before,
+            (0, 0),
+            Warp::RotateAround {
+                degrees: 90.,
+                pivot: (0., 0.),
+            },
+            Resample::Bicubic,
+            None,
+        )
+        .unwrap();
+        assert_eq!(placed.offset, (-2, 0));
+        assert!(!tab.history.is_dirty());
+        let mut state = tab.state();
+        assert_ne!(
+            state
+                .content
+                .place_layer(layer, placed.pixels, placed.offset),
+            Dirty::None
+        );
+        publish(&mut tab, state, Change::Edit);
+        assert!(tab.history.is_dirty());
+        assert_eq!(tab.selection, selection);
+        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (-2, 0));
+        let previous = tab.history.undo_target().unwrap().0.clone();
+        publish(&mut tab, previous, Change::Undo);
+        assert!(!tab.history.is_dirty());
+        assert!(tab.history.undo_target().is_none());
+        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (0, 0));
+        assert!(Arc::ptr_eq(
+            &before,
+            &tab.document.content.layer(layer).unwrap().pixels
+        ));
+        let next = tab.history.redo_target().unwrap().0.clone();
+        publish(&mut tab, next, Change::Redo);
+        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (-2, 0));
+        assert_eq!(tab.selection, selection);
+    }
 
     #[test]
     fn image_turns_and_flips_keep_antialiased_selection_coverage() {
@@ -1026,6 +1367,7 @@ mod tests {
             opacity: 255,
             kind: WarpKind::Rotate,
             degrees: 0.0,
+            pivot: (2.5, 3.),
             mirror: Mirror::Horizontal,
             corners: transform::layer_corners((1, 2), (3, 2)),
             drag: None,

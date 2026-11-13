@@ -42,7 +42,8 @@ clipping retains the original curves; pixel-art hard selections remain available
 - [x] Constrained rotation angle increments while dragging.
 - [x] Keyboard layer nudging, with larger modifier steps.
 - [x] Typed layer position.
-- [ ] Further anchoring/pivot controls for transforms.
+- [x] Rotation pivot anchors, typed canvas coordinates, and dragging.
+- [ ] Evaluate further Scale/Perspective anchoring separately.
 - [x] Crop aspect ratios and consistent dimension constraints.
 
 Acceptance: preview and commit agree; Escape cancels drafts; one completed edit
@@ -1151,7 +1152,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 18 — independent region settings and optional line-art gap closure
 
-Implemented; committed at the start of Pass 19:
+Implemented; committed as `350e510` at the start of Pass 19:
 
 - Wand and Bucket remember independent Tolerance and Gap radius values during
   the workspace session. Both start at zero. Typed edits and steppers share
@@ -1207,3 +1208,57 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Change zoom/pan and confirm radius remains in image pixels. Switch Bucket to
   Selection while typing a match value; matching/sampling fields should hide,
   typing should stop, and whole-selection fill should ignore those settings.
+
+
+## Pass 19 — precise rotation pivot editing
+
+Implemented; committed at the start of Pass 20:
+
+- Rotate now exposes a compact nine-anchor Pivot selector, signed canvas X/Y
+  fields with tenths precision, and a contrast-rimmed circular crosshair. Presets
+  refer to the original layer's corners, edge centers, and center. Dragging the
+  pivot preserves its grab offset; dragging elsewhere rotates about it, with
+  the existing absolute 15-degree Shift constraint.
+- Pivot edits recalculate the original layer at the current angle. Choosing a
+  pivot at zero angle changes only the frame, does not launch another raster
+  preview, and does not create history or pending pixel edits. Center restores
+  the existing centered rotation and its mixed-parity quarter-turn placement.
+- Custom rotation shares `Warp::RotateAround` geometry across frame, bounds,
+  reduced preview, and Apply. Integral quarter turns preserve exact RGBA pixels;
+  fractional-grid placement uses the chosen resampler rather than an invalid
+  lossless shortcut. Identity rotations retain exact geometry even for large
+  finite pivots. Nonfinite or unplaceable results are rejected before allocation.
+- Coordinates are quantized from absolute values, bounded, and restored exactly
+  on empty numeric text/Escape. Apply and canvas gestures finish a numeric edit
+  first. Cancellation clears pivot fields along with the angle editor; draft
+  pivot state resets with each new target/session and is not project metadata.
+- Apply stays one undo step and leaves the canvas selection in place. Existing
+  source snapshots, opacity, layer-position/text guards, stack budgets, and
+  preview coalescing remain in effect. Other transform anchors remain a separate
+  follow-up. Updated help, README, and AGENTS; no new toolbox tool, dependency,
+  project format, package version, publishing, installer, or icon changes.
+
+Automatic validation: formatting, Clippy with warnings denied, all 381 tests,
+and both release benchmarks pass. Six new regression tests cover exact custom
+quarter turns, fractional placement under all resamplers, independent rotation
+angle/distance geometry, shared coarse/full bounds, invalid/oversized placement,
+large-pivot identity previews, nine-anchor/default-center behavior, bounded signed
+decimal editing/restoration, source sharing, and one-step Apply/undo/redo with
+stationary selections and saved-revision restoration. Existing centered rotation,
+perspective, layer-transform, and preview tests remain passing. `dist/Lime.app`
+is rebuilt and its signature verified. No interactive or visual smoke tests run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Rotate offset and odd-sized layers using each anchor, custom positive/negative
+  coordinates, and a dragged pivot at Fit/high zoom after pan. Check the crosshair,
+  grab offset, tenths readouts, and Shift-constrained angles around the new point.
+- Change the pivot at zero and nonzero angles, return to Center, and compare
+  quarter turns with fractional custom pivots under all resampling choices.
+  Choosing a pivot alone must leave pixels/history/saved revision unchanged.
+- Clear or partially type either coordinate, press Escape/Return, click Apply,
+  or start a canvas drag. Check original-value restoration, single-step undo/redo,
+  and a stationary canvas selection. Try a far off-canvas pivot that exceeds
+  placement limits, then restore a valid one and apply.
+- Cancel a preview, switch layers/tabs/tools, and try locked-position or editable
+  text layers. Confirm no pivot or late preview can affect a different target.

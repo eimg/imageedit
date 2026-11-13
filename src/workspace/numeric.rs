@@ -35,6 +35,8 @@ pub(super) enum NumericField {
     ScaleWidth,
     ScaleHeight,
     RotateAngle,
+    RotatePivotX,
+    RotatePivotY,
     MoveX,
     MoveY,
     GridSpacing,
@@ -75,6 +77,8 @@ impl NumericField {
             Self::ScaleWidth => 16,
             Self::ScaleHeight => 17,
             Self::RotateAngle => 18,
+            Self::RotatePivotX => 35,
+            Self::RotatePivotY => 36,
             Self::MoveX => 19,
             Self::MoveY => 20,
             Self::GridSpacing => 21,
@@ -106,6 +110,17 @@ impl NumericField {
         matches!(self, Self::MoveX | Self::MoveY)
     }
 
+    pub(super) fn is_warp(self) -> bool {
+        matches!(
+            self,
+            Self::RotateAngle | Self::RotatePivotX | Self::RotatePivotY
+        )
+    }
+
+    fn is_pivot(self) -> bool {
+        matches!(self, Self::RotatePivotX | Self::RotatePivotY)
+    }
+
     fn parse(self, text: &str) -> Option<i64> {
         if matches!(self, Self::GradientStopPosition | Self::GradientStopOpacity) {
             let value = text.parse::<f64>().ok()?;
@@ -117,6 +132,10 @@ impl NumericField {
                 };
                 value.round() as i64
             })
+        } else if self.is_pivot() {
+            let value = text.parse::<f64>().ok()?;
+            (value.is_finite() && value.abs() <= super::transform_ui::MAX_PIVOT_COORD)
+                .then(|| (value * 10.).round() as i64)
         } else if self == Self::RotateAngle {
             let value = text.parse::<f64>().ok()?;
             (value.is_finite() && (-360.0..=360.0).contains(&value))
@@ -133,7 +152,8 @@ impl NumericField {
     fn format(self, value: i64) -> String {
         if self == Self::GradientStopOpacity {
             format!("{:.1}", value as f64 * 100. / 255.)
-        } else if matches!(self, Self::RotateAngle | Self::GradientStopPosition) {
+        } else if self.is_pivot() || matches!(self, Self::RotateAngle | Self::GradientStopPosition)
+        {
             format!("{:.1}", value as f64 / 10.)
         } else {
             value.to_string()
@@ -153,12 +173,16 @@ impl NumericField {
 
     fn accepts_character(self, ch: char) -> bool {
         ch.is_ascii_digit()
-            || ((matches!(self, Self::TextLetterSpacing | Self::RotateAngle) || self.is_move())
+            || ((matches!(self, Self::TextLetterSpacing | Self::RotateAngle)
+                || self.is_move()
+                || self.is_pivot())
                 && ch == '-')
-            || (matches!(
-                self,
-                Self::RotateAngle | Self::GradientStopPosition | Self::GradientStopOpacity
-            ) && ch == '.')
+            || ((self.is_pivot()
+                || matches!(
+                    self,
+                    Self::RotateAngle | Self::GradientStopPosition | Self::GradientStopOpacity
+                ))
+                && ch == '.')
     }
 
     fn is_tool_option(self) -> bool {
@@ -176,6 +200,8 @@ impl NumericField {
                 | Self::BrushFlow
                 | Self::PathStrokeSize
                 | Self::RotateAngle
+                | Self::RotatePivotX
+                | Self::RotatePivotY
                 | Self::GridSpacing
                 | Self::SelectionRatioWidth
                 | Self::SelectionRatioHeight
@@ -202,6 +228,10 @@ impl NumericField {
             | Self::CropRatioWidth
             | Self::CropRatioHeight => (1, 16384),
             Self::RotateAngle => (-3600, 3600),
+            Self::RotatePivotX | Self::RotatePivotY => {
+                let limit = (super::transform_ui::MAX_PIVOT_COORD * 10.).round() as i64;
+                (-limit, limit)
+            }
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
             Self::BrushSpacing => (1, 100),
             Self::BrushHardness | Self::BrushOpacity | Self::BrushFlow => (0, 100),
@@ -397,6 +427,16 @@ impl Workspace {
                 Some((self.text_line_spacing() * 100.0).round() as i64)
             }
             NumericField::TextLetterSpacing => Some(self.text_letter_spacing().round() as i64),
+            NumericField::RotatePivotX | NumericField::RotatePivotY => {
+                self.rotation_pivot().map(|pivot| {
+                    ((if field == NumericField::RotatePivotX {
+                        pivot.0
+                    } else {
+                        pivot.1
+                    }) * 10.)
+                        .round() as i64
+                })
+            }
             NumericField::WandTolerance => Some(i64::from(self.wand_match.tolerance)),
             NumericField::FillTolerance => Some(i64::from(self.fill_match.tolerance)),
             NumericField::WandGapRadius => Some(i64::from(self.wand_match.gap_radius)),
@@ -435,9 +475,7 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        if field == NumericField::RotateAngle
-            && self.warp_status().is_none_or(|status| status.applying)
-        {
+        if field.is_warp() && self.warp_status().is_none_or(|status| status.applying) {
             return;
         }
         if let Some(edit) = self.numeric_edit.as_mut() {
@@ -970,6 +1008,16 @@ impl Workspace {
             NumericField::BrushFlow => self.set_brush_value(BrushField::Flow, value as u32, cx),
             NumericField::PathStrokeSize => self.brushes.outline.diameter = value as u32,
             NumericField::RotateAngle => self.set_warp_angle(value as f64 / 10., window, cx),
+            NumericField::RotatePivotX | NumericField::RotatePivotY => {
+                if let Some(mut pivot) = self.rotation_pivot() {
+                    if field == NumericField::RotatePivotX {
+                        pivot.0 = value as f64 / 10.;
+                    } else {
+                        pivot.1 = value as f64 / 10.;
+                    }
+                    self.set_rotation_pivot(pivot, window, cx);
+                }
+            }
             NumericField::TextLetterSpacing => {
                 self.set_text_letter_spacing(value as f32, window, cx)
             }
@@ -1095,6 +1143,34 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pivot_fields_accept_signed_decimal_canvas_positions_and_restore_exact_tenths() {
+        for field in [NumericField::RotatePivotX, NumericField::RotatePivotY] {
+            assert!(field.is_warp() && field.is_tool_option());
+            assert!(field.accepts_character('-') && field.accepts_character('.'));
+            assert_eq!(field.parse("-12.56"), Some(-126));
+            assert_eq!(field.format(-126), "-12.6");
+            for text in ["", "-", "NaN", "inf", "1e100"] {
+                assert_eq!(field.parse(text), None);
+            }
+            let limit = super::super::transform_ui::MAX_PIVOT_COORD;
+            assert!(field.parse(&limit.to_string()).is_some());
+            assert_eq!(field.parse(&(limit + 1.).to_string()), None);
+            let mut edit = NumericEdit::new(field, 25, None);
+            edit.insert_digits("-3.5");
+            assert_eq!(field.parse(&edit.text), Some(-35));
+            edit.selected = true;
+            edit.delete();
+            assert_eq!(field.parse(&edit.text), None);
+            assert_eq!(edit.original, 25);
+            assert_eq!(field.format(edit.original), "2.5");
+        }
+        assert_ne!(
+            NumericField::RotatePivotX.id(),
+            NumericField::RotatePivotY.id()
+        );
+    }
 
     #[test]
     fn gradient_fields_keep_tenths_of_percent_and_exact_alpha_through_cancel_restore() {

@@ -246,6 +246,7 @@ fn scale_span(start: i64, length: u32, old: u32, new: u32) -> (i64, u32) {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Warp {
     Rotate(f64),
+    RotateAround { degrees: f64, pivot: (f64, f64) },
     Flip(Mirror),
     Perspective([(f64, f64); 4]),
 }
@@ -311,6 +312,18 @@ pub fn warp_bounds(
             }
             rotate_corners(layer_corners(offset, size), degrees)
         }
+        Warp::RotateAround { degrees, pivot } => {
+            if !degrees.is_finite() || !pivot.0.is_finite() || !pivot.1.is_finite() {
+                return Err(WarpError::Singular);
+            }
+            if degrees.rem_euclid(360.) == 0. {
+                if !canvas_allowed(size.0, size.1) {
+                    return Err(WarpError::TooLarge);
+                }
+                return Ok(PlacedBox { offset, size });
+            }
+            rotate_corners_about(layer_corners(offset, size), degrees, pivot)
+        }
         Warp::Flip(_) => layer_corners(offset, size),
         Warp::Perspective(corners) => {
             validate_quad(corners)?;
@@ -338,6 +351,17 @@ pub fn warp_layer(
             Warp::Flip(mirror) => Some(mirror_pixels(pixels, mirror)),
             warp if identity_warp(offset, size, warp) => Some(pixels.clone()),
             Warp::Rotate(degrees) => exact_turn(degrees).map(|turn| turn_pixels(pixels, turn)),
+            Warp::RotateAround { degrees, pivot } => exact_turn(degrees)
+                .filter(|turn| {
+                    bounds == turned_size(size.0, size.1, *turn)
+                        && rotate_corners_about(layer_corners(offset, size), degrees, pivot)
+                            .iter()
+                            .all(|point| {
+                                (point.0 - point.0.round()).abs() < 1e-4
+                                    && (point.1 - point.1.round()).abs() < 1e-4
+                            })
+                })
+                .map(|turn| turn_pixels(pixels, turn)),
             _ => None,
         };
         if let Some(pixels) = exact {
@@ -353,6 +377,7 @@ pub fn warp_layer(
     let source = layer_corners(offset, size);
     let dest = match warp {
         Warp::Rotate(degrees) => placed_rotation_outline(offset, size, degrees),
+        Warp::RotateAround { degrees, pivot } => rotate_corners_about(source, degrees, pivot),
         Warp::Perspective(corners) => corners,
         Warp::Flip(_) => source,
     };
@@ -448,6 +473,7 @@ fn identity_warp(offset: (i32, i32), size: (u32, u32), warp: Warp) -> bool {
             let turns = degrees / 360.0;
             (turns - turns.round()).abs() < 1e-6
         }
+        Warp::RotateAround { degrees, .. } => degrees.rem_euclid(360.) == 0.,
         Warp::Flip(_) => false,
         Warp::Perspective(corners) => corners
             .iter()
@@ -498,6 +524,26 @@ pub(crate) fn rotate_corners(corners: [(f64, f64); 4], degrees: f64) -> [(f64, f
             center.0 + dx * cos - dy * sin,
             center.1 + dx * sin + dy * cos,
         )
+    })
+}
+
+pub(crate) fn rotate_corners_about(
+    corners: [(f64, f64); 4],
+    degrees: f64,
+    pivot: (f64, f64),
+) -> [(f64, f64); 4] {
+    if degrees.rem_euclid(360.) == 0. {
+        return corners;
+    }
+    let (sin, cos) = match exact_turn(degrees) {
+        Some(Turn::Right) => (1., 0.),
+        Some(Turn::Half) => (0., -1.),
+        Some(Turn::Left) => (-1., 0.),
+        None => degrees.rem_euclid(360.).to_radians().sin_cos(),
+    };
+    corners.map(|(x, y)| {
+        let (dx, dy) = (x - pivot.0, y - pivot.1);
+        (pivot.0 + dx * cos - dy * sin, pivot.1 + dx * sin + dy * cos)
     })
 }
 
@@ -786,6 +832,167 @@ fn unpremultiply(pixels: &PremultipliedImage) -> RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_rotation_pivots_place_integral_quarter_turns_without_resampling() {
+        let image = RgbaImage::from_fn(3, 2, |x, y| {
+            Rgba([
+                10 + x as u8 * 30,
+                y as u8 * 100,
+                75,
+                60 + (x + y) as u8 * 40,
+            ])
+        });
+        let placed = warp_layer(
+            &image,
+            (2, 3),
+            Warp::RotateAround {
+                degrees: 90.,
+                pivot: (0., 0.),
+            },
+            Resample::Bicubic,
+            None,
+        )
+        .unwrap();
+        assert_eq!(placed.offset, (-5, 2));
+        assert_eq!(placed.bounds, (2, 3));
+        for (x, y, pixel) in image.enumerate_pixels() {
+            assert_eq!(placed.pixels.get_pixel(1 - y, x), pixel);
+        }
+        let half = warp_layer(
+            &image,
+            (2, -3),
+            Warp::RotateAround {
+                degrees: 180.,
+                pivot: (-1., 4.),
+            },
+            Resample::Bilinear,
+            None,
+        )
+        .unwrap();
+        assert_eq!(half.offset, (-7, 9));
+        assert_eq!(half.bounds, (3, 2));
+        for (x, y, pixel) in image.enumerate_pixels() {
+            assert_eq!(half.pixels.get_pixel(2 - x, 1 - y), pixel);
+        }
+    }
+
+    #[test]
+    fn fractional_pivots_keep_fractional_placement_instead_of_taking_an_integral_shortcut() {
+        let image = RgbaImage::from_fn(3, 2, |x, y| {
+            Rgba([50 + x as u8 * 60, y as u8 * 100, 10, 180])
+        });
+        let expected = [(0.25, -0.25), (0.25, 2.75), (-1.75, 2.75), (-1.75, -0.25)];
+        assert_eq!(
+            rotate_corners_about(layer_corners((0, 0), (3, 2)), 90., (0.25, 0.)),
+            expected
+        );
+        for resample in [Resample::Nearest, Resample::Bilinear, Resample::Bicubic] {
+            let placed = warp_layer(
+                &image,
+                (0, 0),
+                Warp::RotateAround {
+                    degrees: 90.,
+                    pivot: (0.25, 0.),
+                },
+                resample,
+                None,
+            )
+            .unwrap();
+            assert_eq!(placed.offset, (-2, -1));
+            assert_eq!(placed.bounds, (3, 4));
+            let quad =
+                warp_layer(&image, (0, 0), Warp::Perspective(expected), resample, None).unwrap();
+            assert_eq!(placed.pixels, quad.pixels);
+            assert!(placed.pixels.pixels().any(|pixel| pixel[3] < 180));
+        }
+    }
+
+    #[test]
+    fn pivot_rotation_has_shared_preview_bounds_and_rejects_invalid_or_unplaceable_geometry() {
+        let image = RgbaImage::from_pixel(32, 17, Rgba([220, 30, 50, 128]));
+        let offset = (-8, 13);
+        let pivot = (1003.2, -991.4);
+        let angle = 37.;
+        let warp = Warp::RotateAround {
+            degrees: angle,
+            pivot,
+        };
+        let corners = rotate_corners_about(layer_corners(offset, image.dimensions()), angle, pivot);
+        let original = layer_corners(offset, image.dimensions());
+        for (before, after) in original.into_iter().zip(corners) {
+            let from = (before.0 - pivot.0, before.1 - pivot.1);
+            let to = (after.0 - pivot.0, after.1 - pivot.1);
+            assert!((from.0.hypot(from.1) - to.0.hypot(to.1)).abs() < 1e-9);
+            let measured = (from.0 * to.1 - from.1 * to.0)
+                .atan2(from.0 * to.0 + from.1 * to.1)
+                .to_degrees();
+            assert!((measured - angle).abs() < 1e-9);
+        }
+        let preview = warp_layer(&image, offset, warp, Resample::Bilinear, Some(8)).unwrap();
+        let full = warp_layer(&image, offset, warp, Resample::Bilinear, None).unwrap();
+        assert_eq!((preview.offset, preview.bounds), (full.offset, full.bounds));
+        assert!(preview.pixels.width().max(preview.pixels.height()) <= 8);
+        for (x, y) in corners {
+            assert!(x >= f64::from(full.offset.0) && y >= f64::from(full.offset.1));
+            assert!(
+                x <= f64::from(full.offset.0) + f64::from(full.bounds.0)
+                    && y <= f64::from(full.offset.1) + f64::from(full.bounds.1)
+            );
+        }
+        for warp in [
+            Warp::RotateAround {
+                degrees: f64::NAN,
+                pivot,
+            },
+            Warp::RotateAround {
+                degrees: 0.,
+                pivot: (f64::INFINITY, 0.),
+            },
+            Warp::RotateAround {
+                degrees: 30.,
+                pivot: (f64::MAX, f64::MAX),
+            },
+        ] {
+            assert!(warp_bounds(offset, image.dimensions(), warp).is_err());
+        }
+        assert!(
+            warp_bounds(
+                offset,
+                (MAX_NEW_EDGE + 1, 1),
+                Warp::RotateAround { degrees: 0., pivot }
+            )
+            .is_err()
+        );
+        for angle in [0., 360., -720.] {
+            let identity = warp_layer(
+                &image,
+                offset,
+                Warp::RotateAround {
+                    degrees: angle,
+                    pivot,
+                },
+                Resample::Bicubic,
+                None,
+            )
+            .unwrap();
+            assert_eq!(identity.offset, offset);
+            assert_eq!(identity.pixels, image);
+            let coarse = warp_layer(
+                &image,
+                offset,
+                Warp::RotateAround {
+                    degrees: angle,
+                    pivot: (f64::MAX, f64::MAX),
+                },
+                Resample::Bilinear,
+                Some(8),
+            )
+            .unwrap();
+            assert_eq!(coarse.offset, offset);
+            assert_eq!(coarse.bounds, image.dimensions());
+        }
+    }
 
     #[test]
     fn smooth_scaling_preserves_faint_colors() {

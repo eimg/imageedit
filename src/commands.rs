@@ -285,7 +285,7 @@ impl Tool {
                 "Drag a crop box. Drag inside to move it or drag a handle to resize it. Choose Free or a fixed aspect ratio; edit Ratio W/H for a custom ratio. The ratio applies on the next drag, resize, or dimension edit. X, Y, Width, and Height update immediately; empty text restores the field's original value. Return applies the crop; Escape cancels."
             }
             Self::Rotate => {
-                "Drag to rotate the active layer or type an angle in degrees. Hold Shift while dragging to snap to 15-degree angles. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
+                "Drag to rotate the active layer or type an angle in degrees. Choose one of nine layer anchors for the pivot, edit its signed canvas X/Y to tenths of a pixel, or drag its circular crosshair. Pivot changes recalculate the original layer at the current angle; choosing a pivot at zero angle does not edit pixels. Center restores the default rotation behavior. Hold Shift while dragging to snap to 15-degree angles around the pivot. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
             }
             Self::Flip => {
                 "Choose Horizontal or Vertical, or drag to choose a direction. Return applies the flip; Escape cancels. The selection stays in canvas coordinates."

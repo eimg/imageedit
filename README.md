@@ -104,8 +104,19 @@ Return or clicking outside commits one undo step; Escape or empty text restores
 the original size. Aspect locking starts on; Shift temporarily reverses the lock
 while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
 In **Rotate**, enter an angle in degrees (including negative values and tenths),
-then use Apply after finishing the numeric edit. **Sample All Layers** on the
-Magic Wand samples the visible composite and can select beyond the active layer.
+then use Apply after finishing the numeric edit. **Pivot** offers nine anchors
+on the original layer, signed canvas X/Y coordinates in tenths of an image pixel,
+and a draggable circular crosshair. Drag elsewhere to rotate around that point;
+Shift snaps the angle to 15-degree steps. Changing the pivot recalculates the
+original layer at the current angle. Center restores the existing centered
+rotation, including lossless pixel placement at quarter turns. Fractional custom
+pivots use the selected resampling when their rotated pixel grid is fractional.
+Pivot choices alone at zero angle do not edit pixels or add history. Empty
+numeric text or Escape restores that field; Escape on the canvas cancels the
+whole preview. A new rotation session starts centered. Applying a changed result
+creates one undo step while the canvas and selection keep their coordinates.
+**Sample All Layers** on the Magic Wand samples the visible composite and can
+select beyond the active layer.
 
 **Rectangle Select** and **Oval Select** accept X/Y and Width/Height for an
 editable geometric selection. Return or leaving the field commits one selection

@@ -115,8 +115,11 @@ pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
 commit on Apply, leaving the selection in canvas coordinates. Rotate also accepts
-typed angles in degrees with tenths precision; Shift-drag snaps to absolute
-15-degree angles, including when Shift changes without moving the pointer. Perspective
+typed angles in degrees with tenths precision. Rotate's Pivot offers nine
+original-layer anchors, signed canvas X/Y in tenths of an image pixel, and a
+screen-sized circular crosshair that can be dragged without snapping to the click.
+Custom pivots recalculate the original layer at the current angle; Shift-drag
+rotates around that pivot and snaps to absolute 15-degree angles, including when Shift changes without moving the pointer. Perspective
 corner grips keep a dark rim so they stay visible on a white image. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
 border or corner; release commits one undo step, and the tool uses Shift+S.
@@ -471,11 +474,24 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   color comparisons still gate traversal. Source traversal and the optional
   canvas-space domain remain separate from the clipped output mask.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
-  warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
+  warps a layer by an angle about its center or a custom canvas pivot, or by a
+  perspective quad. `RotateAround` validates finite inputs and placed bounds;
+  integral quarter turns keep exact pixels, fractional placement goes through
+  the selected resampler, and full turns return the original geometry even for
+  large finite pivots. The centered default retains its earlier placement rules.
+  Grayscale keeps alpha and
   is stored in the version 6 project. Smooth scaling filters exact 16-bit
   premultiplied color products to retain faint colors. Image scaling validates
   each layer against the image limit and the aggregate against the stack limit
   before allocation, and rejects a scale that would make path coordinates nonfinite.
+- Rotate pivot state belongs to `WarpSession`, starts centered for each target,
+  and does not persist in a project. Choosing/moving it at zero angle repaints
+  only the frame and creates no image edit. Nonzero changes use the coalesced
+  preview and the same `Warp` geometry as Apply, including stack/placement limits.
+  Pivot drags retain the pointer grab offset and quantize absolute coordinates
+  to tenths, avoiding accumulated drift. Center restores the original lossless
+  centered quarter-turn path. Session/layer/tab/tool cancellation clears pivot
+  numeric editors; position-locked and editable-text layers keep their guards.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
@@ -607,14 +623,16 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
 - `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
   fields, separate wand/fill tolerance and gap radius, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
-  Rotate angle, and text size/letter/line
+  Rotate angle/pivot coordinates, and text size/letter/line
   spacing inline with a caret and text selection. Values preview live; selection,
   scale, and Move edits commit one history entry. Rotate angles retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing
   accepts negative values. A shortcut or a switch to another numeric field waits
   for a selection, scale, or Move edit to settle and its action bindings to render; stale
   followups are rejected after a tab, tool, or revision change. Rotation accepts
-  signed decimals; other numeric fields retain their existing integer contracts.
+  signed decimals for angles and pivot coordinates; other numeric fields retain
+  their existing contracts. Pivot fields retain Apply/Cancel and restore exact
+  tenths on empty text/Escape. Apply and canvas drags finish a numeric edit first.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
   options edit X, Y, Width, and Height live.

@@ -1853,7 +1853,7 @@ impl Workspace {
                                         panel.child(info_note("Applying…"))
                                     })
                                     .when_some(status.degrees, |panel, _| {
-                                        panel.child(self.numeric_chip(NumericField::RotateAngle, Some("Angle °"), cx))
+                                        panel.child(self.numeric_chip(NumericField::RotateAngle, Some("Angle °"), cx)).child(self.rotation_pivot_options(cx))
                                     })
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
@@ -3774,6 +3774,27 @@ fn paint_warp_frame(
             }
             if let Ok(path) = path.build() {
                 window.paint_path(path, color);
+            }
+        }
+        if let Some(pivot) = frame.pivot {
+            let center = project(pivot);
+            for (weight, color) in [(3., rgb(0x12151c)), (1., foreground)] {
+                window.paint_quad(gpui::quad(
+                    Bounds::centered_at(center, gpui::size(px(12.), px(12.))),
+                    px(6.),
+                    rgba(0),
+                    px(weight),
+                    color,
+                    gpui::BorderStyle::Solid,
+                ));
+                let mut cross = PathBuilder::stroke(px(weight));
+                cross.move_to(center - point(px(8.), px(0.)));
+                cross.line_to(center + point(px(8.), px(0.)));
+                cross.move_to(center - point(px(0.), px(8.)));
+                cross.line_to(center + point(px(0.), px(8.)));
+                if let Ok(path) = cross.build() {
+                    window.paint_path(path, color);
+                }
             }
         }
         let scale = window.scale_factor();
