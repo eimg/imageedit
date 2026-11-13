@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use gpui::{Context, Div, Window, prelude::*};
-use image::RgbaImage;
 
 use super::Workspace;
 use crate::adjustments::PREVIEW_EDGE;
 use crate::commands::{DropShadow, GaussianBlur, Sharpen};
-use crate::document::{self, LayerId};
-use crate::filters::{self, FilterSpec};
+use crate::document::LayerId;
+use crate::filters::FilterSpec;
 use crate::preview::Dirty;
 use crate::selection::Selection;
-use crate::transform::ColorMode;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FilterKind {
@@ -23,11 +21,8 @@ pub(super) struct FilterSession {
     tab: usize,
     generation: u64,
     layer: LayerId,
-    source: Arc<RgbaImage>,
-    offset: (i32, i32),
     selection: Selection,
-    canvas: (u32, u32),
-    mode: ColorMode,
+    preview: Arc<crate::effect_preview::EffectPreview>,
     spec: FilterSpec,
 }
 
@@ -80,13 +75,16 @@ impl Workspace {
             tab: tab.id,
             generation: tab.history.generation(),
             layer: layer.id,
-            source: layer.pixels.clone(),
-            offset: layer.offset,
             selection: tab.selection.clone(),
-            canvas: tab.document.content.size(),
-            mode: tab.document.content.mode(),
+            preview: Arc::new(crate::effect_preview::EffectPreview::new(
+                tab.document.content.clone(),
+                layer.id,
+                tab.selection.clone(),
+                PREVIEW_EDGE,
+            )),
             spec,
         });
+        self.effect_before = false;
         self.filter_generation.request();
         self.filter_dirty = true;
         self.pump_filter_preview(window, cx);
@@ -167,7 +165,7 @@ impl Workspace {
         self.filter_dirty = false;
         self.filter_generation.request();
         if let Some(image) = self.filter_preview.take() {
-            super::drop_images(std::iter::once(image), window, cx);
+            super::drop_images(image.images(), window, cx);
         }
     }
 
@@ -181,28 +179,11 @@ impl Workspace {
         self.filter_dirty = false;
         self.filter_busy = true;
         let generation = self.filter_generation.latest();
-        let source = session.source.clone();
-        let offset = session.offset;
-        let selection = session.selection.clone();
-        let canvas = session.canvas;
-        let mode = session.mode;
+        let preview = session.preview.clone();
         let spec = session.spec;
         let job = cx.background_executor().spawn(async move {
-            let image = filters::preview(
-                &source,
-                spec,
-                PREVIEW_EDGE,
-                |x, y| {
-                    selection.coverage(
-                        i64::from(offset.0) + i64::from(x),
-                        i64::from(offset.1) + i64::from(y),
-                        canvas.0,
-                        canvas.1,
-                    )
-                },
-                |pixel| mode.constrain(pixel),
-            );
-            document::preview_render(&image)
+            let image = preview.filter(spec);
+            super::EffectImages::new(&preview, &image)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let image = job.await;
@@ -210,11 +191,11 @@ impl Workspace {
                 workspace.filter_busy = false;
                 if workspace.filter_generation.finish(generation) {
                     if let Some(previous) = workspace.filter_preview.replace(image) {
-                        super::drop_images(std::iter::once(previous), window, cx);
+                        super::drop_images(previous.images(), window, cx);
                     }
                     cx.notify();
                 } else {
-                    super::drop_images(std::iter::once(image), window, cx);
+                    super::drop_images(image.images(), window, cx);
                 }
                 if workspace.filter_dirty {
                     workspace.pump_filter_preview(window, cx);

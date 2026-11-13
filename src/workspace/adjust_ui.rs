@@ -8,9 +8,8 @@ use crate::adjustments::{self, Adjustment, PREVIEW_EDGE};
 use crate::commands::{
     BrightnessContrast, ColorBalance, Curves, Desaturate, HueSaturation, InvertColors, Levels,
 };
-use crate::document::{self, LayerId};
+use crate::document::LayerId;
 use crate::selection::Selection;
-use crate::transform::ColorMode;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum AdjustKind {
@@ -23,6 +22,27 @@ pub(super) enum AdjustKind {
     Curves,
 }
 
+impl AdjustKind {
+    pub(super) fn defaults(self) -> Adjustment {
+        match self {
+            Self::BrightnessContrast => Adjustment::BrightnessContrast {
+                brightness: 0,
+                contrast: 0,
+            },
+            Self::HueSaturation => Adjustment::HueSaturation {
+                hue: 0,
+                saturation: 0,
+                lightness: 0,
+            },
+            Self::Desaturate => Adjustment::Desaturate,
+            Self::Invert => Adjustment::Invert,
+            Self::ColorBalance => Adjustment::ColorBalance(Default::default()),
+            Self::Levels => Adjustment::Levels(Default::default()),
+            Self::Curves => Adjustment::Curves(Default::default()),
+        }
+    }
+}
+
 pub(super) struct AdjustmentSession {
     tab: usize,
     generation: u64,
@@ -31,7 +51,7 @@ pub(super) struct AdjustmentSession {
     offset: (i32, i32),
     selection: Selection,
     canvas: (u32, u32),
-    mode: ColorMode,
+    preview: Arc<crate::effect_preview::EffectPreview>,
     adjustment: Adjustment,
 }
 
@@ -70,7 +90,12 @@ impl Workspace {
         }))
     }
 
-    pub(super) fn begin_adjustment(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn begin_adjustment(
+        &mut self,
+        adjustment: Adjustment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.refuse_text_pixels(false, cx) {
             return false;
         }
@@ -95,12 +120,15 @@ impl Workspace {
             offset: layer.offset,
             selection: tab.selection.clone(),
             canvas: tab.document.content.size(),
-            mode: tab.document.content.mode(),
-            adjustment: Adjustment::BrightnessContrast {
-                brightness: 0,
-                contrast: 0,
-            },
+            preview: Arc::new(crate::effect_preview::EffectPreview::new(
+                tab.document.content.clone(),
+                layer.id,
+                tab.selection.clone(),
+                PREVIEW_EDGE,
+            )),
+            adjustment,
         });
+        self.effect_before = false;
         self.adjustment_generation.request();
         self.adjustment_dirty = true;
         self.pump_adjustment_preview(window, cx);
@@ -194,7 +222,7 @@ impl Workspace {
         self.histogram_token = self.histogram_token.wrapping_add(1);
         self.adjustment_histogram = None;
         if let Some(image) = self.adjustment_preview.take() {
-            super::drop_images(std::iter::once(image), window, cx);
+            super::drop_images(image.images(), window, cx);
         }
     }
 
@@ -208,28 +236,11 @@ impl Workspace {
         self.adjustment_dirty = false;
         self.adjustment_busy = true;
         let generation = self.adjustment_generation.latest();
-        let source = session.source.clone();
-        let offset = session.offset;
-        let selection = session.selection.clone();
-        let canvas = session.canvas;
-        let mode = session.mode;
+        let preview = session.preview.clone();
         let adjustment = session.adjustment;
         let job = cx.background_executor().spawn(async move {
-            let image = adjustments::reduced_preview(
-                &source,
-                adjustment,
-                |x, y| {
-                    selection.coverage(
-                        i64::from(offset.0) + i64::from(x),
-                        i64::from(offset.1) + i64::from(y),
-                        canvas.0,
-                        canvas.1,
-                    )
-                },
-                |pixel| mode.constrain(pixel),
-                PREVIEW_EDGE,
-            );
-            document::preview_render(&image)
+            let image = preview.adjustment(adjustment);
+            super::EffectImages::new(&preview, &image)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let image = job.await;
@@ -237,11 +248,11 @@ impl Workspace {
                 workspace.adjustment_busy = false;
                 if workspace.adjustment_generation.finish(generation) {
                     if let Some(previous) = workspace.adjustment_preview.replace(image) {
-                        super::drop_images(std::iter::once(previous), window, cx);
+                        super::drop_images(previous.images(), window, cx);
                     }
                     cx.notify();
                 } else {
-                    super::drop_images(std::iter::once(image), window, cx);
+                    super::drop_images(image.images(), window, cx);
                 }
                 if workspace.adjustment_dirty {
                     workspace.pump_adjustment_preview(window, cx);

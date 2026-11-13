@@ -26,6 +26,7 @@ tool and command icons, and a workspace that keeps the canvas in focus.
   plus paths and strokes.
 - **Color and effects** — brightness, contrast, hue, saturation, levels,
   curves, blur, sharpen, and shadows.
+  Dialog previews show the canvas composition, with Before/After and Reset.
 
 ## Download
 
@@ -112,6 +113,20 @@ respect that strength; Buildup and Flow optionally approach it gradually. A new
 stroke applies another filter pass. Each paint and retouch tool remembers its
 own flow and buildup setting during the session. Path and selection outline
 strokes also limit overlapping dabs to their stroke opacity.
+
+Adjustment and filter dialogs preview the whole canvas composition, including
+layer order, offsets, opacity, and the selection's soft coverage. A checker
+shows transparency. **Before** shows the original composition; **After** shows
+the chosen effect. Switching views does not change parameters, and Apply always
+uses those parameters. **Reset** restores the dialog's opening defaults and
+returns to After. Cancel leaves the document unchanged.
+
+These fitted previews are limited to 256 pixels on their longest side. Filters
+keep nearby off-canvas pixels that can influence the visible result, and shadows
+preview beneath their source just as they will be inserted. Small filter radii
+can disappear at this reduced scale; Apply always processes the full resolution.
+“Updating preview…” identifies a pending slider result while the last preview
+remains visible.
 
 Use **View → Toggle Grid** for a dotted grid anchored to image pixels, with
 contrasting dots and a default spacing of 16 image pixels.

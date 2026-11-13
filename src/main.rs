@@ -7,6 +7,7 @@ mod adjustments;
 mod commands;
 mod constraints;
 mod document;
+mod effect_preview;
 mod filters;
 mod geometry;
 mod guides;

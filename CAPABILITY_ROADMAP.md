@@ -147,8 +147,8 @@ current support. Existing source PDFs are never overwritten by Save.
 
 ## Adjustments and filters
 
-- [ ] Preview within the full composition, including selection and layer opacity.
-- [ ] Before/after comparison and convenient reset.
+- [x] Preview within the full composition, including selection and layer opacity.
+- [x] Before/after comparison and convenient reset.
 - [ ] Remember prior parameters and repeat the last operation.
 - [ ] Re-editable applied effects as a separate project-format/history milestone.
 
@@ -418,7 +418,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 6 — paint opacity, flow, and retouch strength
 
-Implemented, uncommitted:
+Committed as `4ce2937`:
 
 - Opacity is now a per-stroke limit for Pencil, Brush, Eraser, and Clone Stamp.
   Ordinary overlapping dabs use maximum coverage against the starting pixels,
@@ -465,3 +465,67 @@ Manual interaction testing stays with the maintainer. Useful checks:
   apply another stroke. Undo/redo and Escape should retain their usual behavior.
 - Check live preview/commit agreement on offset or partially off-canvas layers
   and at non-100% layer opacity; exercise Shift-click and release endpoints.
+
+## Pass 7 — composition previews and comparison
+
+Implemented, uncommitted:
+
+- Adjustment and filter dialogs now preview the full canvas composition. Other
+  visible layers, their order, offsets, opacity, and transparency are retained;
+  the effect applies to the active layer with the current selection's coverage.
+  The preview remains in the existing dialog rather than replacing the main
+  canvas. A checker displays transparent pixels.
+- Before/After switches between the opening composition and the chosen effect
+  without changing parameters or launching another job. Apply still uses the
+  current parameters while Before is displayed. Reset restores opening defaults,
+  clears form errors and curve dragging, and switches to After. Parameterless
+  operations retain their operation; filter defaults retain their opening color.
+- The immutable preview snapshot shares layer pixels and caches its original
+  reduced composite. Slider changes continue to coalesce in background jobs;
+  stale results cannot replace a newer request or a dismissed dialog. Both
+  comparison images are released when replaced, canceled, or rejected as stale.
+  An updating indicator identifies a pending result without moving the controls.
+- Output stays bounded to 256 px on its longest side. Filter scratch pixels cover
+  the source region that can affect the canvas plus its sampling halo, scaled to
+  that preview. This preserves detail when a small canvas views a large layer
+  and includes off-canvas blur/shadow contributions without processing that
+  entire layer for every slider position.
+- Drop Shadow previews a separate layer beneath the source, with its actual
+  offset and clipping to the canvas. Its silhouette is independent of selection
+  and source-layer opacity, matching the committed operation.
+- Point adjustments use the commit mapper and coverage blend. At unreduced
+  canvas size, filter/shadow previews match committed composition in regression
+  fixtures. Reduced filter kernels remain approximate; a blur/sharpen radius
+  that rounds below one preview pixel leaves the original preview unchanged.
+  Apply always processes full-resolution pixels.
+- Centralized opening/reset defaults and start each adjustment with its intended
+  operation, avoiding the previous throwaway neutral preview for Invert and
+  Desaturate. Removed the superseded isolated adjustment-preview path.
+- No toolbox tool, dependency, or project-format change. Remembered/repeated
+  parameters and re-editable effects remain later work.
+
+Automatic validation: formatting, Clippy with warnings denied, all 295 tests,
+and both release benchmarks pass. Five new regression tests replace the old
+isolated adjustment-preview test and verify real composition against committed
+adjustments, filters, shadows, soft selection coverage, offsets, opacity, hidden
+layers, and grayscale. They also cover large-layer/small-canvas sampling halos,
+extreme offsets, bounded scratch sizes, immutable comparison snapshots, and the
+transparency checker. The preview-generation test now checks pending/reset
+status and stale completion. The macOS bundle was rebuilt and its signature
+verified. No interactive or visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Adjust an offset, partially transparent layer above and beneath other visible
+  layers, with a feathered selection. Compare the dialog to the applied result;
+  use Undo to return to the original image.
+- Switch Before/After while dragging sliders and while an update is pending.
+  Reset each dialog, including Levels/Curves channel and curve edits; Cancel
+  should leave pixels/history unchanged. Apply from Before should use the chosen
+  effect, not the displayed original.
+- Blur/Sharpen at small and large radii, and Drop Shadow with positive/negative
+  offsets, a low-opacity source, and a source partly outside the canvas. Check
+  transparency, grayscale, and a large layer viewed through a smaller canvas.
+- Close and reopen effect dialogs rapidly, switch documents after dismissing,
+  and confirm stale previews never appear in the later dialog. Check the panel
+  in a small window and leave appearance feedback for the next pass.

@@ -495,6 +495,10 @@ impl PreviewGeneration {
         self.latest
     }
 
+    pub fn pending(self) -> bool {
+        self.latest != self.shown
+    }
+
     #[cfg(test)]
     pub fn shown(self) -> u64 {
         self.shown
@@ -570,28 +574,6 @@ pub fn apply_pixels(
     })
 }
 
-pub fn reduced_preview(
-    source: &RgbaImage,
-    adjustment: Adjustment,
-    coverage: impl Fn(u32, u32) -> u8,
-    constrain: impl Fn(Rgba<u8>) -> Rgba<u8>,
-    max_edge: u32,
-) -> RgbaImage {
-    let (width, height) = source.dimensions();
-    let (preview_width, preview_height) = preview_size(width, height, max_edge);
-    let prepared = Prepared::from(adjustment);
-    RgbaImage::from_fn(preview_width, preview_height, |x, y| {
-        let sx = sample_coord(x, preview_width, width);
-        let sy = sample_coord(y, preview_height, height);
-        let before = *source.get_pixel(sx, sy);
-        let amount = coverage(sx, sy);
-        if amount == 0 || adjustment.is_identity() {
-            return before;
-        }
-        blend_coverage(before, constrain(prepared.map(before)), amount)
-    })
-}
-
 pub fn preview_size(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
     let edge = width.max(height);
     if edge <= max_edge || max_edge == 0 || edge == 0 {
@@ -604,14 +586,7 @@ pub fn preview_size(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
     (scaled(width), scaled(height))
 }
 
-fn sample_coord(index: u32, preview: u32, source: u32) -> u32 {
-    if preview == 0 || source == 0 {
-        return 0;
-    }
-    ((u64::from(index) * u64::from(source)) / u64::from(preview)).min(u64::from(source - 1)) as u32
-}
-
-fn blend_coverage(before: Rgba<u8>, adjusted: Rgba<u8>, coverage: u8) -> Rgba<u8> {
+pub(crate) fn blend_coverage(before: Rgba<u8>, adjusted: Rgba<u8>, coverage: u8) -> Rgba<u8> {
     if coverage == 0 {
         return before;
     }
@@ -634,7 +609,7 @@ fn blend_coverage(before: Rgba<u8>, adjusted: Rgba<u8>, coverage: u8) -> Rgba<u8
     Rgba([color.0[0], color.0[1], color.0[2], before.0[3]])
 }
 
-enum Prepared {
+pub(crate) enum Prepared {
     BrightnessContrast {
         brightness: i16,
         contrast: i16,
@@ -651,7 +626,7 @@ enum Prepared {
 }
 
 impl Prepared {
-    fn from(adjustment: Adjustment) -> Self {
+    pub(crate) fn from(adjustment: Adjustment) -> Self {
         match adjustment {
             Adjustment::BrightnessContrast {
                 brightness,
@@ -677,7 +652,7 @@ impl Prepared {
         }
     }
 
-    fn map(&self, pixel: Rgba<u8>) -> Rgba<u8> {
+    pub(crate) fn map(&self, pixel: Rgba<u8>) -> Rgba<u8> {
         let [red, green, blue, alpha] = pixel.0;
         let [red, green, blue] = match self {
             Self::BrightnessContrast {
@@ -1080,25 +1055,24 @@ mod tests {
     #[test]
     fn a_stale_preview_does_not_replace_the_latest_slider_change() {
         let mut preview = PreviewGeneration::default();
+        assert!(!preview.pending());
         let first = preview.request();
         let second = preview.request();
+        assert!(preview.pending());
         assert!(!preview.finish(first));
+        assert!(preview.pending());
         assert_eq!(preview.shown(), 0);
         assert!(preview.finish(second));
+        assert!(!preview.pending());
         assert_eq!(preview.shown(), second);
+        let reset = preview.request();
+        assert!(preview.pending());
+        assert!(!preview.finish(second));
+        assert!(preview.pending());
+        assert!(preview.finish(reset));
+        assert!(!preview.pending());
         assert!(!preview.finish(first));
-        assert_eq!(preview.shown(), second);
-    }
-
-    #[test]
-    fn the_reduced_preview_samples_the_source_and_stays_inside_the_edge() {
-        let mut source = RgbaImage::new(8, 2);
-        source.put_pixel(0, 0, Rgba([10, 0, 0, 255]));
-        source.put_pixel(2, 0, Rgba([20, 0, 0, 255]));
-        let preview = reduced_preview(&source, Adjustment::Invert, |_, _| 255, plain, 4);
-        assert_eq!(preview.dimensions(), (4, 1));
-        assert_eq!(preview.get_pixel(0, 0).0, [245, 255, 255, 255]);
-        assert_eq!(preview.get_pixel(1, 0).0, [235, 255, 255, 255]);
+        assert_eq!(preview.shown(), reset);
     }
 
     #[test]

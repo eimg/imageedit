@@ -115,6 +115,54 @@ enum FormKind {
     },
 }
 
+impl FormKind {
+    fn adjustment_defaults(operation: AdjustKind) -> Self {
+        Self::Adjustment {
+            operation,
+            brightness: 0,
+            contrast: 0,
+            hue: 0,
+            saturation: 0,
+            lightness: 0,
+            balance_range: BalanceRange::Midtones,
+            balance: ColorBalance::default(),
+            map_channel: MapChannel::Value,
+            levels: Levels::default(),
+            curves: Curves::default(),
+            curve_drag: None,
+        }
+    }
+
+    fn filter_defaults(kind: FilterKind, color: image::Rgba<u8>) -> Self {
+        Self::Filter {
+            kind,
+            radius: if kind == FilterKind::Sharpen { 2 } else { 4 },
+            amount: 50,
+            offset_x: 8,
+            offset_y: 8,
+            opacity: 75,
+            color,
+        }
+    }
+
+    fn filter_value(&self) -> Option<FilterSpec> {
+        match self {
+            Self::Filter {
+                kind,
+                radius,
+                amount,
+                offset_x,
+                offset_y,
+                opacity,
+                color,
+            } => Some(filter_spec(
+                *kind, *radius, *amount, *offset_x, *offset_y, *opacity, *color,
+            )),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LayerFill {
     Transparent,
@@ -605,44 +653,13 @@ impl Workspace {
             });
             return;
         }
-        if self.dialog_open || self.form.is_some() || !self.begin_adjustment(window, cx) {
+        if self.dialog_open
+            || self.form.is_some()
+            || !self.begin_adjustment(operation.defaults(), window, cx)
+        {
             return;
         }
-        let adjustment = match operation {
-            AdjustKind::BrightnessContrast => Adjustment::BrightnessContrast {
-                brightness: 0,
-                contrast: 0,
-            },
-            AdjustKind::HueSaturation => Adjustment::HueSaturation {
-                hue: 0,
-                saturation: 0,
-                lightness: 0,
-            },
-            AdjustKind::Desaturate => Adjustment::Desaturate,
-            AdjustKind::Invert => Adjustment::Invert,
-            AdjustKind::ColorBalance => Adjustment::ColorBalance(ColorBalance::default()),
-            AdjustKind::Levels => Adjustment::Levels(Levels::default()),
-            AdjustKind::Curves => Adjustment::Curves(Curves::default()),
-        };
-        self.show_form(
-            FormKind::Adjustment {
-                operation,
-                brightness: 0,
-                contrast: 0,
-                hue: 0,
-                saturation: 0,
-                lightness: 0,
-                balance_range: BalanceRange::Midtones,
-                balance: ColorBalance::default(),
-                map_channel: MapChannel::Value,
-                levels: Levels::default(),
-                curves: Curves::default(),
-                curve_drag: None,
-            },
-            window,
-            cx,
-        );
-        self.set_adjustment(adjustment, window, cx);
+        self.show_form(FormKind::adjustment_defaults(operation), window, cx);
         if matches!(operation, AdjustKind::Levels | AdjustKind::Curves) {
             self.start_adjustment_histogram(window, cx);
         }
@@ -662,31 +679,104 @@ impl Workspace {
             return;
         }
         let color = solid_color(self.colors[0]);
-        let (radius, amount, offset_x, offset_y, opacity) = match kind {
-            FilterKind::Blur => (4, 50, 8, 8, 75),
-            FilterKind::Sharpen => (2, 50, 8, 8, 75),
-            FilterKind::Shadow => (4, 50, 8, 8, 75),
+        let form = FormKind::filter_defaults(kind, color);
+        let Some(spec) = form.filter_value() else {
+            return;
         };
-        if !self.begin_filter(
-            filter_spec(kind, radius, amount, offset_x, offset_y, opacity, color),
-            window,
-            cx,
-        ) {
+        if !self.begin_filter(spec, window, cx) {
             return;
         }
-        self.show_form(
-            FormKind::Filter {
-                kind,
-                radius,
-                amount,
-                offset_x,
-                offset_y,
-                opacity,
-                color,
-            },
-            window,
-            cx,
-        );
+        self.show_form(form, window, cx);
+    }
+
+    fn reset_effect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        let adjustment = match form.kind {
+            FormKind::Adjustment { operation, .. } => {
+                form.kind = FormKind::adjustment_defaults(operation);
+                Some(operation.defaults())
+            }
+            FormKind::Filter { kind, color, .. } => {
+                form.kind = FormKind::filter_defaults(kind, color);
+                None
+            }
+            _ => return,
+        };
+        let filter = form.kind.filter_value();
+        form.error = None;
+        self.effect_before = false;
+        if let Some(adjustment) = adjustment {
+            self.set_adjustment(adjustment, window, cx);
+        }
+        if let Some(filter) = filter {
+            self.set_filter(filter, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn effect_preview_panel(
+        &self,
+        images: Option<super::EffectImages>,
+        updating: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(match images {
+                Some(images) => div()
+                    .h(px(180.))
+                    .w_full()
+                    .bg(rgb(CANVAS))
+                    .rounded_md()
+                    .child(
+                        img(if self.effect_before {
+                            images.before
+                        } else {
+                            images.after
+                        })
+                        .size_full()
+                        .object_fit(ObjectFit::Contain),
+                    ),
+                None => div().h(px(180.)).w_full().child("Preview…"),
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                form_button("Before", self.effect_before).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.effect_before = true;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(form_button("After", !self.effect_before).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.effect_before = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(form_button("Reset", false).on_click(
+                        cx.listener(|this, _, window, cx| this.reset_effect_form(window, cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .h(px(16.))
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(if updating { "Updating preview…" } else { "" }),
+            )
     }
 
     fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2014,15 +2104,8 @@ impl Workspace {
                         AdjustKind::Levels => "Levels",
                         AdjustKind::Curves => "Curves",
                     };
-                    let mut body = div().flex().flex_col().gap_3().child(match adjustment_preview {
-                        Some(image) => div()
-                            .h(px(180.))
-                            .w_full()
-                            .bg(rgb(CANVAS))
-                            .rounded_md()
-                            .child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                        None => div().h(px(180.)).w_full().child("Preview…"),
-                    });
+                    let mut body = div().flex().flex_col().gap_3()
+                        .child(self.effect_preview_panel(adjustment_preview, self.adjustment_generation.pending(), cx));
                     body = match operation {
                         AdjustKind::BrightnessContrast => body
                             .child(adjust_slider(
@@ -2107,15 +2190,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(match filter_preview {
-                            Some(image) => div()
-                                .h(px(180.))
-                                .w_full()
-                                .bg(rgb(CANVAS))
-                                .rounded_md()
-                                .child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                            None => div().h(px(180.)).w_full().child("Preview…"),
-                        })
+                        .child(self.effect_preview_panel(filter_preview, self.filter_generation.pending(), cx))
                         .child(filter_controls(
                             *kind, *radius, *amount, *offset_x, *offset_y, *opacity, cx,
                         ));

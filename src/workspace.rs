@@ -221,6 +221,27 @@ enum CropDrag {
     },
 }
 
+#[derive(Clone)]
+struct EffectImages {
+    before: Arc<RenderImage>,
+    after: Arc<RenderImage>,
+}
+
+impl EffectImages {
+    fn new(context: &crate::effect_preview::EffectPreview, after: &image::RgbaImage) -> Self {
+        Self {
+            before: crate::document::preview_render(&crate::effect_preview::checker(
+                context.original(),
+            )),
+            after: crate::document::preview_render(&crate::effect_preview::checker(after)),
+        }
+    }
+
+    fn images(self) -> [Arc<RenderImage>; 2] {
+        [self.before, self.after]
+    }
+}
+
 pub struct Workspace {
     focus: FocusHandle,
     numeric_focus: FocusHandle,
@@ -292,14 +313,15 @@ pub struct Workspace {
     gradient_busy: bool,
     gradient_dirty: bool,
     adjustment: Option<adjust_ui::AdjustmentSession>,
-    adjustment_preview: Option<Arc<RenderImage>>,
+    adjustment_preview: Option<EffectImages>,
     adjustment_generation: crate::adjustments::PreviewGeneration,
     adjustment_busy: bool,
     adjustment_dirty: bool,
     adjustment_histogram: Option<crate::adjustments::Histogram>,
     histogram_token: u64,
     filter: Option<filter_ui::FilterSession>,
-    filter_preview: Option<Arc<RenderImage>>,
+    filter_preview: Option<EffectImages>,
+    effect_before: bool,
     filter_generation: crate::adjustments::PreviewGeneration,
     filter_busy: bool,
     filter_dirty: bool,
@@ -566,6 +588,7 @@ impl Workspace {
             histogram_token: 0,
             filter: None,
             filter_preview: None,
+            effect_before: false,
             filter_generation: crate::adjustments::PreviewGeneration::default(),
             filter_busy: false,
             filter_dirty: false,

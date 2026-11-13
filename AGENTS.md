@@ -102,12 +102,18 @@ pixel changes; sub-byte buildup accumulates without changing hidden RGB until
 alpha becomes visible. The bracket keys adjust
 the brush size for the paint tools. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
-Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
-dialog and apply inside the selection. The layer's alpha stays in place. Cancel
+Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer's
+effect in the canvas composition inside a dialog, and apply inside the selection.
+The preview includes offsets, layer opacity/order, and soft selection coverage;
+a checker displays transparency. Before/After switches between the original
+composition and the chosen effect without changing parameters. Apply still uses
+the chosen parameters while Before is displayed. Reset restores opening defaults
+and switches to After; fixed operations such as Invert retain their operation.
+The layer's alpha stays in place. Cancel
 leaves the pixels unchanged, and identity settings do not create a history
 entry. Color Balance, Levels, and Curves use that dialog. Levels and Curves
 share a per-channel lookup table, and their histogram skips transparent pixels.
-Blur, Sharpen, and Drop Shadow preview the active layer in a dialog. Blur and
+Blur, Sharpen, and Drop Shadow use the same composition preview controls. Blur and
 Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
 beneath the source from its blurred silhouette. A zero radius or amount does
 not create a history entry. Path (`P`) edits cubic anchors in canvas
@@ -244,6 +250,20 @@ document is a single plain layer without paths, guides, or editable text.
   premultiplied color. `src/workspace/filter_ui.rs` shows the reduced preview for
   the latest slider position. Apply writes the layer, or inserts the shadow
   beneath it, in the background.
+- `src/effect_preview.rs` takes an immutable document/selection snapshot and
+  composites canvas-space samples into a preview bounded to 256 px. Adjustments
+  use the same prepared mapper/coverage blend as commit. Filter scratch data
+  covers only the visible source region plus its full sampling halo, including
+  off-canvas pixels; radius and source samples scale for a reduced preview.
+  Subpixel blur/sharpen radii leave the original preview unchanged. Shadows
+  sample the source region shifted by their offset and composite below the source,
+  independently of selection/source-layer opacity. Full-resolution preview tests
+  compare these paths to real commits; larger-image filter previews are approximate.
+  `EffectImages` keeps a checker-backed Before/After pair. Replaced, canceled,
+  and stale pairs release both GPUI images. Preview generation gates publication
+  and supplies the dialogs' updating status. Reset shares the opening form defaults;
+  neither comparison nor reset edits pixels or history. Remembered/repeated effects
+  remain outside the current implementation.
 - `src/paths.rs` stores cubic paths in canvas coordinates, flattens them, fills
   closed paths with nonzero winding, and builds path outlines from simple and
   mask selections. `src/workspace/path_ui.rs` edits anchors and handles and
