@@ -111,7 +111,14 @@ impl Plotter {
                 x: from.x + dx * t,
                 y: from.y + dy * t,
             });
-            distance += self.spacing;
+            let next = distance + self.spacing;
+            // Imported paths can have very large, finite coordinates. Once a
+            // spacing step is below the float's precision, addition stops
+            // advancing; never let that make the stroke loop run forever.
+            if next <= distance {
+                break;
+            }
+            distance = next;
         }
         if let Some(stamp) = stamps.last() {
             self.last_stamp = Some(*stamp);
@@ -584,6 +591,22 @@ fn erase(pixel: Rgba<u8>, amount: f64) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_off_canvas_segments_cannot_stall_the_stroke_plotter() {
+        let mut plotter = Plotter::new(1.0);
+        plotter.push(PlotPoint { x: -1e20, y: 0.5 }, None);
+        let from = plotter.from.unwrap();
+        let to = PlotPoint { x: 1e20, y: 0.5 };
+        let clip = clip_segment(from, to, 1.0, (64, 64));
+        let stamps = plotter.push(to, Some(clip));
+        assert!(stamps.len() <= 68);
+        assert!(
+            stamps
+                .iter()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+        );
+    }
 
     fn near(points: &[(f64, f64)], expected: &[(f64, f64)]) {
         assert_eq!(points.len(), expected.len());

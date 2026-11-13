@@ -388,6 +388,13 @@ impl Workspace {
     }
 
     pub(super) fn cancel_warp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .numeric_edit
+            .as_ref()
+            .is_some_and(|edit| edit.field == super::numeric::NumericField::RotateAngle)
+        {
+            self.numeric_edit = None;
+        }
         self.warp_token = self.warp_token.wrapping_add(1);
         self.warp_dirty = false;
         self.warp_applying = false;
@@ -443,6 +450,30 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    pub(super) fn set_warp_angle(
+        &mut self,
+        degrees: f64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.warp_applying || !degrees.is_finite() {
+            return;
+        }
+        let Some(session) = self.warp.as_mut() else {
+            return;
+        };
+        if session.kind != WarpKind::Rotate {
+            return;
+        }
+        let degrees = wrap_degrees(degrees);
+        if session.degrees == degrees {
+            return;
+        }
+        session.degrees = degrees;
+        self.warp_error = None;
+        self.request_warp_preview(window, cx);
     }
 
     pub(super) fn set_warp_mirror(

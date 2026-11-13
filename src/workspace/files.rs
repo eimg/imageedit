@@ -33,6 +33,15 @@ impl WriteKind {
     fn destination_reserved(self, source_tab: bool, open: bool, writing: bool) -> bool {
         writing || (open && (!source_tab || matches!(self, Self::Export { .. })))
     }
+
+    fn validate_document(self, document: &Document) -> Result<()> {
+        anyhow::ensure!(
+            !matches!(self, Self::Save(format) if format != FileFormat::Project)
+                || document.can_save_as_raster(),
+            "This image needs a .lime project to preserve its editing information. Use Export for a raster copy."
+        );
+        Ok(())
+    }
 }
 
 // Raster formats are offered only while they hold everything in the document.
@@ -59,6 +68,8 @@ impl Workspace {
             Some("transform")
         } else if self.crop.is_some() {
             Some("crop")
+        } else if !self.free_points.is_empty() {
+            Some("free selection")
         } else if self.move_drag.is_some()
             || self.scale_drag.is_some()
             || self.stroke.is_some()
@@ -77,10 +88,17 @@ impl Workspace {
         let Some(edit) = self.pending_edit_name() else {
             return false;
         };
-        self.notice(
-            &format!("Apply or discard the {edit} preview before saving or exporting."),
-            cx,
-        );
+        if edit == "free selection" {
+            self.notice(
+                "Finish the free selection with Return, or cancel it with Escape, before saving or exporting.",
+                cx,
+            );
+        } else {
+            self.notice(
+                &format!("Apply or discard the {edit} preview before saving or exporting."),
+                cx,
+            );
+        }
         true
     }
 
@@ -292,6 +310,14 @@ impl Workspace {
             return;
         };
         if self.tabs[index].busy() {
+            return;
+        }
+        // A pending paste/import can finish while the native save dialog is open.
+        // Recheck the current content before a raster save can mark it as saved.
+        if let Err(error) = kind.validate_document(&self.tabs[index].document) {
+            self.errors
+                .push(format!("Could not save {}: {error}", file_name(&path)));
+            cx.notify();
             return;
         }
         if self.tabs.iter().any(|tab| {
@@ -519,6 +545,52 @@ fn canonical_destination(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raster_save_rechecks_content_that_changed_while_the_dialog_was_open() {
+        let mut document = Document::from_pixels("Image.png".into(), image::RgbaImage::new(2, 2));
+        document.format = FileFormat::Png;
+        let save = WriteKind::Save(FileFormat::Png);
+        assert!(save.validate_document(&document).is_ok());
+
+        let original = document.content.clone();
+        document
+            .content
+            .duplicate_layer(document.content.top_layer_id())
+            .unwrap();
+        assert!(save.validate_document(&document).is_err());
+        assert!(
+            WriteKind::Save(FileFormat::Project)
+                .validate_document(&document)
+                .is_ok()
+        );
+        assert!(
+            WriteKind::Export {
+                format: FileFormat::Png,
+                jpeg_quality: 92
+            }
+            .validate_document(&document)
+            .is_ok()
+        );
+
+        document.content = original;
+        document
+            .content
+            .set_paths(
+                vec![crate::paths::VectorPath {
+                    id: crate::paths::PathId(1),
+                    visible: true,
+                    closed: false,
+                    anchors: vec![crate::paths::Anchor::corner(
+                        crate::paths::AnchorId(1),
+                        (0., 0.),
+                    )],
+                }],
+                Some(crate::paths::PathId(1)),
+            )
+            .unwrap();
+        assert!(save.validate_document(&document).is_err());
+    }
 
     #[test]
     fn save_routes_follow_format_and_content() {

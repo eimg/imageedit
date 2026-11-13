@@ -37,6 +37,59 @@ pub(super) enum BrushField {
     Opacity,
 }
 
+pub(super) struct BrushSettings {
+    brush: crate::paint::Brush,
+    pencil: crate::paint::Brush,
+    eraser: crate::paint::Brush,
+    blur: crate::paint::Brush,
+    sharpen: crate::paint::Brush,
+    clone_stamp: crate::paint::Brush,
+    pub(super) outline: crate::paint::Brush,
+}
+
+impl Default for BrushSettings {
+    fn default() -> Self {
+        Self {
+            brush: Default::default(),
+            pencil: crate::paint::Brush {
+                diameter: 1,
+                ..Default::default()
+            },
+            eraser: Default::default(),
+            blur: Default::default(),
+            sharpen: Default::default(),
+            clone_stamp: Default::default(),
+            outline: Default::default(),
+        }
+    }
+}
+
+impl BrushSettings {
+    fn get(&self, tool: Tool) -> &crate::paint::Brush {
+        match tool {
+            Tool::Pencil => &self.pencil,
+            Tool::Eraser => &self.eraser,
+            Tool::Blur => &self.blur,
+            Tool::Sharpen => &self.sharpen,
+            Tool::CloneStamp => &self.clone_stamp,
+            Tool::Path => &self.outline,
+            _ => &self.brush,
+        }
+    }
+
+    fn get_mut(&mut self, tool: Tool) -> &mut crate::paint::Brush {
+        match tool {
+            Tool::Pencil => &mut self.pencil,
+            Tool::Eraser => &mut self.eraser,
+            Tool::Blur => &mut self.blur,
+            Tool::Sharpen => &mut self.sharpen,
+            Tool::CloneStamp => &mut self.clone_stamp,
+            Tool::Path => &mut self.outline,
+            _ => &mut self.brush,
+        }
+    }
+}
+
 impl Workspace {
     pub(super) fn brush_value(&self, field: BrushField) -> u32 {
         let brush = self.active_brush();
@@ -65,11 +118,7 @@ impl Workspace {
             BrushField::Hardness | BrushField::Opacity => (0, 100),
         };
         let next = value.clamp(min, max);
-        let brush = if self.tool == Tool::Pencil {
-            &mut self.pencil
-        } else {
-            &mut self.brush
-        };
+        let brush = self.brushes.get_mut(self.tool);
         match field {
             BrushField::Size => brush.diameter = next,
             BrushField::Spacing => brush.spacing = next as u8,
@@ -321,11 +370,7 @@ impl Workspace {
     }
 
     fn active_brush(&self) -> &crate::paint::Brush {
-        if self.tool == Tool::Pencil {
-            &self.pencil
-        } else {
-            &self.brush
-        }
+        self.brushes.get(self.tool)
     }
 
     pub(super) fn active_brush_settings(&self) -> (u32, u8) {
@@ -403,6 +448,31 @@ fn clone_kind(source: (u32, u32), offset: (i32, i32), here: (f64, f64)) -> Strok
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paint_tools_and_outline_strokes_retain_independent_settings() {
+        let mut settings = BrushSettings::default();
+        assert_eq!(settings.get(Tool::Pencil).diameter, 1);
+        let tools = [
+            Tool::Brush,
+            Tool::Pencil,
+            Tool::Eraser,
+            Tool::Blur,
+            Tool::Sharpen,
+            Tool::CloneStamp,
+            Tool::Path,
+        ];
+        for (index, tool) in tools.iter().enumerate() {
+            let brush = settings.get_mut(*tool);
+            brush.diameter = index as u32 + 2;
+            brush.opacity = (index as u8 + 1) * 10;
+        }
+        for (index, tool) in tools.iter().enumerate() {
+            assert_eq!(settings.get(*tool).diameter, index as u32 + 2);
+            assert_eq!(settings.get(*tool).opacity, (index as u8 + 1) * 10);
+        }
+        assert_eq!(settings.outline.diameter, 8);
+    }
 
     #[test]
     fn cloning_at_a_pixel_center_samples_the_chosen_source_on_an_offset_layer() {

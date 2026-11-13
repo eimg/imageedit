@@ -29,6 +29,9 @@ pub(super) enum NumericField {
     BrushHardness,
     BrushOpacity,
     PathStrokeSize,
+    ScaleWidth,
+    ScaleHeight,
+    RotateAngle,
 }
 
 impl NumericField {
@@ -50,6 +53,9 @@ impl NumericField {
             Self::BrushHardness => 13,
             Self::BrushOpacity => 14,
             Self::PathStrokeSize => 15,
+            Self::ScaleWidth => 16,
+            Self::ScaleHeight => 17,
+            Self::RotateAngle => 18,
         }
     }
 
@@ -60,11 +66,41 @@ impl NumericField {
         )
     }
 
+    pub(super) fn is_scale(self) -> bool {
+        matches!(self, Self::ScaleWidth | Self::ScaleHeight)
+    }
+
+    fn parse(self, text: &str) -> Option<i64> {
+        if self == Self::RotateAngle {
+            let value = text.parse::<f64>().ok()?;
+            (value.is_finite() && (-360.0..=360.0).contains(&value))
+                .then(|| (value * 10.).round() as i64)
+        } else {
+            parse_numeric(text).filter(|&value| {
+                !self.is_scale() || (0..=i64::from(crate::document::MAX_NEW_EDGE)).contains(&value)
+            })
+        }
+    }
+
+    fn format(self, value: i64) -> String {
+        if self == Self::RotateAngle {
+            format!("{:.1}", value as f64 / 10.)
+        } else {
+            value.to_string()
+        }
+    }
+
     pub(super) fn is_selection(self) -> bool {
         matches!(
             self,
             Self::SelectionRadius | Self::SelectionWidth | Self::SelectionHeight
         )
+    }
+
+    fn accepts_character(self, ch: char) -> bool {
+        ch.is_ascii_digit()
+            || (matches!(self, Self::TextLetterSpacing | Self::RotateAngle) && ch == '-')
+            || (self == Self::RotateAngle && ch == '.')
     }
 
     fn is_tool_option(self) -> bool {
@@ -77,12 +113,14 @@ impl NumericField {
                 | Self::BrushHardness
                 | Self::BrushOpacity
                 | Self::PathStrokeSize
+                | Self::RotateAngle
         )
     }
 
     fn constrain(self, value: i64) -> i64 {
         let (min, max) = match self {
             Self::Tolerance => (0, 255),
+            Self::RotateAngle => (-3600, 3600),
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
             Self::BrushSpacing => (1, 100),
             Self::BrushHardness | Self::BrushOpacity => (0, 100),
@@ -105,9 +143,36 @@ pub(super) struct NumericEdit {
     original_crop: Option<CropRect>,
 }
 
+pub(super) enum NumericFollowup {
+    Key(Keystroke),
+    Focus(NumericField),
+}
+
+pub(super) struct PendingNumeric {
+    tab: usize,
+    generation: u64,
+    followup: NumericFollowup,
+}
+
+impl PendingNumeric {
+    fn accepts_completion(
+        &self,
+        tab: &super::Tab,
+        id: usize,
+        generation: u64,
+        published: bool,
+    ) -> bool {
+        self.tab == id
+            && tab.id == id
+            && self.generation == generation
+            && !tab.busy()
+            && generation.checked_add(u64::from(published)) == Some(tab.history.generation())
+    }
+}
+
 impl NumericEdit {
     fn new(field: NumericField, value: i64, crop: Option<CropRect>) -> Self {
-        let text = value.to_string();
+        let text = field.format(value);
         Self {
             field,
             cursor: text.chars().count(),
@@ -131,10 +196,10 @@ impl NumericEdit {
     }
 
     fn insert_digits(&mut self, text: &str) {
-        let signed = self.field == NumericField::TextLetterSpacing;
+        let decimal = self.field == NumericField::RotateAngle;
         let digits: String = text
             .chars()
-            .filter(|ch| ch.is_ascii_digit() || (signed && *ch == '-'))
+            .filter(|&ch| self.field.accepts_character(ch))
             .collect();
         if digits.is_empty() {
             return;
@@ -151,7 +216,12 @@ impl NumericEdit {
         };
         next.insert_str(at, &digits);
         let unsigned = next.strip_prefix('-').unwrap_or(&next);
-        if unsigned.len() > 10 || !unsigned.chars().all(|ch| ch.is_ascii_digit()) {
+        if unsigned.len() > 10
+            || !unsigned
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || (decimal && ch == '.'))
+            || unsigned.matches('.').count() > 1
+        {
             return;
         }
         self.text = next;
@@ -235,7 +305,13 @@ impl Workspace {
             NumericField::BrushSpacing => Some(i64::from(self.brush_value(BrushField::Spacing))),
             NumericField::BrushHardness => Some(i64::from(self.brush_value(BrushField::Hardness))),
             NumericField::BrushOpacity => Some(i64::from(self.brush_value(BrushField::Opacity))),
-            NumericField::PathStrokeSize => Some(i64::from(self.brush.diameter)),
+            NumericField::PathStrokeSize => Some(i64::from(self.brushes.outline.diameter)),
+            NumericField::ScaleWidth => self.scale_size().map(|size| i64::from(size.0)),
+            NumericField::ScaleHeight => self.scale_size().map(|size| i64::from(size.1)),
+            NumericField::RotateAngle => self
+                .warp_status()?
+                .degrees
+                .map(|degrees| (degrees * 10.).round() as i64),
         }
     }
 
@@ -248,6 +324,11 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
+        if field == NumericField::RotateAngle
+            && self.warp_status().is_none_or(|status| status.applying)
+        {
+            return;
+        }
         if let Some(edit) = self.numeric_edit.as_mut() {
             if edit.field == field {
                 edit.selected = true;
@@ -256,12 +337,17 @@ impl Workspace {
                 cx.notify();
                 return;
             }
-            self.commit_numeric_edit(window, cx);
+            if self.commit_numeric_with_followup(NumericFollowup::Focus(field), window, cx) {
+                return;
+            }
         }
         let Some(value) = self.numeric_value(field) else {
             return;
         };
         let original_crop = if field.is_crop() { self.crop } else { None };
+        if field.is_scale() && !self.begin_scale_numeric(window, cx) {
+            return;
+        }
         self.numeric_edit = Some(NumericEdit::new(field, value, original_crop));
         self.numeric_focus.focus(window);
         cx.notify();
@@ -354,10 +440,7 @@ impl Workspace {
                 }
                 _ => {
                     if let Some(text) = key.key_char.as_deref()
-                        && text.chars().any(|ch| {
-                            ch.is_ascii_digit()
-                                || (edit.field == NumericField::TextLetterSpacing && ch == '-')
-                        })
+                        && text.chars().any(|ch| edit.field.accepts_character(ch))
                     {
                         edit.insert_digits(text);
                         changed = true;
@@ -384,13 +467,23 @@ impl Workspace {
         }) else {
             return;
         };
-        let Some(value) = parse_numeric(&text) else {
+        let Some(value) = field.parse(&text) else {
             self.restore_numeric_values(field, original, original_crop, window, cx);
             cx.notify();
             return;
         };
         if field.is_tool_option() {
             self.apply_tool_numeric(field, value, window, cx);
+            return;
+        }
+        if field.is_scale() {
+            if let Ok(value) = u32::try_from(value) {
+                if value == 0 {
+                    self.restore_scale_size(cx);
+                } else {
+                    self.preview_scale_size(field == NumericField::ScaleWidth, value, cx);
+                }
+            }
             return;
         }
         let value = value.clamp(0, i64::from(u32::MAX)) as u32;
@@ -491,8 +584,13 @@ impl Workspace {
         let Some(edit) = self.numeric_edit.take() else {
             return;
         };
-        if parse_numeric(&edit.text).is_none() {
+        if edit.field.parse(&edit.text).is_none() {
             self.restore_numeric_edit(&edit, window, cx);
+            if edit.field.is_scale() {
+                self.cancel_scale(window, cx);
+            }
+        } else if edit.field.is_scale() {
+            self.finish_scale(window, cx);
         } else if edit.field.is_selection()
             && let Some(selection) = self.selection_preview.take()
         {
@@ -501,11 +599,102 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn commit_numeric_with_followup(
+        &mut self,
+        followup: NumericFollowup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let before = self
+            .active_tab()
+            .filter(|tab| !tab.busy())
+            .map(|tab| (tab.id, tab.history.generation()));
+        self.commit_numeric_edit(window, cx);
+        let Some((id, generation)) = before else {
+            return false;
+        };
+        if self.active_tab().is_some_and(|tab| {
+            tab.id == id && tab.editing && tab.history.generation() == generation
+        }) {
+            self.numeric_followup = Some(PendingNumeric {
+                tab: id,
+                generation,
+                followup,
+            });
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn finish_numeric_followup(
+        &mut self,
+        id: usize,
+        generation: u64,
+        published: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .numeric_followup
+            .as_ref()
+            .is_none_or(|pending| pending.tab != id)
+        {
+            return;
+        }
+        let pending = self.numeric_followup.take().unwrap();
+        let Some(tab) = self
+            .active_tab()
+            .filter(|tab| pending.accepts_completion(tab, id, generation, published))
+        else {
+            return;
+        };
+        let settled_generation = tab.history.generation();
+        let tool = self.tool;
+        let entity = cx.weak_entity();
+        // Menu availability and key contexts must render the settled edit first.
+        // Dispatch outside the entity update so keystroke interceptors can borrow it.
+        window.on_next_frame(move |window, cx| {
+            let key = entity
+                .update(cx, |this, cx| {
+                    if this.form.is_some()
+                        || this.dialog_open
+                        || this.numeric_edit.is_some()
+                        || this.tool != tool
+                        || this.active_tab().is_none_or(|tab| {
+                            tab.id != id
+                                || tab.busy()
+                                || tab.history.generation() != settled_generation
+                        })
+                    {
+                        return None;
+                    }
+                    match pending.followup {
+                        NumericFollowup::Key(key) => {
+                            this.focus.focus(window);
+                            Some(key)
+                        }
+                        NumericFollowup::Focus(field) => {
+                            this.begin_numeric_edit(field, window, cx);
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(key) = key {
+                window.dispatch_keystroke(key, cx);
+            }
+        });
+    }
+
     pub(super) fn cancel_numeric_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.numeric_edit.take() else {
             return;
         };
         self.restore_numeric_edit(&edit, window, cx);
+        if edit.field.is_scale() {
+            self.cancel_scale(window, cx);
+        }
         self.focus.focus(window);
         cx.notify();
     }
@@ -529,6 +718,10 @@ impl Workspace {
     ) {
         if field.is_tool_option() {
             self.apply_tool_numeric(field, original, window, cx);
+            return;
+        }
+        if field.is_scale() {
+            self.restore_scale_size(cx);
             return;
         }
         match field {
@@ -571,7 +764,8 @@ impl Workspace {
             NumericField::BrushOpacity => {
                 self.set_brush_value(BrushField::Opacity, value as u32, cx)
             }
-            NumericField::PathStrokeSize => self.brush.diameter = value as u32,
+            NumericField::PathStrokeSize => self.brushes.outline.diameter = value as u32,
+            NumericField::RotateAngle => self.set_warp_angle(value as f64 / 10., window, cx),
             NumericField::TextLetterSpacing => {
                 self.set_text_letter_spacing(value as f32, window, cx)
             }
@@ -666,7 +860,7 @@ impl Workspace {
             .filter(|edit| edit.field == field)
         else {
             let value = self.numeric_value(field).unwrap_or(0);
-            return div().text_size(px(12.)).child(value.to_string());
+            return div().text_size(px(12.)).child(field.format(value));
         };
         let text = div().flex().items_center().text_size(px(12.));
         if edit.selected && !edit.text.is_empty() {
@@ -688,6 +882,102 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angle_edits_keep_decimal_degrees_and_reject_incomplete_or_invalid_input() {
+        let field = NumericField::RotateAngle;
+        let mut edit = NumericEdit::new(field, -125, None);
+        assert_eq!(edit.text, "-12.5");
+        edit.insert_digits("-45.6");
+        assert_eq!(field.parse(&edit.text), Some(-456));
+        edit.insert_digits(".");
+        assert_eq!(edit.text, "-45.6");
+        edit.selected = true;
+        edit.insert_digits("-");
+        assert_eq!(field.parse(&edit.text), None);
+        edit.insert_digits(".5");
+        assert_eq!(field.parse(&edit.text), Some(-5));
+        assert_eq!(edit.original, -125);
+        for invalid in ["", "-", ".", "NaN", "inf", "360.1", "-361"] {
+            assert_eq!(field.parse(invalid), None);
+        }
+        assert_eq!(field.parse("12.34"), Some(123));
+        assert_eq!(field.parse("360"), Some(3600));
+        assert_eq!(field.format(123), "12.3");
+        assert!(field.accepts_character('-'));
+        assert!(field.accepts_character('.'));
+        assert!(!NumericField::ScaleWidth.accepts_character('.'));
+        assert!(!NumericField::ScaleWidth.accepts_character('-'));
+    }
+
+    #[test]
+    fn scale_fields_reject_oversized_values_instead_of_committing_a_stale_preview() {
+        for field in [NumericField::ScaleWidth, NumericField::ScaleHeight] {
+            assert_eq!(field.parse("0"), Some(0));
+            assert_eq!(field.parse("16384"), Some(16384));
+            for invalid in ["", "-1", "16385", "4294967296", "1.5"] {
+                assert_eq!(field.parse(invalid), None);
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_followup_waits_for_its_selection_commit_and_rejects_stale_context() {
+        let mut tab = super::super::tests::opacity_tab();
+        let id = tab.id;
+        let generation = tab.history.generation();
+        let key = Keystroke::parse("ctrl-s").unwrap();
+        let pending = PendingNumeric {
+            tab: id,
+            generation,
+            followup: NumericFollowup::Key(key.clone()),
+        };
+        let mut state = tab.state();
+        state.selection = Selection::rectangle((0, 0), (0, 0), 2, 2);
+        let selection = state.selection.clone();
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            crate::preview::Dirty::Unpainted,
+        )
+        .unwrap();
+        tab.editing = true;
+        assert!(!pending.accepts_completion(&tab, id, generation, true));
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Selection,
+                Some((state.content, state.active_layer, state.selection, patch)),
+                1
+            )
+            .0
+        );
+        assert_eq!(tab.selection, selection);
+        assert!(!tab.history.is_dirty());
+        assert!(pending.accepts_completion(&tab, id, generation, true));
+        assert!(!pending.accepts_completion(&tab, id, generation, false));
+        assert!(!pending.accepts_completion(&tab, id, generation + 1, true));
+        tab.id += 1;
+        assert!(!pending.accepts_completion(&tab, id, generation, true));
+        assert!(matches!(pending.followup, NumericFollowup::Key(queued) if queued == key));
+    }
+
+    #[test]
+    fn unchanged_numeric_commit_can_still_focus_the_next_field() {
+        let tab = super::super::tests::opacity_tab();
+        let pending = PendingNumeric {
+            tab: tab.id,
+            generation: tab.history.generation(),
+            followup: NumericFollowup::Focus(NumericField::SelectionHeight),
+        };
+        assert!(pending.accepts_completion(&tab, tab.id, tab.history.generation(), false));
+        assert!(matches!(
+            pending.followup,
+            NumericFollowup::Focus(NumericField::SelectionHeight)
+        ));
+    }
 
     #[test]
     fn empty_and_deleted_values_do_not_create_a_zero() {

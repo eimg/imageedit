@@ -86,6 +86,12 @@ impl Render for Workspace {
                     this.commit_numeric_edit(window, cx);
                 }),
             )
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.extend_opacity_drag(event.position, cx);
+                }
+            }))
+            .capture_any_mouse_up(cx.listener(Self::end_opacity_drag))
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .when(interactive, |root| {
@@ -114,6 +120,7 @@ impl Render for Workspace {
                     }
                     if changed {
                         this.commit_numeric_edit(window, cx);
+                        this.numeric_followup = None;
                         this.tool = tool;
                         this.pan_drag = None;
                         this.clear_selection_gesture();
@@ -935,7 +942,12 @@ impl Workspace {
                                     );
                                     this.extend_move(event.position, window.scale_factor(), cx);
                                     this.extend_free(event.position, window.scale_factor(), cx);
-                                    this.extend_scale(event.position, window.scale_factor(), cx);
+                                    this.extend_scale(
+                                        event.position,
+                                        window.scale_factor(),
+                                        event.modifiers.shift,
+                                        cx,
+                                    );
                                     this.extend_warp_drag(
                                         event.position,
                                         window.scale_factor(),
@@ -1049,7 +1061,7 @@ impl Workspace {
                         area.cursor(self.scale_cursor(scale)).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_scale(event.position, window.scale_factor(), cx);
+                                this.begin_scale(event.position, window.scale_factor(), window, cx);
                             }),
                         )
                     })
@@ -1443,6 +1455,12 @@ impl Workspace {
                                         ),
                                     )
                             })
+                            .when(self.tool == Tool::MagicWand, |panel| {
+                                let sample_all = self.wand_sample_all;
+                                panel.child(toggle_button("Sample All Layers", sample_all).on_click(
+                                    cx.listener(move |this, _, _, cx| { this.wand_sample_all = !sample_all; cx.notify(); }),
+                                ))
+                            })
                             .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
                             .when(self.tool == Tool::Gradient, |panel| {
                                 let shape = self.gradient_shape;
@@ -1551,18 +1569,30 @@ impl Workspace {
                             })
                             .when(self.tool == Tool::ScaleLayer, |panel| {
                                 let size = self.scale_size();
+                                let locked = self.scale_lock;
+                                let resample = self.warp_resample;
                                 panel
-                                    .when_some(size, |panel, (width, height)| {
+                                    .when_some(size, |panel, _| {
                                         panel
                                             .child(section_label("SIZE"))
                                             .child(
                                                 div()
                                                     .flex()
                                                     .gap_2()
-                                                    .child(readout_chip("W", width))
-                                                    .child(readout_chip("H", height)),
+                                                    .child(self.numeric_chip(NumericField::ScaleWidth, Some("W"), cx))
+                                                    .child(self.numeric_chip(NumericField::ScaleHeight, Some("H"), cx)),
                                             )
                                     })
+                                    .child(toggle_button("Lock aspect ratio", locked).on_click(cx.listener(move |this, _, _, cx| {
+                                        this.scale_lock = !locked;
+                                        cx.notify();
+                                    })))
+                                    .child(section_label("RESAMPLE"))
+                                    .child(segmented([
+                                        resample_choice("Nearest", Resample::Nearest, resample, cx),
+                                        resample_choice("Bilinear", Resample::Bilinear, resample, cx),
+                                        resample_choice("Bicubic", Resample::Bicubic, resample, cx),
+                                    ]))
                             })
                             .when_some(self.warp_status(), |panel, status| {
                                 let horizontal = status.horizontal;
@@ -1573,8 +1603,8 @@ impl Workspace {
                                     .when(status.applying, |panel| {
                                         panel.child(info_note("Applying…"))
                                     })
-                                    .when_some(status.degrees, |panel, degrees| {
-                                        panel.child(readout_chip("Angle", format!("{degrees:.1}°")))
+                                    .when_some(status.degrees, |panel, _| {
+                                        panel.child(self.numeric_chip(NumericField::RotateAngle, Some("Angle °"), cx))
                                     })
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))

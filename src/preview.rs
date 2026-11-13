@@ -71,6 +71,8 @@ pub enum Dirty {
     None,
     // The document changed, but its pixels did not.
     Unpainted,
+    // Layer metadata changed the composite, but the layer bitmaps did not change.
+    Composite(PixelRect),
     Region(PixelRect),
     Regions(Vec<PixelRect>),
     Canvas,

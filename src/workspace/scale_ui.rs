@@ -24,6 +24,7 @@ pub(super) struct ScaleDrag {
     edges: ScaleEdges,
     start: (i64, i64),
     target: PixelRect,
+    pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,9 +66,13 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tool != Tool::ScaleLayer || self.active_tab().is_none_or(|tab| tab.busy()) {
+        if self.tool != Tool::ScaleLayer
+            || self.scale_drag.is_some()
+            || self.active_tab().is_none_or(|tab| tab.busy())
+        {
             return;
         }
         let Some(tab) = self.active_tab() else {
@@ -77,12 +82,15 @@ impl Workspace {
             Some(layer) => layer,
             None => return,
         };
+        if !layer.visible {
+            self.notice("The active layer is hidden. Show it before scaling.", cx);
+            return;
+        }
         if layer.text.is_some() {
             self.notice("Rasterize the text layer before scaling it.", cx);
             return;
         }
         let id = layer.id;
-        let opacity = layer.opacity;
         let original = PixelRect {
             x: i64::from(layer.offset.0),
             y: i64::from(layer.offset.1),
@@ -106,23 +114,111 @@ impl Workspace {
         let Some(start) = self.unclamped_pointer_pixel(position, scale) else {
             return;
         };
-        let (below, above) = tab.document.content.composite_around(id);
-        let sprite =
-            document::preview_render(&super::layers::with_layer_opacity(&layer.pixels, opacity));
-        self.scale_overlay = Some(MovePaint {
-            below: below.as_ref().map(document::preview_render),
-            above: above.as_ref().map(document::preview_render),
-            sprite,
-            offset: (original.x as i32, original.y as i32),
-            size: (original.width, original.height),
-        });
-        self.scale_drag = Some(ScaleDrag {
-            layer: id,
+        self.start_scale_preview(
+            ScaleDrag {
+                layer: id,
+                original,
+                edges,
+                start,
+                target: original,
+                pointer: true,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn begin_scale_numeric(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.tool != Tool::ScaleLayer || self.scale_drag.is_some() {
+            return false;
+        }
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            return false;
+        };
+        let Some(layer) = tab.document.content.layer(tab.active_layer) else {
+            return false;
+        };
+        if !layer.visible || layer.text.is_some() {
+            self.notice(
+                "Show the layer and rasterize editable text before scaling.",
+                cx,
+            );
+            return false;
+        }
+        let original = PixelRect::new(
+            i64::from(layer.offset.0),
+            i64::from(layer.offset.1),
+            layer.pixels.width(),
+            layer.pixels.height(),
+        );
+        let drag = ScaleDrag {
+            layer: layer.id,
             original,
-            edges,
-            start,
             target: original,
+            start: (0, 0),
+            edges: ScaleEdges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
+            pointer: false,
+        };
+        self.start_scale_preview(drag, window, cx);
+        true
+    }
+
+    fn start_scale_preview(
+        &mut self,
+        drag: ScaleDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let Some(layer) = tab.document.content.layer(drag.layer) else {
+            return;
+        };
+        let id = drag.layer;
+        let original = drag.original;
+        let content = tab.document.content.clone();
+        let pixels = layer.pixels.clone();
+        let opacity = layer.opacity;
+        self.scale_token = self.scale_token.wrapping_add(1);
+        let token = self.scale_token;
+        self.scale_drag = Some(drag);
+        let job = cx.background_executor().spawn(async move {
+            let (below, above) = content.composite_around(id);
+            MovePaint {
+                below: below.as_ref().map(document::preview_render),
+                above: above.as_ref().map(document::preview_render),
+                sprite: document::preview_render(&super::layers::with_layer_opacity(
+                    &pixels, opacity,
+                )),
+                offset: (original.x as i32, original.y as i32),
+                size: (original.width, original.height),
+            }
         });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let mut overlay = job.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.scale_token != token || workspace.scale_drag.is_none() {
+                    super::drop_images(overlay.into_images(), window, cx);
+                    return;
+                }
+                let target = workspace.scale_drag.unwrap().target;
+                overlay.offset = (target.x as i32, target.y as i32);
+                overlay.size = (target.width, target.height);
+                workspace.scale_overlay = Some(overlay);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -130,17 +226,81 @@ impl Workspace {
         &mut self,
         position: Point<Pixels>,
         scale: f32,
+        shift: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.scale_drag else {
+        let Some(drag) = self.scale_drag.filter(|drag| drag.pointer) else {
             return;
         };
         let Some(pointer) = self.unclamped_pointer_pixel(position, scale) else {
             return;
         };
-        let target = scale_target(drag.original, drag.edges, drag.start, pointer);
-        if target == drag.target {
+        let target = scale_target(
+            drag.original,
+            drag.edges,
+            drag.start,
+            pointer,
+            self.scale_lock ^ shift,
+        );
+        self.update_scale_target(target, cx);
+    }
+
+    pub(super) fn scale_pointer_dragging(&self) -> bool {
+        self.scale_drag.is_some_and(|drag| drag.pointer)
+    }
+
+    pub(super) fn preview_scale_size(&mut self, width: bool, value: u32, cx: &mut Context<Self>) {
+        let Some(drag) = self.scale_drag.filter(|drag| !drag.pointer) else {
             return;
+        };
+        let Some((w, h)) = scale_dimensions(
+            (drag.original.width, drag.original.height),
+            width,
+            value,
+            self.scale_lock,
+        ) else {
+            self.restore_scale_size(cx);
+            self.notice(
+                "Enter a size within the layer dimension and memory limits.",
+                cx,
+            );
+            return;
+        };
+        let offset = crate::transform::centered_offset(
+            (drag.original.x as i32, drag.original.y as i32),
+            (drag.original.width, drag.original.height),
+            (w, h),
+        );
+        if !self.update_scale_target(
+            PixelRect::new(i64::from(offset.0), i64::from(offset.1), w, h),
+            cx,
+        ) {
+            self.restore_scale_size(cx);
+        }
+    }
+
+    pub(super) fn restore_scale_size(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.scale_drag {
+            self.update_scale_target(drag.original, cx);
+        }
+    }
+
+    fn update_scale_target(&mut self, target: PixelRect, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.scale_drag else {
+            return false;
+        };
+        if target == drag.target {
+            return true;
+        }
+        if self.active_tab().is_none_or(|tab| {
+            !crate::transform::canvas_allowed(target.width, target.height)
+                || !tab
+                    .document
+                    .content
+                    .accepts_replacement(drag.layer, (target.width, target.height))
+        }) {
+            self.notice("That size exceeds the layer or image memory limit.", cx);
+            return false;
         }
         if let Some(drag) = self.scale_drag.as_mut() {
             drag.target = target;
@@ -150,12 +310,14 @@ impl Workspace {
             overlay.size = (target.width, target.height);
         }
         cx.notify();
+        true
     }
 
     pub(super) fn finish_scale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.scale_drag.take() else {
             return;
         };
+        self.scale_token = self.scale_token.wrapping_add(1);
         let overlay = self.scale_overlay.take();
         if drag.target == drag.original {
             if let Some(overlay) = overlay {
@@ -164,17 +326,9 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let id = drag.layer;
-        let target = drag.target;
         let resample = self.warp_resample;
         self.edit_content(
-            move |content, _, _| {
-                if !content.scale_layer(id, target.width, target.height, resample) {
-                    return Dirty::None;
-                }
-                let _ = content.set_offset(id, (target.x as i32, target.y as i32));
-                Dirty::Canvas
-            },
+            move |content, _, _| commit_scale(content, drag, resample),
             window,
             cx,
         );
@@ -185,6 +339,14 @@ impl Workspace {
     }
 
     pub(super) fn cancel_scale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .numeric_edit
+            .as_ref()
+            .is_some_and(|edit| edit.field.is_scale())
+        {
+            self.numeric_edit = None;
+        }
+        self.scale_token = self.scale_token.wrapping_add(1);
         self.scale_drag = None;
         if let Some(overlay) = self.scale_overlay.take() {
             super::drop_images(overlay.into_images(), window, cx);
@@ -196,7 +358,7 @@ impl Workspace {
         if self.tool != Tool::ScaleLayer {
             return CursorStyle::Crosshair;
         }
-        if let Some(drag) = self.scale_drag {
+        if let Some(drag) = self.scale_drag.filter(|drag| drag.pointer) {
             return drag.edges.cursor();
         }
         let Some(frame) = self.scale_frame() else {
@@ -246,11 +408,26 @@ impl Workspace {
     }
 }
 
+fn commit_scale(
+    content: &mut crate::document::DocumentContent,
+    drag: ScaleDrag,
+    resample: crate::transform::Resample,
+) -> Dirty {
+    if drag.target == drag.original
+        || !content.scale_layer(drag.layer, drag.target.width, drag.target.height, resample)
+    {
+        return Dirty::None;
+    }
+    let _ = content.set_offset(drag.layer, (drag.target.x as i32, drag.target.y as i32));
+    Dirty::Canvas
+}
+
 fn scale_target(
     original: PixelRect,
     edges: ScaleEdges,
     start: (i64, i64),
     pointer: (i64, i64),
+    locked: bool,
 ) -> PixelRect {
     let dx = pointer.0.saturating_sub(start.0);
     let dy = pointer.1.saturating_sub(start.1);
@@ -284,8 +461,31 @@ fn scale_target(
             bottom = top + 1;
         }
     }
-    let width = (right - left).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
-    let height = (bottom - top).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
+    let mut width = right.saturating_sub(left).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
+    let mut height = bottom.saturating_sub(top).clamp(1, i64::from(MAX_NEW_EDGE)) as u32;
+    if locked {
+        let horizontal = edges.left || edges.right;
+        let vertical = edges.top || edges.bottom;
+        let width_axis = horizontal
+            && (!vertical
+                || (width as f64 / original.width as f64 - 1.).abs()
+                    >= (height as f64 / original.height as f64 - 1.).abs());
+        // Clamp the common scale, rather than either dimension independently.
+        let factor = if width_axis {
+            width as f64 / original.width as f64
+        } else {
+            height as f64 / original.height as f64
+        };
+        let factor = factor.min(MAX_NEW_EDGE as f64 / original.width.max(original.height) as f64);
+        width = (original.width as f64 * factor).round().max(1.) as u32;
+        height = (original.height as f64 * factor).round().max(1.) as u32;
+        if !horizontal {
+            left = original.x + (i64::from(original.width) - i64::from(width)) / 2;
+        }
+        if !vertical {
+            top = original.y + (i64::from(original.height) - i64::from(height)) / 2;
+        }
+    }
     if edges.left {
         left = right - i64::from(width);
     }
@@ -298,6 +498,32 @@ fn scale_target(
         width,
         height,
     )
+}
+
+fn scale_dimensions(
+    original: (u32, u32),
+    width_axis: bool,
+    value: u32,
+    locked: bool,
+) -> Option<(u32, u32)> {
+    if value == 0 || value > MAX_NEW_EDGE {
+        return None;
+    }
+    let (width, height) = if locked {
+        let factor = value as f64 / if width_axis { original.0 } else { original.1 } as f64;
+        (
+            (original.0 as f64 * factor).round().max(1.) as u32,
+            (original.1 as f64 * factor).round().max(1.) as u32,
+        )
+    } else if width_axis {
+        (value, original.1)
+    } else {
+        (original.0, value)
+    };
+    (width <= MAX_NEW_EDGE
+        && height <= MAX_NEW_EDGE
+        && crate::transform::canvas_allowed(width, height))
+    .then_some((width, height))
 }
 
 fn hit_scale(left: f32, top: f32, right: f32, bottom: f32, x: f32, y: f32, slop: f32) -> ScaleHit {
@@ -346,6 +572,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn numeric_scale_commits_pixels_and_placement_as_one_undo_step() {
+        let mut tab = super::super::tests::opacity_tab();
+        let generation = tab.history.generation();
+        let mut state = tab.state();
+        let original = PixelRect::new(0, 0, 2, 2);
+        let mut drag = ScaleDrag {
+            layer: state.active_layer,
+            original,
+            target: original,
+            edges: ScaleEdges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
+            start: (0, 0),
+            pointer: false,
+        };
+        assert!(matches!(
+            commit_scale(
+                &mut state.content,
+                drag,
+                crate::transform::Resample::Nearest
+            ),
+            Dirty::None
+        ));
+        drag.target = PixelRect::new(-1, -1, 4, 4);
+        let dirty = commit_scale(
+            &mut state.content,
+            drag,
+            crate::transform::Resample::Nearest,
+        );
+        assert!(matches!(dirty, Dirty::Canvas));
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            dirty,
+        )
+        .unwrap();
+        tab.editing = true;
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Edit,
+                Some((state.content, state.active_layer, state.selection, patch)),
+                1
+            )
+            .0
+        );
+        let layer = tab.document.content.layer(tab.active_layer).unwrap();
+        assert_eq!(layer.pixels.dimensions(), (4, 4));
+        assert_eq!(layer.offset, (-1, -1));
+        assert_eq!(layer.opacity, 255);
+        assert_eq!(tab.selection, crate::selection::Selection::Unrestricted);
+        assert!(tab.history.is_dirty());
+        assert_eq!(tab.history.generation(), generation + 1);
+        let (undo, _) = tab.history.undo_target().unwrap();
+        let layer = undo.content.layer(tab.active_layer).unwrap();
+        assert_eq!(layer.pixels.dimensions(), (2, 2));
+        assert_eq!(layer.offset, (0, 0));
+    }
+
+    #[test]
+    fn locked_scale_anchors_corners_and_centers_the_other_axis_for_edges() {
+        let original = PixelRect::new(-10, 20, 100, 50);
+        let right = ScaleEdges {
+            left: false,
+            right: true,
+            top: false,
+            bottom: false,
+        };
+        assert_eq!(
+            scale_target(original, right, (0, 0), (100, 0), true),
+            PixelRect::new(-10, -5, 200, 100)
+        );
+        let corner = ScaleEdges {
+            left: true,
+            right: false,
+            top: true,
+            bottom: false,
+        };
+        let target = scale_target(original, corner, (0, 0), (-100, -10), true);
+        assert_eq!(target, PixelRect::new(-110, -30, 200, 100));
+        assert_eq!(target.right(), original.right());
+        assert_eq!(target.bottom(), original.bottom());
+        let limited = scale_target(original, corner, (0, 0), (-100_000, -100_000), true);
+        assert_eq!(
+            (limited.width, limited.height),
+            (MAX_NEW_EDGE, MAX_NEW_EDGE / 2)
+        );
+        assert_eq!(limited.right(), original.right());
+        assert_eq!(limited.bottom(), original.bottom());
+    }
+
+    #[test]
+    fn numeric_scale_preserves_ratio_rounding_and_size_limits() {
+        assert_eq!(
+            scale_dimensions((100, 50), true, 200, true),
+            Some((200, 100))
+        );
+        assert_eq!(
+            scale_dimensions((100, 50), false, 200, true),
+            Some((400, 200))
+        );
+        assert_eq!(
+            scale_dimensions((100, 50), true, 200, false),
+            Some((200, 50))
+        );
+        assert_eq!(scale_dimensions((3, 2), true, 10, true), Some((10, 7)));
+        assert_eq!(scale_dimensions((100, 1), false, MAX_NEW_EDGE, true), None);
+        assert_eq!(scale_dimensions((1, 1), true, MAX_NEW_EDGE, true), None);
+        assert_eq!(scale_dimensions((100, 50), true, 0, true), None);
+        assert_eq!(
+            scale_dimensions((100, 50), true, MAX_NEW_EDGE + 1, false),
+            None
+        );
+    }
+
+    #[test]
     fn scale_target_keeps_the_opposite_edge_fixed() {
         let original = PixelRect::new(10, 20, 30, 40);
         let right = ScaleEdges {
@@ -355,7 +702,7 @@ mod tests {
             bottom: false,
         };
         assert_eq!(
-            scale_target(original, right, (0, 0), (10, 0)),
+            scale_target(original, right, (0, 0), (10, 0), false),
             PixelRect::new(10, 20, 40, 40)
         );
         let corner = ScaleEdges {
@@ -365,14 +712,14 @@ mod tests {
             bottom: false,
         };
         assert_eq!(
-            scale_target(original, corner, (0, 0), (10, 10)),
+            scale_target(original, corner, (0, 0), (10, 10), false),
             PixelRect::new(20, 30, 20, 30)
         );
         assert_eq!(
-            scale_target(original, right, (0, 0), (-100, 0)),
+            scale_target(original, right, (0, 0), (-100, 0), false),
             PixelRect::new(10, 20, 1, 40)
         );
-        let limited = scale_target(original, corner, (0, 0), (-100_000, -100_000));
+        let limited = scale_target(original, corner, (0, 0), (-100_000, -100_000), false);
         assert_eq!(limited.width, MAX_NEW_EDGE);
         assert_eq!(limited.height, MAX_NEW_EDGE);
         assert_eq!(limited.right(), original.right());

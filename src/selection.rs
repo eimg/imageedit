@@ -1459,11 +1459,33 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
                 width,
                 height,
             );
-            source[(row * buf_w + column) as usize] = match kind {
-                Reshape::Feather => coverage,
-                Reshape::Grow | Reshape::Shrink => u8::from(coverage > 0),
-            };
+            source[(row * buf_w + column) as usize] = coverage;
         }
+    }
+    if matches!(kind, Reshape::Grow | Reshape::Shrink) {
+        let grow = matches!(kind, Reshape::Grow);
+        let columns = buf_w as usize;
+        let rows = buf_h as usize;
+        let mut horizontal = vec![0; source.len()];
+        for row in 0..rows {
+            extrema_line(
+                columns,
+                radius as usize,
+                grow,
+                |column| source[row * columns + column],
+                |column, value| horizontal[row * columns + column] = value,
+            );
+        }
+        for column in 0..columns {
+            extrema_line(
+                rows,
+                radius as usize,
+                grow,
+                |row| horizontal[row * columns + column],
+                |row, value| source[row * columns + column] = value,
+            );
+        }
+        return finish_mask(left, top, buf_w, buf_h, source, width, height);
     }
     let area = u64::from(radius * 2 + 1) * u64::from(radius * 2 + 1);
     let mut output = vec![0u8; source.len()];
@@ -1500,14 +1522,50 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
                     sum -= vertical[column - pad - 1];
                 }
             }
-            output[row * columns + column] = match kind {
-                Reshape::Grow => u8::from(sum > 0) * 255,
-                Reshape::Shrink => u8::from(sum == area) * 255,
-                Reshape::Feather => ((sum + area / 2) / area).min(255) as u8,
-            };
+            output[row * columns + column] = ((sum + area / 2) / area).min(255) as u8;
         }
     }
     finish_mask(left, top, buf_w, buf_h, output, width, height)
+}
+
+// A monotonic deque gives a running max/min in linear time, retaining soft
+// coverage. Pixels outside the image have zero coverage, including for erosion.
+fn extrema_line(
+    length: usize,
+    radius: usize,
+    grow: bool,
+    sample: impl Fn(usize) -> u8,
+    mut store: impl FnMut(usize, u8),
+) {
+    let mut queue = std::collections::VecDeque::new();
+    let mut added = 0;
+    for center in 0..length {
+        let end = center.saturating_add(radius).min(length - 1);
+        while added <= end {
+            let value = sample(added);
+            while queue.back().is_some_and(|&at| {
+                if grow {
+                    sample(at) <= value
+                } else {
+                    sample(at) >= value
+                }
+            }) {
+                queue.pop_back();
+            }
+            queue.push_back(added);
+            added += 1;
+        }
+        let start = center.saturating_sub(radius);
+        while queue.front().is_some_and(|&at| at < start) {
+            queue.pop_front();
+        }
+        let value = if !grow && (center < radius || radius >= length - center) {
+            0
+        } else {
+            queue.front().map_or(0, |&at| sample(at))
+        };
+        store(center, value);
+    }
 }
 
 fn finish_mask(
@@ -1649,6 +1707,50 @@ fn invert_mask(mask: &Mask, width: u32, height: u32) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_morphology_matches_min_max_coverage_including_canvas_edges() {
+        let (width, height) = (7, 6);
+        let pixels: Vec<u8> = (0..width * height)
+            .map(|index| ((index * 73 + 31) % 256) as u8)
+            .collect();
+        let selection = finish_mask(0, 0, width, height, pixels, width, height);
+        for radius in [0, 1, 2, 8] {
+            for grow in [false, true] {
+                let actual = if grow {
+                    selection.clone().grow(radius, width, height)
+                } else {
+                    selection.clone().shrink(radius, width, height)
+                };
+                for y in 0..i64::from(height) {
+                    for x in 0..i64::from(width) {
+                        let mut expected = if grow { 0 } else { 255 };
+                        for dy in -i64::from(radius)..=i64::from(radius) {
+                            for dx in -i64::from(radius)..=i64::from(radius) {
+                                let value = selection.coverage(x + dx, y + dy, width, height);
+                                expected = if grow {
+                                    expected.max(value)
+                                } else {
+                                    expected.min(value)
+                                };
+                            }
+                        }
+                        assert_eq!(
+                            actual.coverage(x, y, width, height),
+                            expected,
+                            "({x},{y}), radius {radius}, grow {grow}"
+                        );
+                    }
+                }
+            }
+        }
+        let feathered = Selection::Rect(PixelRect::new(2, 2, 3, 3)).feather(1, 8, 8);
+        for edited in [feathered.clone().grow(1, 8, 8), feathered.shrink(1, 8, 8)] {
+            assert!(
+                (0..8).any(|y| (0..8).any(|x| (1..255).contains(&edited.coverage(x, y, 8, 8))))
+            );
+        }
+    }
 
     #[test]
     fn rectangle_clips_to_the_canvas_and_collapses_when_it_covers_it() {
@@ -2050,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_morphology_matches_direct_neighborhood_sums() {
+    fn bounded_morphology_matches_direct_neighborhoods_on_thin_canvases() {
         for (width, height) in [(5, 4), (1, 5), (5, 1)] {
             let source = finish_mask(
                 0,
@@ -2070,18 +2172,19 @@ mod tests {
                     for y in 0..i64::from(height) {
                         for x in 0..i64::from(width) {
                             let mut sum = 0u64;
+                            let mut minimum = 255;
+                            let mut maximum = 0;
                             for dy in -i64::from(radius)..=i64::from(radius) {
                                 for dx in -i64::from(radius)..=i64::from(radius) {
                                     let value = source.coverage(x + dx, y + dy, width, height);
-                                    sum += match kind {
-                                        Reshape::Feather => u64::from(value),
-                                        _ => u64::from(value > 0),
-                                    };
+                                    sum += u64::from(value);
+                                    minimum = minimum.min(value);
+                                    maximum = maximum.max(value);
                                 }
                             }
                             expected.push(match kind {
-                                Reshape::Grow => u8::from(sum > 0) * 255,
-                                Reshape::Shrink => u8::from(sum == area) * 255,
+                                Reshape::Grow => maximum,
+                                Reshape::Shrink => minimum,
                                 Reshape::Feather => ((sum + area / 2) / area) as u8,
                             });
                         }

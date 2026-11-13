@@ -170,7 +170,7 @@ impl Workspace {
                     .content
                     .layer(tab.active_layer)
                     .is_some_and(|layer| layer.visible && layer.text.is_none())
-                && self.brush.opacity > 0
+                && self.brushes.outline.opacity > 0
         });
         let style = self.path_stroke_style;
         let selection = tab.is_some_and(|tab| {
@@ -235,11 +235,13 @@ impl Workspace {
                 self.numeric_stepper(
                     NumericField::PathStrokeSize,
                     step_button("path-stroke-down", "−").on_click(cx.listener(|this, _, _, cx| {
-                        this.brush.diameter = this.brush.diameter.saturating_sub(1).max(1);
+                        this.brushes.outline.diameter =
+                            this.brushes.outline.diameter.saturating_sub(1).max(1);
                         cx.notify();
                     })),
                     step_button("path-stroke-up", "+").on_click(cx.listener(|this, _, _, cx| {
-                        this.brush.diameter = this.brush.diameter.saturating_add(1).min(500);
+                        this.brushes.outline.diameter =
+                            this.brushes.outline.diameter.saturating_add(1).min(500);
                         cx.notify();
                     })),
                     cx,

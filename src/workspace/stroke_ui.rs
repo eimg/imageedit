@@ -66,7 +66,7 @@ impl Workspace {
                 .content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.visible && layer.text.is_none())
-                && self.brush.opacity > 0
+                && self.brushes.outline.opacity > 0
         });
         let path = ready.is_some_and(|tab| {
             tab.document
@@ -135,7 +135,7 @@ impl Workspace {
         if !layer.visible {
             return Some(OutlineRequest::Hidden);
         }
-        if self.brush.opacity == 0 {
+        if self.brushes.outline.opacity == 0 {
             return None;
         }
         let outline = match source {
@@ -166,7 +166,7 @@ impl Workspace {
             outline,
             color: solid_color(self.colors[0]),
             kind: self.path_stroke_style.kind(),
-            brush: self.brush,
+            brush: self.brushes.outline,
         })
     }
 }

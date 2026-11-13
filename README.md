@@ -8,10 +8,17 @@ tool and command icons, and a workspace that keeps the canvas in focus.
 ## Features
 
 - **Layers** — move, align, reorder, merge, and adjust opacity.
+  The opacity slider keeps your chosen value while the canvas updates; each drag
+  is one undo step. You can keep dragging outside the slider and release at the
+  desired position. Pending text commits before the opacity change.
 - **Selections and transforms** — rectangle, oval, freehand, and magic wand;
   crop, resize, rotate, flip, and perspective.
+  Grow/Shrink retain feathered edges. The wand can sample the visible layers.
+  Scale Layer has editable dimensions, aspect locking, and resampling choices;
+  Rotate accepts typed angles.
 - **Painting and retouching** — pencil, brush, eraser, clone stamp, gradients,
   and fills.
+  Paint and retouch tools remember separate brush settings for the session.
 - **Text and paths** — editable text, searchable fonts, bold and italic,
   plus paths and strokes.
 - **Color and effects** — brightness, contrast, hue, saturation, levels,
@@ -38,6 +45,20 @@ beside a tool name for gestures and shortcuts.
 
 Save as **`.lime`** to keep layers, editable text, and paths. Use **Export** for
 a flattened PNG, JPEG, or WebP copy. Apply or cancel an active preview before saving.
+Finish or cancel an unfinished free selection first. If an image gains layers
+while the save dialog is open, save it as a `.lime` project or export a copy.
+Smooth scaling keeps the colors of nearly transparent pixels intact; show a
+hidden layer before dragging its Scale Layer frame.
+Reduced previews and layer thumbnails also preserve transparent edge colors.
+Save and Undo shortcuts finish an active numeric selection edit first.
+
+With **Scale Layer** (Shift+S), type Width or Height to preview a centered resize.
+Return or clicking outside commits one undo step; Escape or empty text restores
+the original size. Aspect locking starts on; Shift temporarily reverses the lock
+while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
+In **Rotate**, enter an angle in degrees (including negative values and tenths),
+then use Apply after finishing the numeric edit. **Sample All Layers** on the
+Magic Wand samples the visible composite and can select beyond the active layer.
 
 | Action | macOS | Windows |
 | --- | --- | --- |

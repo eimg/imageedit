@@ -827,17 +827,7 @@ impl Workspace {
                 let id = *id;
                 let opacity = opacity_from_percent(percent);
                 self.dismiss_form(window, cx);
-                self.edit_content(
-                    move |content, _, _| {
-                        if content.set_opacity(id, opacity) {
-                            content.layer_dirty(id)
-                        } else {
-                            Dirty::None
-                        }
-                    },
-                    window,
-                    cx,
-                );
+                self.commit_layer_opacity(id, opacity, window, cx);
             }
             FormKind::Adjustment { .. } => {
                 self.apply_adjustment(window, cx);

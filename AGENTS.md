@@ -37,26 +37,34 @@ the selection.
 Rectangle and oval drags may start or extend outside the canvas; coverage stays
 bounded to canvas pixels and clipped curves retain their original geometry.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
-bucket share a tolerance; zero matches a color exactly. Feather, Grow, and
-Shrink edit the mask. Move repositions the active layer, and its tool options
+bucket share a tolerance; zero matches a color exactly. The wand can sample the
+active layer or the visible composite, independently of Bucket Fill's setting.
+Feather, Grow, and Shrink edit the mask; Grow/Shrink preserve soft coverage.
+Move repositions the active layer, and its tool options
 align it to any canvas edge or center it with icon buttons. View → Toggle
 Layer Boundary shows a global subtle outline that follows the active layer.
 The Layer menu can align, fit it to the canvas, or crop it to its opaque
 pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
 by quarter turns. Rotate, Flip, and Perspective preview the active layer and
-commit on Apply, leaving the selection in canvas coordinates. Perspective
+commit on Apply, leaving the selection in canvas coordinates. Rotate also accepts
+typed angles in degrees with tenths precision. Perspective
 corner grips keep a dark rim so they stay visible on a white image. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
-border or corner; release commits one undo step, and its Width/Height options
-are read-only for now, and the tool uses Shift+S. Escape or a layer/tab change
-cancels the scale drag. Clone Stamp uses Shift+C,
+border or corner; release commits one undo step, and the tool uses Shift+S.
+Width/Height edits preview a centered resize and commit on Return or leaving
+the field; empty text and Escape restore the original size. Aspect locking starts
+on and applies to numeric edits and handles; Shift reverses it during a drag.
+Nearest, Bilinear, and Bicubic choose the commit resampling. Escape or a
+layer/tab change cancels the pointer drag. Clone Stamp uses Shift+C,
 sets its source with Alt-click, and copies from that offset while painting. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
 pixels under the brush. Blur and Sharpen have no shortcut.
-The bracket keys adjust the brush size for the paint tools. Gradient fills the active layer between two colors, and
+The paint and retouch tools retain independent brush settings during the session;
+path and selection outlines share their own settings. The bracket keys adjust
+the brush size for the paint tools. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
 dialog and apply inside the selection. The layer's alpha stays in place. Cancel
@@ -139,14 +147,24 @@ document is a single plain layer without paths or editable text.
   there is a real handler.
 - `src/document.rs` decodes and saves raster files and prepares the
   full-resolution composite, tile images and bounded BGRA preview for GPUI.
+  Opacity and visibility edits refresh composite tiles while reusing layer
+  thumbnails; hidden or fully off-canvas opacity edits need no pixel refresh.
+  Reduced transparent previews and thumbnails use premultiplied resampling so
+  hidden RGB values cannot tint visible edges.
 - `src/paint.rs` spaces pencil, brush, eraser, blur, sharpen, and clone-stamp
   dabs along the pointer path and stores touched 64 px tiles. It also samples linear and radial gradients
   and strokes a polyline in one pass, skipping a repeated endpoint.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
-  preview. Release commits their dirty regions in one undo step.
+  preview and owns the per-tool brush settings. Release commits dirty regions
+  in one undo step.
   `src/workspace/gradient_ui.rs` previews a gradient until Apply.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
-  the live GPU-scaled preview, and the commit that resamples the layer.
+  the live GPU-scaled preview, and the commit that resamples the layer. It prepares
+  the preview in the background and rejects results after release or cancellation.
+  Numeric dimensions use the same preview/commit path; aspect locking retains
+  opposite corner anchors or centers the unhandled axis. Numeric edits keep the
+  layer center. All targets respect image and stack budgets. Hidden layers must
+  be shown before scaling.
 - `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
   lightness, and it desaturates or inverts. It also balances color and maps
   levels and curves through a 256-entry lookup table per channel.
@@ -177,15 +195,21 @@ a partially clipped curve becomes a bounded mask. Scaling a rounded selection
 scales its coverage on both axes as a mask. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
 drag keeps the draft open as a checkpoint, and the start node or Return closes
-it. The Magic Wand shares the bucket tolerance.
+it. The Magic Wand shares the bucket tolerance. Its optional visible-composite
+source is built in the background and floods in canvas coordinates; active-layer
+sampling maps through the layer offset.
 Fill, Clear, and the clipboard honor feathered coverage. Shift adds, Control
 subtracts, and Shift-Control intersects. Over the box or ellipse the painted
 crosshair gives way to a hand or resize cursor. The outline is a dashed
 contour. Stroke polylines follow that contour, including a hole. Mask
-transforms avoid per-pixel coordinate lists; morphology uses running sums.
+transforms avoid per-pixel coordinate lists; feathering uses running sums and
+Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
-  is stored in the version 6 project.
+  is stored in the version 6 project. Smooth scaling filters exact 16-bit
+  premultiplied color products to retain faint colors. Image scaling validates
+  each layer against the image limit and the aggregate against the stack limit
+  before allocation, and rejects a scale that would make path coordinates nonfinite.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
@@ -220,11 +244,20 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
 - `src/workspace/clipboard.rs` copies the selected part of the active layer,
   pastes a centered layer, and imports rasters above the active layer. Deferred
   operations validate the document generation and layer; each imported image
-  must fit the stack budget before the next one is decoded.
+  must fit the stack budget before the next one is decoded. New from Clipboard
+  decodes the image and prepares its canvas in the background.
 - `src/workspace/files.rs` handles native file dialogs, Save routing,
-  background saving and export, and unsaved-change confirmation.
+  background saving and export, and unsaved-change confirmation. Raster Save
+  eligibility is rechecked after the native dialog, since a deferred paste can
+  change the document while it is open. An unfinished free selection is a pending
+  gesture for Save, Export, Close, and Quit.
 - `src/workspace/layers.rs` owns the Layers panel, layer commands, opacity
-  drag coalescing, and the Move preview. Layer thumbnails keep the layer's
+  drag coalescing, and the Move preview. A released opacity value stays visible
+  in its tab until the background canvas patch settles, including across tab
+  switches; each drag commits one undo step. Workspace mouse events track the
+  opacity drag outside the slider and sample its final release position.
+  Pending text commits before resolving the layer for a slider opacity change.
+  The opacity dialog uses the same commit path. Layer thumbnails keep the layer's
   aspect ratio and draw their checker only inside that area. The preview is
   display-only until the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options align the layer to canvas edges or center it with icon
@@ -234,10 +267,14 @@ transforms avoid per-pixel coordinate lists; morphology uses running sums.
   handles the HSV wheel and brightness slider.
 - `src/workspace/numeric.rs` edits the selection radius, selection size, crop
   fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity, path
-  stroke size, and text size/letter/line spacing inline with a caret and text
-  selection. Values preview live; selection edits commit one history entry.
+  stroke size, Scale Layer dimensions, Rotate angle, and text size/letter/line
+  spacing inline with a caret and text selection. Values preview live; selection
+  and scale edits commit one history entry. Rotate angles retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing
-  accepts negative values. Scale Layer's size readouts remain read-only.
+  accepts negative values. A shortcut or a switch to another numeric field waits
+  for a selection or scale edit to settle and its action bindings to render; stale
+  followups are rejected after a tab, tool, or revision change. Rotation accepts
+  signed decimals; other numeric fields retain their existing integer contracts.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
   options edit X, Y, Width, and Height live.

@@ -621,32 +621,28 @@ impl Workspace {
         if tab.busy() {
             return;
         }
-        let layer_id = tab.active_layer;
-        let Some(layer) = tab.document.content.layer(layer_id) else {
-            return;
-        };
-        let local_x = i64::from(x) - i64::from(layer.offset.0);
-        let local_y = i64::from(y) - i64::from(layer.offset.1);
-        if local_x < 0
-            || local_y < 0
-            || local_x as u32 >= layer.pixels.width()
-            || local_y as u32 >= layer.pixels.height()
+        let sample_all = self.wand_sample_all;
+        if !sample_all
+            && wand_source(&tab.document.content, tab.active_layer, false, (x, y)).is_none()
         {
             self.notice("The active layer does not cover that pixel.", cx);
             return;
         }
-        let pixels = layer.pixels.clone();
-        let offset = layer.offset;
+        let content = tab.document.content.clone();
+        let layer = tab.active_layer;
         let op = selection_op(modifiers);
         let tolerance = self.tolerance;
         self.update_selection(
             move |current, size| {
+                let Some(source) = wand_source(&content, layer, sample_all, (x, y)) else {
+                    return current;
+                };
                 let shape = Selection::flood(
-                    &pixels,
-                    local_x as u32,
-                    local_y as u32,
+                    &source.pixels,
+                    source.point.0,
+                    source.point.1,
                     tolerance,
-                    offset,
+                    source.offset,
                     size,
                 );
                 current.combine(shape, op, size.0, size.1)
@@ -753,6 +749,42 @@ impl Workspace {
             _ => None,
         }
     }
+}
+
+struct WandSource {
+    pixels: std::sync::Arc<image::RgbaImage>,
+    offset: (i32, i32),
+    point: (u32, u32),
+}
+
+fn wand_source(
+    content: &crate::document::DocumentContent,
+    layer: crate::document::LayerId,
+    sample_all: bool,
+    point: (u32, u32),
+) -> Option<WandSource> {
+    if sample_all {
+        return Some(WandSource {
+            pixels: content.composite(),
+            offset: (0, 0),
+            point,
+        });
+    }
+    let layer = content.layer(layer)?;
+    let x = i64::from(point.0) - i64::from(layer.offset.0);
+    let y = i64::from(point.1) - i64::from(layer.offset.1);
+    if x < 0
+        || y < 0
+        || x >= i64::from(layer.pixels.width())
+        || y >= i64::from(layer.pixels.height())
+    {
+        return None;
+    }
+    Some(WandSource {
+        pixels: layer.pixels.clone(),
+        offset: layer.offset,
+        point: (x as u32, y as u32),
+    })
 }
 
 fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
@@ -984,6 +1016,45 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wand_composite_sampling_uses_canvas_coordinates_and_visible_layers() {
+        use crate::document::{DocumentContent, LayerId};
+        use image::{Rgba, RgbaImage};
+        let red = Rgba([255, 0, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut base = RgbaImage::from_pixel(4, 2, red);
+        for y in 0..2 {
+            base.put_pixel(3, y, blue);
+        }
+        let mut content = DocumentContent::single_layer("Base".into(), base);
+        let active = content
+            .add_layer(LayerId(0), "Small offset".into(), Rgba([0; 4]))
+            .unwrap();
+        content.place_layer(active, RgbaImage::new(1, 1), (1, 0));
+        assert!(wand_source(&content, active, false, (0, 0)).is_none());
+        let local = wand_source(&content, active, false, (1, 0)).unwrap();
+        assert_eq!(local.point, (0, 0));
+        assert_eq!(local.offset, (1, 0));
+        let source = wand_source(&content, active, true, (0, 0)).unwrap();
+        assert_eq!(source.point, (0, 0));
+        assert_eq!(source.offset, (0, 0));
+        let selected = Selection::flood(&source.pixels, 0, 0, 0, source.offset, content.size());
+        assert_eq!(selected.coverage(2, 1, 4, 2), 255);
+        assert_eq!(selected.coverage(3, 1, 4, 2), 0);
+        let hidden = content
+            .add_layer(active, "Hidden blue".into(), blue)
+            .unwrap();
+        content.set_visible(hidden, false);
+        assert_eq!(
+            wand_source(&content, active, true, (0, 0)).unwrap().pixels,
+            source.pixels
+        );
+        content.set_visible(hidden, true);
+        let covered = wand_source(&content, active, true, (0, 0)).unwrap();
+        assert_eq!(*covered.pixels.get_pixel(0, 0), blue);
+        assert_eq!(*covered.pixels.get_pixel(2, 1), blue);
+    }
 
     #[test]
     fn polygon_closes_near_its_start_in_screen_space() {

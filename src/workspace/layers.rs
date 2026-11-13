@@ -2,7 +2,7 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     Action, BorderStyle, Bounds, ClickEvent, Context, CursorStyle, Div, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, RenderImage, SharedString, Stateful,
+    MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Point, RenderImage, SharedString, Stateful,
     Window, canvas, div, img, point, prelude::*, px, quad, rgb, size,
 };
 use image::RgbaImage;
@@ -28,6 +28,53 @@ pub(super) struct MoveDrag {
     pub(super) offset: (i32, i32),
     anchor: (i64, i64),
     anchor_screen: Point<Pixels>,
+}
+
+pub(super) struct OpacityDrag {
+    tab: usize,
+    layer: LayerId,
+    bounds: Bounds<Pixels>,
+    opacity: u8,
+}
+
+impl OpacityDrag {
+    fn new(
+        tab: usize,
+        layer: LayerId,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> Option<Self> {
+        Some(Self {
+            tab,
+            layer,
+            bounds,
+            opacity: Self::value_at(bounds, position)?,
+        })
+    }
+
+    fn value_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<u8> {
+        let width = f32::from(bounds.size.width);
+        let offset = f32::from(position.x - bounds.left());
+        if !width.is_finite() || width <= 0. || !offset.is_finite() {
+            return None;
+        }
+        Some(((offset / width).clamp(0., 1.) * 255.).round() as u8)
+    }
+
+    fn update(&mut self, position: Point<Pixels>) -> bool {
+        let Some(opacity) = Self::value_at(self.bounds, position) else {
+            return false;
+        };
+        if self.opacity == opacity {
+            return false;
+        }
+        self.opacity = opacity;
+        true
+    }
+
+    fn belongs_to(&self, tab: &super::Tab) -> bool {
+        self.tab == tab.id && self.layer == tab.active_layer
+    }
 }
 
 #[derive(Clone)]
@@ -264,7 +311,7 @@ impl Workspace {
             LayerCommand::ToggleVisibility => self.edit_content(
                 move |content, _, _| {
                     if content.set_visible(id, !visible) {
-                        content.layer_dirty(id)
+                        content.layer_composite_dirty(id)
                     } else {
                         Dirty::None
                     }
@@ -334,7 +381,7 @@ impl Workspace {
         self.edit_content(
             move |content, _, _| {
                 if content.set_visible(id, !visible) {
-                    content.layer_dirty(id)
+                    content.layer_composite_dirty(id)
                 } else {
                     Dirty::None
                 }
@@ -344,40 +391,95 @@ impl Workspace {
         );
     }
 
-    fn drag_opacity(
+    fn begin_opacity_drag(
         &mut self,
         bounds: Bounds<Pixels>,
         position: Point<Pixels>,
-        start: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.commit_numeric_edit(window, cx);
         let Some(tab) = self.active_tab() else {
             return;
         };
-        if tab.busy() || (!start && self.opacity_drag.is_none()) {
+        if tab.busy() || self.form.is_some() || self.dialog_open || self.move_drag.is_some() {
             return;
         }
-        let fraction = ((position.x - bounds.left()) / bounds.size.width).clamp(0., 1.);
-        self.opacity_drag = Some((tab.active_layer, (fraction * 255.).round() as u8));
+        self.opacity_drag = OpacityDrag::new(tab.id, tab.active_layer, bounds, position);
         cx.notify();
     }
 
-    // A whole drag commits as one opacity change.
-    fn end_opacity_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((id, opacity)) = self.opacity_drag.take() {
-            self.edit_content(
-                move |content, _, _| {
-                    if content.set_opacity(id, opacity) {
-                        content.layer_dirty(id)
-                    } else {
-                        Dirty::None
-                    }
-                },
-                window,
-                cx,
-            );
+    pub(super) fn extend_opacity_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if let Some(drag) = self.opacity_drag.as_mut()
+            && drag.update(position)
+        {
             cx.notify();
         }
+    }
+
+    // A whole drag commits as one opacity change.
+    pub(super) fn end_opacity_drag(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let Some(mut drag) = self.opacity_drag.take() else {
+            return;
+        };
+        drag.update(event.position);
+        if self.active_tab().is_some_and(|tab| drag.belongs_to(tab)) {
+            self.commit_active_opacity(drag.opacity, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn commit_active_opacity(&mut self, opacity: u8, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_text(window, cx) {
+            if let Some(index) = self.active {
+                let tab = &mut self.tabs[index];
+                tab.pending_opacity = Some((tab.active_layer, opacity));
+            }
+            self.defer_after_text(move |this, window, cx| {
+                this.commit_active_opacity(opacity, window, cx);
+            });
+            return;
+        }
+        // A new text draft can insert a layer. Resolve its ID after that commit.
+        if let Some(tab) = self.active_tab() {
+            self.commit_layer_opacity(tab.active_layer, opacity, window, cx);
+        }
+    }
+
+    pub(super) fn commit_layer_opacity(
+        &mut self,
+        id: LayerId,
+        opacity: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.active else {
+            return;
+        };
+        if self.tabs[index].busy()
+            || self.move_drag.is_some()
+            || self.tabs[index]
+                .document
+                .content
+                .layer(id)
+                .is_none_or(|layer| layer.opacity == opacity)
+        {
+            return;
+        }
+        self.edit_content(
+            move |content, _, _| content.change_opacity(id, opacity),
+            window,
+            cx,
+        );
+        self.tabs[index].pending_opacity = Some((id, opacity));
     }
 
     pub(super) fn layers_panel(&self, cx: &Context<Self>) -> Div {
@@ -499,11 +601,11 @@ impl Workspace {
                 )
         });
 
-        let active = content.layer(tab.active_layer);
-        let opacity = match self.opacity_drag {
-            Some((id, opacity)) if id == tab.active_layer => opacity,
-            _ => active.map_or(255, |layer| layer.opacity),
-        };
+        let opacity = self
+            .opacity_drag
+            .as_ref()
+            .filter(|drag| drag.belongs_to(tab))
+            .map_or_else(|| tab.layer_opacity(), |drag| drag.opacity);
         let buttons = [
             ("plus", "New Layer…", LayerCommand::New),
             ("duplicate", "Duplicate Layer", LayerCommand::Duplicate),
@@ -566,7 +668,7 @@ impl Workspace {
 
     fn opacity_slider(&self, opacity: u8, cx: &Context<Self>) -> Stateful<Div> {
         let bounds = Rc::new(Cell::new(Bounds::default()));
-        let (layout, down, moved) = (bounds.clone(), bounds.clone(), bounds);
+        let (layout, down) = (bounds.clone(), bounds);
         div()
             .id("layer-opacity")
             .h(px(20.))
@@ -574,22 +676,9 @@ impl Workspace {
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.drag_opacity(down.get(), event.position, true, cx);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.begin_opacity_drag(down.get(), event.position, window, cx);
                 }),
-            )
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                if event.dragging() {
-                    this.drag_opacity(moved.get(), event.position, false, cx);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.end_opacity_drag(window, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.end_opacity_drag(window, cx)),
             )
             .child(
                 canvas(
@@ -978,6 +1067,39 @@ fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opacity_drag_clamps_outside_the_track_and_samples_the_release_position() {
+        let bounds = Bounds::new(point(px(20.), px(10.)), size(px(200.), px(20.)));
+        let at = |x| point(px(x), px(900.));
+        let mut drag = OpacityDrag::new(1, LayerId(0), bounds, at(120.)).unwrap();
+        assert_eq!(drag.opacity, 128);
+        assert!(!drag.update(at(120.)));
+        assert!(drag.update(at(-100.)));
+        assert_eq!(drag.opacity, 0);
+        assert!(drag.update(at(500.)));
+        assert_eq!(drag.opacity, 255);
+        // Mouse-up may be the first event at the final x coordinate.
+        assert!(drag.update(at(70.)));
+        assert_eq!(drag.opacity, 64);
+    }
+
+    #[test]
+    fn opacity_drag_rejects_invalid_layout_and_belongs_only_to_its_tab_and_layer() {
+        let mut tab = super::super::tests::opacity_tab();
+        let position = point(px(30.), px(10.));
+        assert!(OpacityDrag::new(tab.id, tab.active_layer, Bounds::default(), position).is_none());
+        let bounds = Bounds::new(Point::default(), size(px(100.), px(20.)));
+        let drag = OpacityDrag::new(tab.id, tab.active_layer, bounds, position).unwrap();
+        assert!(drag.belongs_to(&tab));
+        tab.id += 1;
+        assert!(!drag.belongs_to(&tab));
+        tab.id -= 1;
+        tab.active_layer = LayerId(1);
+        assert!(!drag.belongs_to(&tab));
+        let invalid = Bounds::new(Point::default(), size(px(f32::NAN), px(20.)));
+        assert!(OpacityDrag::new(tab.id, tab.active_layer, invalid, position).is_none());
+    }
 
     #[test]
     fn thumbnail_sizes_keep_the_layer_aspect_ratio() {

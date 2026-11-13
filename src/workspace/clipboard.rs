@@ -256,21 +256,19 @@ impl Workspace {
         };
         self.creating = true;
         let name = format!("Untitled {}", self.next_untitled);
-        let job = cx
-            .background_executor()
-            .spawn(async move { document::decode_raster_bytes(&bytes).ok() });
+        let job = cx.background_executor().spawn(async move {
+            document::decode_raster_bytes(&bytes)
+                .ok()
+                .map(|pixels| document::Document::from_pixels(name, pixels))
+        });
         cx.spawn_in(window, async move |workspace, cx| {
-            let pixels = job.await;
+            let document = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
                 workspace.creating = false;
-                match pixels {
-                    Some(pixels) => {
+                match document {
+                    Some(document) => {
                         workspace.next_untitled += 1;
-                        workspace.show_document(
-                            document::Document::from_pixels(name, pixels),
-                            window,
-                            cx,
-                        );
+                        workspace.show_document(document, window, cx);
                     }
                     None => workspace.tell("The clipboard image could not be read.", cx),
                 }

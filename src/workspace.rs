@@ -42,6 +42,13 @@ use self::{
 const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
 const RECENT_COLOR_LIMIT: usize = 12;
 
+type PreparedChange = (
+    DocumentContent,
+    LayerId,
+    Selection,
+    crate::document::CanvasPatch,
+);
+
 struct Tab {
     id: usize,
     stroke_anchor: Option<(LayerId, f64, f64)>,
@@ -58,9 +65,24 @@ struct Tab {
     selection: Selection,
     // Keep a recoverable draft until its background commit has published.
     pending_text: Option<text_ui::TextDraft>,
+    // Keep the slider at the released value while the canvas patch renders.
+    pending_opacity: Option<(LayerId, u8)>,
 }
 
 impl Tab {
+    fn layer_opacity(&self) -> u8 {
+        self.pending_opacity
+            .filter(|(id, _)| *id == self.active_layer)
+            .map(|(_, opacity)| opacity)
+            .or_else(|| {
+                self.document
+                    .content
+                    .layer(self.active_layer)
+                    .map(|layer| layer.opacity)
+            })
+            .unwrap_or(255)
+    }
+
     fn busy(&self) -> bool {
         self.editing || self.saving.is_some()
     }
@@ -94,6 +116,63 @@ impl Tab {
             active_layer: self.active_layer,
             selection: self.selection.clone(),
         }
+    }
+
+    // Return replaced or rejected images to the workspace for GPU cache cleanup.
+    fn publish_change(
+        &mut self,
+        generation: u64,
+        change: Change,
+        result: Option<PreparedChange>,
+        stamp: u64,
+    ) -> (bool, Vec<Arc<RenderImage>>) {
+        self.editing = false;
+        self.pending_opacity = None;
+        let Some((content, edited_layer, edited_selection, patch)) = result else {
+            return (false, Vec::new());
+        };
+        if self.history.generation() != generation {
+            return (false, patch.into_images());
+        }
+        let current = self.state();
+        let (content, active_layer, selection) = match change {
+            Change::Edit | Change::Stroke { .. } | Change::Selection => {
+                self.history
+                    .commit(current, stamp, !matches!(change, Change::Selection));
+                (content, edited_layer, edited_selection)
+            }
+            Change::Undo | Change::Redo => {
+                let state = if matches!(change, Change::Undo) {
+                    self.history.undo(current, stamp)
+                } else {
+                    self.history.redo(current, stamp)
+                };
+                // Another tab can evict this history target while the patch is rendering.
+                let Some(state) = state else {
+                    return (false, patch.into_images());
+                };
+                (state.content, state.active_layer, state.selection)
+            }
+        };
+        match change {
+            Change::Stroke { layer, end } => self.stroke_anchor = Some((layer, end.0, end.1)),
+            Change::Selection => {}
+            _ => self.stroke_anchor = None,
+        }
+        self.selection = selection;
+        self.active_layer = if content.layer(active_layer).is_some() {
+            active_layer
+        } else {
+            content.top_layer_id()
+        };
+        if content.size() != self.document.content.size() {
+            self.pan = Point::default();
+        }
+        self.document.content = content;
+        let replaced = self.document.canvas.apply(patch);
+        self.history
+            .enforce_tab_limits(&self.document.content, &self.selection, &LIMITS);
+        (true, replaced)
     }
 }
 
@@ -142,6 +221,7 @@ pub struct Workspace {
     focus: FocusHandle,
     numeric_focus: FocusHandle,
     numeric_edit: Option<numeric::NumericEdit>,
+    numeric_followup: Option<numeric::PendingNumeric>,
     tab_scroll: ScrollHandle,
     tabs: Vec<Tab>,
     active: Option<usize>,
@@ -171,6 +251,8 @@ pub struct Workspace {
     move_overlay: Option<layers::MovePaint>,
     scale_drag: Option<scale_ui::ScaleDrag>,
     scale_overlay: Option<layers::MovePaint>,
+    scale_token: u64,
+    scale_lock: bool,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
     warp: Option<transform_ui::WarpSession>,
@@ -181,9 +263,10 @@ pub struct Workspace {
     warp_applying: bool,
     warp_error: Option<&'static str>,
     warp_resample: crate::transform::Resample,
-    brush: crate::paint::Brush,
+    brushes: paint_ui::BrushSettings,
     fill_mode: FillMode,
     sample_all: bool,
+    wand_sample_all: bool,
     gradient_shape: crate::paint::GradientShape,
     gradient_blend: crate::paint::GradientBlend,
     clone_source: Option<(u32, u32)>,
@@ -230,7 +313,6 @@ pub struct Workspace {
     font_input_scroll: ScrollHandle,
     caret_shown_at: std::time::Instant,
     caret_blinking: bool,
-    pencil: crate::paint::Brush,
     copy_token: u64,
     paste_token: u64,
     dialog_open: bool,
@@ -242,7 +324,7 @@ pub struct Workspace {
     errors: Vec<String>,
     history_clock: u64,
     jpeg_quality: u8,
-    opacity_drag: Option<(LayerId, u8)>,
+    opacity_drag: Option<layers::OpacityDrag>,
     toolbox_width: f32,
     toolbox_folded: bool,
     toolbox_drag: Option<(f32, f32)>,
@@ -318,8 +400,11 @@ impl Workspace {
                     }
                     // Unhandled shortcuts such as Undo or Save act on the
                     // committed value rather than a half-typed draft.
-                    workspace.commit_numeric_edit(window, cx);
-                    false
+                    workspace.commit_numeric_with_followup(
+                        numeric::NumericFollowup::Key(event.keystroke.clone()),
+                        window,
+                        cx,
+                    )
                 })
                 .unwrap_or(false);
             if handled {
@@ -354,6 +439,7 @@ impl Workspace {
             focus,
             numeric_focus,
             numeric_edit: None,
+            numeric_followup: None,
             tab_scroll: ScrollHandle::new(),
             tabs: Vec::new(),
             active: None,
@@ -383,6 +469,8 @@ impl Workspace {
             move_overlay: None,
             scale_drag: None,
             scale_overlay: None,
+            scale_token: 0,
+            scale_lock: true,
             move_settled: None,
             move_token: 0,
             warp: None,
@@ -393,9 +481,10 @@ impl Workspace {
             warp_applying: false,
             warp_error: None,
             warp_resample: crate::transform::Resample::Bilinear,
-            brush: crate::paint::Brush::default(),
+            brushes: paint_ui::BrushSettings::default(),
             fill_mode: FillMode::Connected,
             sample_all: false,
+            wand_sample_all: false,
             gradient_shape: crate::paint::GradientShape::Linear,
             gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
             clone_source: None,
@@ -441,10 +530,6 @@ impl Workspace {
             font_input_scroll: ScrollHandle::new(),
             caret_shown_at: std::time::Instant::now(),
             caret_blinking: false,
-            pencil: crate::paint::Brush {
-                diameter: 1,
-                ..Default::default()
-            },
             copy_token: 0,
             paste_token: 0,
             dialog_open: false,
@@ -509,6 +594,7 @@ impl Workspace {
             building_level: None,
             selection: Selection::Unrestricted,
             pending_text: None,
+            pending_opacity: None,
         });
         self.next_id += 1;
         self.select_tab(self.tabs.len() - 1, window, cx);
@@ -530,6 +616,7 @@ impl Workspace {
         let switched = self.active != Some(index);
         if switched {
             self.commit_numeric_edit(window, cx);
+            self.numeric_followup = None;
             // A commit that starts here finishes on the tab it belongs to.
             self.finish_text(window, cx);
             self.drop_settled_text(window, cx);
@@ -570,6 +657,7 @@ impl Workspace {
         self.pan_drag = None;
         let closed_active = self.active == Some(index);
         if closed_active {
+            self.numeric_followup = None;
             self.opacity_drag = None;
             self.dismiss_form(window, cx);
             self.clear_path_edit();
@@ -732,12 +820,7 @@ impl Workspace {
         id: usize,
         generation: u64,
         change: Change,
-        result: Option<(
-            DocumentContent,
-            LayerId,
-            Selection,
-            crate::document::CanvasPatch,
-        )>,
+        result: Option<PreparedChange>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -766,6 +849,7 @@ impl Workspace {
         {
             then(self, window, cx);
         }
+        self.finish_numeric_followup(id, generation, published, window, cx);
     }
 
     // Publishes a background result only if the tab has not changed since the job started.
@@ -774,16 +858,14 @@ impl Workspace {
         id: usize,
         generation: u64,
         change: Change,
-        result: Option<(
-            DocumentContent,
-            LayerId,
-            Selection,
-            crate::document::CanvasPatch,
-        )>,
+        result: Option<PreparedChange>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(index) = self.tab_index(id) else {
+            if let Some((_, _, _, patch)) = result {
+                drop_images(patch.into_images(), window, cx);
+            }
             return false;
         };
         if self.active == Some(index) && self.move_settled.is_some() {
@@ -802,55 +884,12 @@ impl Workspace {
         }
         self.history_clock += 1;
         let stamp = self.history_clock;
-        let tab = &mut self.tabs[index];
-        tab.editing = false;
-        let Some((content, edited_layer, edited_selection, patch)) = result else {
-            return false;
-        };
-        if tab.history.generation() != generation {
-            drop_images(patch.into_images(), window, cx);
-            return false;
-        }
-        let current = tab.state();
-        let (content, active_layer, selection) = match change {
-            Change::Edit | Change::Stroke { .. } | Change::Selection => {
-                tab.history
-                    .commit(current, stamp, !matches!(change, Change::Selection));
-                (content, edited_layer, edited_selection)
-            }
-            Change::Undo | Change::Redo => {
-                let state = if matches!(change, Change::Undo) {
-                    tab.history.undo(current, stamp)
-                } else {
-                    tab.history.redo(current, stamp)
-                };
-                // Another tab can evict this history target while the patch is rendering.
-                let Some(state) = state else {
-                    drop_images(patch.into_images(), window, cx);
-                    return false;
-                };
-                (state.content, state.active_layer, state.selection)
-            }
-        };
-        match change {
-            Change::Stroke { layer, end } => tab.stroke_anchor = Some((layer, end.0, end.1)),
-            Change::Selection => {}
-            _ => tab.stroke_anchor = None,
-        }
-        tab.selection = selection;
-        tab.active_layer = if content.layer(active_layer).is_some() {
-            active_layer
-        } else {
-            content.top_layer_id()
-        };
-        if content.size() != tab.document.content.size() {
-            tab.pan = Point::default();
-        }
-        tab.document.content = content;
-        let replaced = tab.document.canvas.apply(patch);
+        let (published, replaced) =
+            self.tabs[index].publish_change(generation, change, result, stamp);
         drop_images(replaced, window, cx);
-        tab.history
-            .enforce_tab_limits(&tab.document.content, &tab.selection, &LIMITS);
+        if !published {
+            return false;
+        }
         history::enforce_app_budget(
             self.tabs
                 .iter_mut()
@@ -971,5 +1010,148 @@ fn drop_images(
 fn drop_canvas(canvas: RenderedCanvas, window: &mut Window, cx: &mut Context<Workspace>) {
     for image in canvas.into_images() {
         cx.drop_image(image, Some(window));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn opacity_tab() -> Tab {
+        let document = Document::blank("Opacity".into(), 2, 2, image::Rgba([255; 4]));
+        Tab {
+            id: 0,
+            stroke_anchor: None,
+            active_layer: document.content.preferred_active_layer(),
+            document,
+            zoom: Zoom::default(),
+            pan: Point::default(),
+            history: History::new(true),
+            editing: false,
+            saving: None,
+            exporting: false,
+            notice: None,
+            building_level: None,
+            selection: Selection::Unrestricted,
+            pending_text: None,
+            pending_opacity: None,
+        }
+    }
+
+    fn prepare(tab: &Tab, state: State, dirty: Dirty) -> Option<PreparedChange> {
+        RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            dirty,
+        )
+        .map(|patch| (state.content, state.active_layer, state.selection, patch))
+    }
+
+    fn prepare_opacity(tab: &Tab, opacity: u8) -> Option<PreparedChange> {
+        let mut state = tab.state();
+        let dirty = state.content.change_opacity(state.active_layer, opacity);
+        prepare(tab, state, dirty)
+    }
+
+    #[test]
+    fn released_opacity_stays_visible_until_the_canvas_commit_lands() {
+        let mut tab = opacity_tab();
+        let layer = tab.active_layer;
+        let generation = tab.history.generation();
+        let result = prepare_opacity(&tab, 80);
+        tab.editing = true;
+        tab.pending_opacity = Some((layer, 80));
+
+        // The background job has not published: document and history are still original,
+        // but repainting the slider must never show that old value.
+        assert_eq!(tab.document.content.layer(layer).unwrap().opacity, 255);
+        assert_eq!(tab.layer_opacity(), 80);
+        assert!(!tab.history.is_dirty());
+        assert_eq!(opacity_tab().layer_opacity(), 255);
+
+        assert!(tab.publish_change(generation, Change::Edit, result, 1).0);
+        assert_eq!(tab.layer_opacity(), 80);
+        assert!(!tab.busy());
+        assert!(tab.pending_opacity.is_none());
+        assert_eq!(
+            *tab.document.canvas.pixels,
+            *tab.document.content.composite()
+        );
+
+        let previous = tab.history.undo_target().unwrap().0.clone();
+        let result = prepare(&tab, previous, Dirty::Canvas);
+        assert!(
+            tab.publish_change(tab.history.generation(), Change::Undo, result, 2)
+                .0
+        );
+        assert_eq!(tab.layer_opacity(), 255);
+        assert!(tab.history.undo_target().is_none());
+        assert!(!tab.history.is_dirty());
+
+        let next = tab.history.redo_target().unwrap().0.clone();
+        let result = prepare(&tab, next, Dirty::Canvas);
+        assert!(
+            tab.publish_change(tab.history.generation(), Change::Redo, result, 3)
+                .0
+        );
+        assert_eq!(tab.layer_opacity(), 80);
+        assert_eq!(
+            *tab.document.canvas.pixels,
+            *tab.document.content.composite()
+        );
+    }
+
+    #[test]
+    fn pending_opacity_only_overrides_its_layer_and_clears_on_failure() {
+        let mut tab = opacity_tab();
+        tab.pending_opacity = Some((LayerId(tab.active_layer.0 + 1), 80));
+        assert_eq!(tab.layer_opacity(), 255);
+
+        tab.pending_opacity = Some((tab.active_layer, 0));
+        assert_eq!(tab.layer_opacity(), 0);
+        assert!(
+            !tab.publish_change(tab.history.generation(), Change::Edit, None, 1)
+                .0
+        );
+        assert_eq!(tab.layer_opacity(), 255);
+        assert!(tab.pending_opacity.is_none());
+        assert!(tab.history.undo_target().is_none());
+    }
+
+    #[test]
+    fn stale_opacity_results_cannot_change_pixels_or_history() {
+        let mut tab = opacity_tab();
+        let generation = tab.history.generation();
+        let result = prepare_opacity(&tab, 0);
+        let pixels = tab.document.canvas.pixels.clone();
+        tab.editing = true;
+        tab.pending_opacity = Some((tab.active_layer, 0));
+        tab.history.commit(tab.state(), 1, false);
+        let current_generation = tab.history.generation();
+
+        let (published, rejected) = tab.publish_change(generation, Change::Edit, result, 2);
+        assert!(!published);
+        assert!(rejected.is_empty());
+        assert!(Arc::ptr_eq(&pixels, &tab.document.canvas.pixels));
+        assert_eq!(tab.history.generation(), current_generation);
+        assert_eq!(tab.layer_opacity(), 255);
+        assert!(!tab.busy());
+        assert!(tab.pending_opacity.is_none());
+        assert!(!tab.history.is_dirty());
+    }
+
+    #[test]
+    fn unchanged_opacity_does_not_create_an_undo_entry() {
+        let mut tab = opacity_tab();
+        let result = prepare_opacity(&tab, 255);
+        assert!(result.is_none());
+        assert!(
+            !tab.publish_change(tab.history.generation(), Change::Edit, result, 1)
+                .0
+        );
+        assert!(tab.history.undo_target().is_none());
+        assert!(!tab.history.is_dirty());
     }
 }

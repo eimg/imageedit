@@ -1,4 +1,4 @@
-use image::{Rgba, RgbaImage, imageops::FilterType};
+use image::{ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
 
 use crate::document::{MAX_IMAGE_BYTES, MAX_NEW_EDGE};
 use crate::preview::PixelRect;
@@ -748,35 +748,57 @@ fn unpremultiply_sample(sample: [f64; 4]) -> Rgba<u8> {
     ])
 }
 
-fn premultiply(pixels: &RgbaImage) -> RgbaImage {
-    let mut image = pixels.clone();
-    for pixel in image.pixels_mut() {
-        let alpha = u16::from(pixel.0[3]);
-        for channel in &mut pixel.0[..3] {
-            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
-        }
-    }
-    image
+type PremultipliedImage = ImageBuffer<Rgba<u16>, Vec<u16>>;
+
+fn premultiply(pixels: &RgbaImage) -> PremultipliedImage {
+    // Keep every 8-bit color × alpha product exact. Rounding these products to
+    // 8 bits before filtering can turn a faint colored pixel into a different hue.
+    ImageBuffer::from_fn(pixels.width(), pixels.height(), |x, y| {
+        let pixel = pixels.get_pixel(x, y);
+        let alpha = u16::from(pixel[3]);
+        Rgba([
+            u16::from(pixel[0]) * alpha,
+            u16::from(pixel[1]) * alpha,
+            u16::from(pixel[2]) * alpha,
+            alpha * 255,
+        ])
+    })
 }
 
-fn unpremultiply(pixels: &RgbaImage) -> RgbaImage {
-    let mut image = pixels.clone();
-    for pixel in image.pixels_mut() {
-        let alpha = u16::from(pixel.0[3]);
-        if alpha == 0 {
-            pixel.0 = [0, 0, 0, 0];
-            continue;
+fn unpremultiply(pixels: &PremultipliedImage) -> RgbaImage {
+    RgbaImage::from_fn(pixels.width(), pixels.height(), |x, y| {
+        let pixel = pixels.get_pixel(x, y);
+        let alpha = u32::from(pixel[3]);
+        let output_alpha = ((alpha + 127) / 255).min(255) as u8;
+        if output_alpha == 0 {
+            return Rgba([0; 4]);
         }
-        for channel in &mut pixel.0[..3] {
-            *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
-        }
-    }
-    image
+        let channel = |value: u16| ((u32::from(value).min(alpha) * 255 + alpha / 2) / alpha) as u8;
+        Rgba([
+            channel(pixel[0]),
+            channel(pixel[1]),
+            channel(pixel[2]),
+            output_alpha,
+        ])
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_scaling_preserves_faint_colors() {
+        let color = Rgba([64, 128, 192, 1]);
+        let pixels = RgbaImage::from_pixel(1, 1, color);
+        for resample in [Resample::Bilinear, Resample::Bicubic] {
+            let scaled = scale_pixels(&pixels, 3, 2, resample);
+            assert!(
+                scaled.pixels().all(|pixel| *pixel == color),
+                "{resample:?}: {scaled:?}"
+            );
+        }
+    }
 
     fn row() -> RgbaImage {
         let mut image = RgbaImage::new(3, 1);

@@ -58,6 +58,11 @@ pub struct DocumentContent {
     active_path: Option<crate::paths::PathId>,
 }
 
+struct ScaledLayer {
+    offset: (i32, i32),
+    size: (u32, u32),
+}
+
 impl DocumentContent {
     pub fn single_layer(name: String, pixels: RgbaImage) -> Self {
         let (width, height) = pixels.dimensions();
@@ -387,16 +392,21 @@ impl DocumentContent {
         &self.layers
     }
 
-    pub fn layer_dirty(&self, id: LayerId) -> Dirty {
+    pub fn layer_composite_dirty(&self, id: LayerId) -> Dirty {
         let Some(layer) = self.layer(id) else {
-            return Dirty::Canvas;
+            return Dirty::None;
         };
-        Dirty::Region(PixelRect::new(
-            i64::from(layer.offset.0),
-            i64::from(layer.offset.1),
-            layer.pixels.width(),
-            layer.pixels.height(),
-        ))
+        let canvas = PixelBounds {
+            left: 0,
+            top: 0,
+            right: i64::from(self.width),
+            bottom: i64::from(self.height),
+        };
+        let Some(bounds) = layer.bounds().intersect(canvas) else {
+            return Dirty::Unpainted;
+        };
+        let (width, height) = bounds.dimensions();
+        Dirty::Composite(PixelRect::new(bounds.left, bounds.top, width, height))
     }
 
     pub fn layer(&self, id: LayerId) -> Option<&RasterLayer> {
@@ -812,6 +822,16 @@ impl DocumentContent {
             }
             _ => false,
         }
+    }
+
+    pub fn change_opacity(&mut self, id: LayerId, opacity: u8) -> Dirty {
+        if !self.set_opacity(id, opacity) {
+            return Dirty::None;
+        }
+        if self.layer(id).is_some_and(|layer| !layer.visible) {
+            return Dirty::Unpainted;
+        }
+        self.layer_composite_dirty(id)
     }
 
     // Moves a layer to `index` in the bottom-to-top stack.
@@ -1598,52 +1618,74 @@ impl DocumentContent {
         height: u32,
         resample: crate::transform::Resample,
     ) -> bool {
-        if self.has_text_layer() {
-            return false;
-        }
         let old = self.size();
-        if (width, height) == old || !crate::transform::canvas_allowed(width, height) {
+        let Some(plan) = self.image_scale_plan(width, height) else {
             return false;
-        }
-        let mut plan = Vec::with_capacity(self.layers.len());
-        let mut total = 0u64;
-        for layer in &self.layers {
-            let Some((offset, size)) = crate::transform::scale_placement(
-                layer.offset,
-                layer.pixels.dimensions(),
-                old,
-                (width, height),
-            ) else {
-                return false;
-            };
-            let Some(bytes) = u64::from(size.0)
-                .checked_mul(u64::from(size.1))
-                .and_then(|pixels| pixels.checked_mul(4))
-            else {
-                return false;
-            };
-            if bytes > MAX_IMAGE_BYTES {
-                return false;
-            }
-            total = total.saturating_add(bytes);
-            plan.push((offset, size));
-        }
-        if !self.fits_stack(self.stack_bytes(), total) {
-            return false;
-        }
-        for (layer, (offset, size)) in self.layers.iter_mut().zip(plan) {
+        };
+        for (layer, placement) in self.layers.iter_mut().zip(plan) {
             layer.pixels = Arc::new(crate::transform::scale_pixels(
                 &layer.pixels,
-                size.0,
-                size.1,
+                placement.size.0,
+                placement.size.1,
                 resample,
             ));
-            layer.offset = offset;
+            layer.offset = placement.offset;
         }
         self.map_paths(|point| crate::paths::scale_point(point, old, (width, height)));
         self.width = width;
         self.height = height;
         true
+    }
+
+    // Validate every layer and the full stack before allocating any resized pixels.
+    fn image_scale_plan(&self, width: u32, height: u32) -> Option<Vec<ScaledLayer>> {
+        let old = self.size();
+        if self.has_text_layer()
+            || (width, height) == old
+            || !crate::transform::canvas_allowed(width, height)
+        {
+            return None;
+        }
+        if self
+            .paths
+            .iter()
+            .flat_map(|path| &path.anchors)
+            .any(|anchor| {
+                [anchor.point, anchor.handle_in, anchor.handle_out]
+                    .into_iter()
+                    .any(|point| {
+                        !crate::paths::finite(crate::paths::scale_point(
+                            point,
+                            old,
+                            (width, height),
+                        ))
+                    })
+            })
+        {
+            return None;
+        }
+        let mut plan = Vec::with_capacity(self.layers.len());
+        let mut total = 0u64;
+        for layer in &self.layers {
+            let (offset, size) = crate::transform::scale_placement(
+                layer.offset,
+                layer.pixels.dimensions(),
+                old,
+                (width, height),
+            )?;
+            let bytes = u64::from(size.0)
+                .checked_mul(u64::from(size.1))
+                .and_then(|pixels| pixels.checked_mul(4))?;
+            if bytes > MAX_IMAGE_BYTES {
+                return None;
+            }
+            total = total.checked_add(bytes)?;
+            if total > MAX_STACK_BYTES {
+                return None;
+            }
+            plan.push(ScaledLayer { offset, size });
+        }
+        Some(plan)
     }
 
     pub fn scale_layer(
@@ -3375,5 +3417,60 @@ mod tests {
         });
         assert!(!content.can_merge_down(middle));
         assert!(!content.can_merge_down(upper));
+    }
+
+    #[test]
+    fn image_scaling_distinguishes_the_layer_and_stack_budgets() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(1, 1));
+        let layer = content.layers[0].clone();
+        content.layers = (0..MAX_LAYERS)
+            .map(|index| {
+                let mut layer = layer.clone();
+                layer.id = LayerId(index as u64);
+                layer
+            })
+            .collect();
+        // This plans exactly 512 MiB across 128 small layers without allocating
+        // the output bitmaps. Each layer is well below the 256 MiB image limit.
+        let plan = content.image_scale_plan(1024, 1024).unwrap();
+        assert_eq!(plan.len(), MAX_LAYERS);
+        assert!(plan.iter().all(|placement| placement.size == (1024, 1024)));
+        assert!(content.image_scale_plan(1025, 1025).is_none());
+
+        let mut content = DocumentContent::single_layer("Wide layer".into(), RgbaImage::new(2, 1));
+        content.width = 1;
+        // A legal canvas must still reject an individual scaled layer over 256 MiB.
+        assert!(content.image_scale_plan(8192, 8192).is_none());
+    }
+
+    #[test]
+    fn image_scaling_cannot_leave_nonfinite_paths_in_a_saveable_project() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(1, 1));
+        content
+            .set_paths(
+                vec![crate::paths::VectorPath {
+                    id: crate::paths::PathId(1),
+                    visible: true,
+                    closed: false,
+                    anchors: vec![crate::paths::Anchor::corner(
+                        crate::paths::AnchorId(1),
+                        (f64::MAX, 0.),
+                    )],
+                }],
+                Some(crate::paths::PathId(1)),
+            )
+            .unwrap();
+        let pixels = content.layers[0].pixels.clone();
+        assert!(!content.scale_image(2, 1, crate::transform::Resample::Nearest));
+        assert_eq!(content.size(), (1, 1));
+        assert!(Arc::ptr_eq(&pixels, &content.layers[0].pixels));
+        assert!(content.paths[0].anchors[0].finite());
+
+        content.width = 4;
+        assert!(content.scale_image(2, 1, crate::transform::Resample::Nearest));
+        assert_eq!(content.paths[0].anchors[0].point.0, f64::MAX / 2.);
+        let mut bytes = Vec::new();
+        crate::project::write(&mut bytes, &content).unwrap();
+        assert!(crate::project::read(std::io::Cursor::new(bytes)).is_ok());
     }
 }

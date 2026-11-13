@@ -196,7 +196,7 @@ impl RenderedCanvas {
             });
         }
         let regions = match &dirty {
-            Dirty::Region(rect) => std::slice::from_ref(rect),
+            Dirty::Composite(rect) | Dirty::Region(rect) => std::slice::from_ref(rect),
             Dirty::Regions(regions) => regions.as_slice(),
             _ => return None,
         };
@@ -213,7 +213,11 @@ impl RenderedCanvas {
             levels,
             replace_levels: false,
             tiles_changed: true,
-            thumbnails: thumbnails_touching(content, regions),
+            thumbnails: if matches!(dirty, Dirty::Composite(_)) {
+                Vec::new()
+            } else {
+                thumbnails_touching(content, regions)
+            },
             pixels,
         })
     }
@@ -613,7 +617,16 @@ fn render_thumbnail(image: &RgbaImage) -> Arc<RenderImage> {
         ((u64::from(length) * u64::from(EDGE) / u64::from(width.max(height))) as u32).max(1)
     };
     let mut pixels = if width.max(height) > EDGE {
-        imageops::thumbnail(image, scale(width), scale(height))
+        if image.pixels().any(|pixel| pixel[3] < 255) {
+            crate::transform::scale_pixels(
+                image,
+                scale(width),
+                scale(height),
+                crate::transform::Resample::Bilinear,
+            )
+        } else {
+            imageops::thumbnail(image, scale(width), scale(height))
+        }
     } else {
         image.clone()
     };
@@ -627,21 +640,30 @@ fn render_preview(image: &RgbaImage) -> Preview {
     const MAX_PREVIEW_EDGE: u32 = 4096;
     let (width, height) = image.dimensions();
     let edge = width.max(height);
+    let has_transparency = image.pixels().any(|pixel| pixel.0[3] < 255);
     let mut pixels = if edge > MAX_PREVIEW_EDGE {
         let fit = |length| {
             ((u64::from(length) * u64::from(MAX_PREVIEW_EDGE) / u64::from(edge)) as u32).max(1)
         };
-        imageops::resize(
-            image,
-            fit(width),
-            fit(height),
-            imageops::FilterType::Triangle,
-        )
+        if has_transparency {
+            crate::transform::scale_pixels(
+                image,
+                fit(width),
+                fit(height),
+                crate::transform::Resample::Bilinear,
+            )
+        } else {
+            imageops::resize(
+                image,
+                fit(width),
+                fit(height),
+                imageops::FilterType::Triangle,
+            )
+        }
     } else {
         image.clone()
     };
     // GPUI uses BGRA with straight alpha.
-    let has_transparency = image.pixels().any(|pixel| pixel.0[3] < 255);
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -884,6 +906,76 @@ mod tests {
         );
         assert!(canvas.thumbnail(id).is_none());
         assert!(canvas.thumbnail(content.top_layer_id()).is_some());
+    }
+
+    #[test]
+    fn opacity_and_visibility_refresh_pixels_at_every_level_without_rebuilding_thumbnails() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(600, 300, Rgba([20, 40, 60, 255])),
+        );
+        let top = content
+            .add_layer(
+                content.top_layer_id(),
+                "Top".into(),
+                Rgba([250, 80, 10, 180]),
+            )
+            .unwrap();
+        let mut canvas = RenderedCanvas::new(&content);
+        canvas.install_cache(build_level(&content, 1));
+        let thumbnails = canvas.thumbnails.clone();
+        for (opacity, visible) in [
+            (80, true),
+            (0, true),
+            (255, true),
+            (255, false),
+            (255, true),
+        ] {
+            let dirty = if content.set_visible(top, visible) {
+                content.layer_composite_dirty(top)
+            } else {
+                content.change_opacity(top, opacity)
+            };
+            let patch = RenderedCanvas::prepare_patch(
+                &canvas.pixels,
+                canvas.preview.has_transparency,
+                canvas.level_caches(),
+                &content,
+                dirty,
+            )
+            .unwrap();
+            assert!(patch.thumbnails.is_empty());
+            canvas.apply(patch);
+            assert_eq!(*canvas.pixels, *content.composite());
+            for (id, thumbnail) in &thumbnails {
+                assert!(Arc::ptr_eq(thumbnail, canvas.thumbnail(*id).unwrap()));
+            }
+            // Compare both full-resolution and Fit tiles with freshly built caches.
+            for level in &canvas.levels {
+                let expected = build_level(&content, level.cache.shift());
+                for span in expected.spans() {
+                    assert_eq!(level.cache.slot(span.index), expected.slot(span.index));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_or_off_canvas_opacity_changes_do_not_repaint() {
+        let mut content = DocumentContent::single_layer("Layer".into(), RgbaImage::new(2, 2));
+        let layer = content.top_layer_id();
+        content.set_visible(layer, false);
+        assert_eq!(content.change_opacity(layer, 100), Dirty::Unpainted);
+        assert_eq!(content.layer(layer).unwrap().opacity, 100);
+        assert_eq!(content.change_opacity(layer, 100), Dirty::None);
+        content.set_visible(layer, true);
+        content.set_offset(layer, (5, 5));
+        assert_eq!(content.change_opacity(layer, 0), Dirty::Unpainted);
+        content.set_offset(layer, (-1, -1));
+        assert_eq!(
+            content.change_opacity(layer, 80),
+            Dirty::Composite(PixelRect::new(0, 0, 1, 1))
+        );
     }
 
     fn tile_images(canvas: &RenderedCanvas) -> Vec<Arc<RenderImage>> {
@@ -1139,5 +1231,26 @@ mod tests {
                 .pixels()
                 .all(|pixel| pixel.0 == [255; 4])
         );
+    }
+
+    #[test]
+    fn reduced_previews_and_thumbnails_ignore_hidden_rgb_colors() {
+        let source = RgbaImage::from_fn(8192, 1, |x, _| {
+            if x % 2 == 0 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 0])
+            }
+        });
+        let preview = render_preview(&source);
+        assert!(preview.has_transparency);
+        for image in [preview.image, render_thumbnail(&source)] {
+            let pixels = image.as_bytes(0).unwrap();
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+            // RenderImage stores BGRA; transparent blue may not tint visible red.
+            for pixel in pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0) {
+                assert_eq!(&pixel[..3], &[0, 0, 255]);
+            }
+        }
     }
 }

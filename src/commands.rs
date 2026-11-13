@@ -278,7 +278,7 @@ impl Tool {
                 "Drag a crop box. Drag inside to move it or drag a handle to resize it. X, Y, Width, and Height update immediately; an empty field leaves the crop unchanged. Return applies the crop; Escape cancels."
             }
             Self::Rotate => {
-                "Drag to rotate the active layer. The angle readout follows the preview. Return applies it; Escape cancels. The selection stays in canvas coordinates."
+                "Drag to rotate the active layer or type an angle in degrees. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
             }
             Self::Flip => {
                 "Choose Horizontal or Vertical, or drag to choose a direction. Return applies the flip; Escape cancels. The selection stays in canvas coordinates."
@@ -287,7 +287,7 @@ impl Tool {
                 "Drag the corner grips to change perspective. Keep the corners in a convex shape. Return applies the preview; Escape cancels. The selection stays in canvas coordinates."
             }
             Self::ScaleLayer => {
-                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels the drag. Width and Height are read-only. Rasterize editable text before scaling it."
+                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels. Type Width or Height for a centered live preview; Return or clicking outside commits, and empty text restores the original size. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at commit. Rasterize editable text before scaling it."
             }
             Self::Select => {
                 "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. Width, Height, and corner radius update immediately; empty numeric text leaves the selection unchanged. Shift adds, Control subtracts, and Shift-Control intersects."
@@ -299,7 +299,7 @@ impl Tool {
                 "Click to add vertices or drag to draw a freehand segment. Releasing keeps the outline open. Click its start or press Return to close it; Escape cancels. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::MagicWand => {
-                "Click a connected region to select it. Tolerance 0 matches its color exactly; this tolerance is shared with Bucket Fill. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Click a connected region to select it. Sample All Layers uses the visible composite; otherwise only the active layer is sampled. Tolerance 0 matches its color exactly; this tolerance is shared with Bucket Fill. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::Pencil | Self::Brush => {
                 "Paint with the foreground color inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size. Pencil has a hard edge; Brush uses the chosen hardness."

@@ -386,8 +386,8 @@ pub fn mirror_point(point: (f64, f64), canvas: (u32, u32), mirror: Mirror) -> (f
 
 pub fn scale_point(point: (f64, f64), old: (u32, u32), new: (u32, u32)) -> (f64, f64) {
     (
-        point.0 * f64::from(new.0) / f64::from(old.0),
-        point.1 * f64::from(new.1) / f64::from(old.1),
+        point.0 * (f64::from(new.0) / f64::from(old.0)),
+        point.1 * (f64::from(new.1) / f64::from(old.1)),
     )
 }
 
