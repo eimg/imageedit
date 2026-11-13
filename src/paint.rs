@@ -177,6 +177,7 @@ pub struct Stroke {
     tiles: HashMap<TileKey, StrokeTile>,
     pending: BTreeSet<TileKey>,
     changed: bool,
+    alpha_locked: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -220,7 +221,17 @@ impl Stroke {
             tiles: HashMap::new(),
             pending: BTreeSet::new(),
             changed: false,
+            alpha_locked: false,
         }
+    }
+
+    pub fn with_alpha_lock(mut self, locked: bool) -> Self {
+        self.alpha_locked = locked;
+        self
+    }
+
+    pub fn alpha_locked(&self) -> bool {
+        self.alpha_locked
     }
 
     pub fn changed(&self) -> bool {
@@ -331,6 +342,9 @@ impl Stroke {
     }
 
     fn dab(&mut self, point: PlotPoint, source: &RgbaImage, coverage: &impl Fn(i32, i32) -> u8) {
+        if self.alpha_locked && self.kind == StrokeKind::Erase {
+            return;
+        }
         let (mut x, mut y) = (point.x, point.y);
         let radius = f64::from(self.brush.diameter) / 2.0;
         let pencil = self.kind == StrokeKind::Pencil;
@@ -362,6 +376,9 @@ impl Stroke {
                     continue;
                 }
                 let (px, py) = (px as u32, py as u32);
+                if self.alpha_locked && source.get_pixel(px, py)[3] == 0 {
+                    continue;
+                }
                 let key = (px / STROKE_TILE, py / STROKE_TILE);
                 let previous = self
                     .tiles
@@ -409,6 +426,11 @@ impl Stroke {
                         erase(base, amount)
                     }
                     StrokeKind::Blur | StrokeKind::Sharpen => {
+                        let target = if self.alpha_locked {
+                            preserve_alpha(base, target)
+                        } else {
+                            target
+                        };
                         if target == base {
                             continue;
                         }
@@ -416,10 +438,15 @@ impl Stroke {
                         filters::blend(base, target, coverage)
                     }
                     _ => {
-                        if source_over(base, target, 1.) == base {
+                        let blend = if self.alpha_locked {
+                            source_atop
+                        } else {
+                            source_over
+                        };
+                        if blend(base, target, 1.) == base {
                             continue;
                         }
-                        source_over(base, target, amount)
+                        blend(base, target, amount)
                     }
                 };
                 let tile = self
@@ -526,6 +553,24 @@ fn dab_falloff(dx: f64, dy: f64, radius: f64, hardness: u8) -> f64 {
     } else {
         1.0 - (distance - solid) / (radius - solid)
     }
+}
+
+pub(crate) fn preserve_alpha(before: Rgba<u8>, mut after: Rgba<u8>) -> Rgba<u8> {
+    if before[3] == 0 {
+        return before;
+    }
+    after[3] = before[3];
+    after
+}
+
+pub(crate) fn source_atop(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
+    if dst[3] == 0 {
+        return dst;
+    }
+    let amount = f64::from(src[3]) / 255. * amount.clamp(0., 1.);
+    let channel =
+        |i| (f64::from(dst[i]) * (1. - amount) + f64::from(src[i]) * amount).round() as u8;
+    Rgba([channel(0), channel(1), channel(2), dst[3]])
 }
 
 fn source_over(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
@@ -664,6 +709,60 @@ fn erase(pixel: Rgba<u8>, amount: f64) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_locked_strokes_recolor_without_changing_soft_alpha_or_hidden_pixels() {
+        let source = RgbaImage::from_fn(5, 3, |x, y| {
+            Rgba([
+                40 + x as u8 * 20,
+                60 + y as u8 * 30,
+                200,
+                if x == 0 { 0 } else { x as u8 * 50 },
+            ])
+        });
+        for kind in [
+            StrokeKind::Pencil,
+            StrokeKind::Paint,
+            StrokeKind::Erase,
+            StrokeKind::Clone { dx: 1, dy: 0 },
+            StrokeKind::Blur,
+            StrokeKind::Sharpen,
+        ] {
+            for buildup in [false, true] {
+                let mut stroke = Stroke::new(
+                    kind,
+                    Rgba([240, 20, 40, 128]),
+                    Brush {
+                        diameter: 5,
+                        opacity: 50,
+                        flow: 25,
+                        buildup,
+                        ..Default::default()
+                    },
+                )
+                .with_alpha_lock(true);
+                for x in [0.5, 3.5, 1.5, 3.5] {
+                    stroke.sample(x, 1.5, &source, |_, _| 128);
+                }
+                stroke.finish(&source, |_, _| 128);
+                let result = apply_stroke(&source, &stroke)
+                    .map_or_else(|| source.clone(), |result| result.0);
+                for (x, y, pixel) in result.enumerate_pixels() {
+                    assert_eq!(pixel[3], source.get_pixel(x, y)[3], "{kind:?}");
+                    if x == 0 {
+                        assert_eq!(pixel, source.get_pixel(x, y));
+                    }
+                }
+                if kind == StrokeKind::Erase {
+                    assert!(!stroke.changed());
+                    assert_eq!(result, source);
+                }
+            }
+        }
+        let before = Rgba([0, 100, 200, 64]);
+        let after = source_atop(before, Rgba([200, 0, 0, 128]), 0.5);
+        assert_eq!(after, Rgba([50, 75, 150, 64]));
+    }
 
     #[test]
     fn extreme_off_canvas_segments_cannot_stall_the_stroke_plotter() {

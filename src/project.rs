@@ -9,15 +9,15 @@ use image::{ExtendedColorType, ImageDecoder, ImageEncoder, Rgba, codecs::png};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    BlendMode, DocumentContent, LayerId, MAX_IMAGE_BYTES, MAX_LAYERS, MAX_STACK_BYTES, RasterLayer,
-    decode_image,
+    BlendMode, DocumentContent, LayerId, LayerLocks, MAX_IMAGE_BYTES, MAX_LAYERS, MAX_STACK_BYTES,
+    RasterLayer, decode_image,
 };
 
 pub const EXTENSION: &str = "lime";
 pub const LEGACY_EXTENSION: &str = "imageedit";
 // Preserve the on-disk signature so existing projects remain readable.
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 fn default_true() -> bool {
     true
@@ -75,6 +75,8 @@ struct LayerEntry {
     visible: bool,
     opacity: u8,
     blend_mode: WireBlendMode,
+    #[serde(default, skip_serializing_if = "LayerLocks::is_unlocked")]
+    locks: LayerLocks,
     text: Option<TextEntry>,
 }
 
@@ -143,7 +145,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let manifest: Manifest =
         serde_json::from_slice(&manifest).context("Invalid project manifest")?;
     ensure!(
-        matches!(manifest.version, 6 | VERSION),
+        matches!(manifest.version, 6 | 7 | VERSION),
         "Unsupported Lime project version {}",
         manifest.version
     );
@@ -194,6 +196,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
             visible: entry.visible,
             opacity: entry.opacity,
             blend_mode: entry.blend_mode.into(),
+            locks: entry.locks,
             name: entry.name,
             text: entry.text.map(|text| crate::text::TextStyle {
                 source: text.source,
@@ -246,10 +249,16 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
 pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
     let (width, height) = content.size();
     let manifest = Manifest {
-        version: if content.guides().is_empty() {
+        version: if content
+            .layers()
+            .iter()
+            .any(|layer| !layer.locks.is_unlocked())
+        {
+            VERSION
+        } else if content.guides().is_empty() {
             6
         } else {
-            VERSION
+            7
         },
         mode: content.mode(),
         width,
@@ -267,6 +276,7 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                 visible: layer.visible,
                 opacity: layer.opacity,
                 blend_mode: layer.blend_mode.into(),
+                locks: layer.locks,
                 text: layer.text.as_ref().map(|text| TextEntry {
                     source: text.source.clone(),
                     family: text.family.clone(),
@@ -339,6 +349,21 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
 
 // Reads and writes share these checks, which run before any pixel buffer is allocated.
 fn check_limits(manifest: &Manifest) -> Result<()> {
+    ensure!(
+        manifest.version >= 8
+            || manifest
+                .layers
+                .iter()
+                .all(|layer| layer.locks.is_unlocked()),
+        "This project version does not support layer locks"
+    );
+    ensure!(
+        manifest
+            .layers
+            .iter()
+            .all(|layer| !layer.locks.alpha || layer.text.is_none()),
+        "Rasterize editable text before locking its alpha"
+    );
     ensure!(
         manifest.guides.len() <= crate::guides::MAX_GUIDES
             && manifest
@@ -474,6 +499,7 @@ mod tests {
             visible: true,
             opacity: 255,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         let top = RasterLayer {
@@ -488,6 +514,7 @@ mod tests {
             visible: false,
             opacity: 77,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         DocumentContent::from_layers(4, 3, vec![bottom, top]).unwrap()
@@ -503,6 +530,7 @@ mod tests {
             assert_eq!(actual.offset, expected.offset);
             assert_eq!(actual.visible, expected.visible);
             assert_eq!(actual.opacity, expected.opacity);
+            assert_eq!(actual.locks, expected.locks);
             assert_eq!(actual.blend_mode, expected.blend_mode);
             assert_eq!(actual.text, expected.text);
             assert_eq!(*actual.pixels, *expected.pixels);
@@ -515,6 +543,73 @@ mod tests {
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         serde_json::from_slice(&bytes[12..12 + length]).unwrap()
+    }
+
+    #[test]
+    fn v8_layer_locks_round_trip_and_older_projects_default_to_unlocked() {
+        let locked = read_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/projects/v8-layer-locks.lime"
+        )))
+        .unwrap();
+        assert!(locked.layers()[0].locks.alpha && locked.layers()[0].locks.position);
+        assert!(locked.layers()[1].locks.is_unlocked());
+        let bytes = write_bytes(&locked).unwrap();
+        let mut manifest = manifest_json(&bytes);
+        manifest["layers"][0]["text"] = json!({
+            "source": "A", "family": "sans-serif", "size": 16.0,
+            "color": [0, 0, 0, 255], "letter_spacing": 0.0, "line_spacing": 1.2,
+            "resolved_family": "sans-serif", "origin_x": 0, "origin_y": 0
+        });
+        manifest["layers"][0]["locks"]["alpha"] = json!(false);
+        assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_ok());
+        manifest["layers"][0]["locks"]["alpha"] = json!(true);
+        assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+        assert_same(
+            &read_bytes(&write_bytes(&locked).unwrap()).unwrap(),
+            &locked,
+        );
+        let mut content = two_layers();
+        for layer in read_bytes(GOLDEN).unwrap().layers() {
+            assert!(layer.locks.is_unlocked());
+        }
+        let before = write_bytes(&content).unwrap();
+        assert!(manifest_json(&before)["layers"][0].get("locks").is_none());
+        for locks in [
+            LayerLocks {
+                alpha: true,
+                position: false,
+            },
+            LayerLocks {
+                alpha: false,
+                position: true,
+            },
+            LayerLocks {
+                alpha: true,
+                position: true,
+            },
+        ] {
+            content.set_layer_locks(LayerId(7), locks);
+            let bytes = write_bytes(&content).unwrap();
+            assert_eq!(manifest_json(&bytes)["version"], json!(8));
+            assert_same(&read_bytes(&bytes).unwrap(), &content);
+            for version in [6, 7] {
+                let mut manifest = manifest_json(&bytes);
+                manifest["version"] = json!(version);
+                assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+            }
+            for invalid in [
+                json!({"alpha": "yes"}),
+                json!({"position": 1}),
+                json!({"unknown": true}),
+            ] {
+                let mut manifest = manifest_json(&bytes);
+                manifest["layers"][0]["locks"] = invalid;
+                assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+            }
+        }
+        content.set_layer_locks(LayerId(7), LayerLocks::default());
+        assert_eq!(write_bytes(&content).unwrap(), before);
     }
 
     #[test]
@@ -681,7 +776,7 @@ mod tests {
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
         let edits: [Edit; 27] = [
-            ("unknown version", &|m| m["version"] = json!(8)),
+            ("unknown version", &|m| m["version"] = json!(9)),
             ("previous version", &|m| m["version"] = json!(5)),
             ("long layer name", &|m| {
                 m["layers"][0]["name"] = json!("x".repeat(65))

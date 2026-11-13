@@ -44,6 +44,20 @@ impl AssetSource for Icons {
             "eye-off" => {
                 r#"<path d="M4 4l16 16M10 6.2A9 9 0 0 1 12 6c6 0 10 6 10 6a17 17 0 0 1-3 3.4M6.5 7.6A17 17 0 0 0 2 12s4 6 10 6a9 9 0 0 0 4-1"/>"#
             }
+            "lock-alpha" => {
+                r#"<rect x="3" y="3" width="11" height="11" rx="1"/><path d="M3 8.5h11M8.5 3v11"/><path d="M14 15v-3a3 3 0 0 1 6 0v3"/><rect x="12" y="15" width="10" height="7" rx="1"/>"#
+            }
+            "lock-position" => {
+                r#"<path d="M8 10V7a4 4 0 0 1 8 0v3"/><rect x="5" y="10" width="14" height="11" rx="2"/>"#
+            }
+            "unlock-position" => {
+                r#"<path d="M8 10V7a4 4 0 0 1 8 0"/><rect x="5" y="10" width="14" height="11" rx="2"/>"#
+            }
+            "unlock-alpha" => {
+                r#"<rect x="3" y="3" width="11" height="11" rx="1"/><path d="M3 8.5h11M8.5 3v11M14 15v-3a3 3 0 0 1 6 0"/><rect x="12" y="15" width="10" height="7" rx="1"/>"#
+            }
+            "chevron-right" => r#"<path d="m9 5 7 7-7 7"/>"#,
+            "chevron-down" => r#"<path d="m5 9 7 7 7-7"/>"#,
             "duplicate" => {
                 r#"<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>"#
             }

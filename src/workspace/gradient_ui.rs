@@ -46,6 +46,7 @@ struct PreparedGradient {
     selection: Selection,
     canvas: (u32, u32),
     mode: ColorMode,
+    alpha_locked: bool,
 }
 
 struct GradientPreview {
@@ -282,6 +283,7 @@ impl Workspace {
             selection: tab.selection.clone(),
             canvas: tab.document.content.size(),
             mode: tab.document.content.mode(),
+            alpha_locked: tab.document.content.layer(session.layer)?.locks.alpha,
         })
     }
 
@@ -413,6 +415,7 @@ fn preview_gradient(prepared: PreparedGradient) -> GradientPreview {
         selection,
         canvas,
         mode,
+        alpha_locked,
     } = prepared;
     let gradient = constrain(gradient, mode);
     let rendered = document::gradient_preview(
@@ -421,6 +424,7 @@ fn preview_gradient(prepared: PreparedGradient) -> GradientPreview {
         gradient,
         &selection,
         canvas,
+        alpha_locked,
         crate::adjustments::PREVIEW_EDGE,
     );
     let shown = with_layer_opacity(&rendered, opacity);

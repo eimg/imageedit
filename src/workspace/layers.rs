@@ -15,8 +15,8 @@ use super::view::{
 };
 use crate::commands::{
     AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer, LayerOpacity,
-    LayerToImageSize, LowerLayer, MergeDown, NewLayer, RaiseLayer, RenameLayer,
-    ToggleLayerVisibility,
+    LayerToImageSize, LowerLayer, MergeDown, NewLayer, RaiseLayer, RenameLayer, ToggleAlphaLock,
+    ToggleLayerVisibility, TogglePositionLock,
 };
 use crate::document::{self, LayerGeometry, LayerId};
 use crate::geometry::{self, Alignment, ContentCrop};
@@ -157,6 +157,8 @@ pub(super) enum LayerCommand {
     Opacity,
     Raise,
     Lower,
+    AlphaLock,
+    PositionLock,
 }
 
 #[derive(Clone)]
@@ -249,6 +251,10 @@ impl Workspace {
         let count = content.layers().len();
         let index = content.layer_index(tab.active_layer);
         match command {
+            LayerCommand::AlphaLock => content
+                .layer(tab.active_layer)
+                .is_some_and(|layer| layer.text.is_none()),
+            LayerCommand::PositionLock => true,
             LayerCommand::New => content.can_create_layer(),
             LayerCommand::Duplicate => content.can_duplicate_layer(tab.active_layer),
             LayerCommand::Rename | LayerCommand::ToggleVisibility | LayerCommand::Opacity => true,
@@ -268,7 +274,9 @@ impl Workspace {
         let root = self.bind::<ToggleLayerVisibility>(root, LayerCommand::ToggleVisibility, cx);
         let root = self.bind::<LayerOpacity>(root, LayerCommand::Opacity, cx);
         let root = self.bind::<RaiseLayer>(root, LayerCommand::Raise, cx);
-        self.bind::<LowerLayer>(root, LayerCommand::Lower, cx)
+        let root = self.bind::<LowerLayer>(root, LayerCommand::Lower, cx);
+        let root = self.bind::<ToggleAlphaLock>(root, LayerCommand::AlphaLock, cx);
+        self.bind::<TogglePositionLock>(root, LayerCommand::PositionLock, cx)
     }
 
     // Registers a handler only while the command can run, so its menu item disables itself.
@@ -300,10 +308,14 @@ impl Workspace {
             return;
         };
         let id = tab.active_layer;
+        let tab_id = tab.id;
         let content = &tab.document.content;
         let index = content.layer_index(id).unwrap_or_default();
         let visible = content.layer(id).is_some_and(|layer| layer.visible);
         match command {
+            LayerCommand::AlphaLock | LayerCommand::PositionLock => {
+                self.toggle_layer_lock(tab_id, id, command, window, cx);
+            }
             LayerCommand::New => self.new_layer_form(window, cx),
             LayerCommand::Rename => self.rename_layer_form(id, window, cx),
             LayerCommand::Opacity => self.layer_opacity_form(id, window, cx),
@@ -423,6 +435,64 @@ impl Workspace {
             self.begin_warp(window, cx);
             cx.notify();
         }
+    }
+
+    pub(super) fn toggle_layer_lock(
+        &mut self,
+        tab_id: usize,
+        id: LayerId,
+        command: LayerCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .active_tab()
+            .is_none_or(|tab| tab.id != tab_id || tab.busy())
+            || self.form.is_some()
+            || self.dialog_open
+            || self.pdf_job.is_some()
+            || !matches!(
+                command,
+                LayerCommand::AlphaLock | LayerCommand::PositionLock
+            )
+        {
+            return;
+        }
+        if self.commit_numeric_with_followup(
+            super::numeric::NumericFollowup::LayerLock {
+                tab: tab_id,
+                layer: id,
+                command,
+            },
+            window,
+            cx,
+        ) {
+            return;
+        }
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| {
+                this.toggle_layer_lock(tab_id, id, command, window, cx);
+            });
+            return;
+        }
+        let Some(layer) = self.active_document().and_then(|doc| doc.content.layer(id)) else {
+            return;
+        };
+        if command == LayerCommand::AlphaLock && layer.text.is_some() {
+            return;
+        }
+        let mut locks = layer.locks;
+        if command == LayerCommand::AlphaLock {
+            locks.alpha = !locks.alpha;
+        } else {
+            locks.position = !locks.position;
+        }
+        self.cancel_move(window, cx);
+        self.edit_content(
+            move |content, _, _| content.set_layer_locks(id, locks),
+            window,
+            cx,
+        );
     }
 
     fn toggle_visibility(&mut self, id: LayerId, window: &mut Window, cx: &mut Context<Self>) {
@@ -557,6 +627,9 @@ impl Workspace {
         };
         let content = &tab.document.content;
         let layers = content.layers();
+        let tab_id = tab.id;
+        let locks_enabled =
+            !tab.busy() && self.form.is_none() && !self.dialog_open && self.pdf_job.is_none();
         let rows = layers.iter().enumerate().rev().map(|(index, layer)| {
             let id = layer.id;
             let active = id == tab.active_layer;
@@ -634,25 +707,96 @@ impl Workspace {
                 )
                 .child(
                     div()
-                        .id(("layer-visibility", id.0 as usize))
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .size(px(24.))
                         .flex_shrink_0()
-                        .rounded_sm()
-                        .text_color(rgb(if layer.visible { MUTED } else { DISABLED }))
-                        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                        .tooltip(tooltip(if layer.visible {
-                            "Hide layer"
-                        } else {
-                            "Show layer"
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.toggle_visibility(id, window, cx);
-                        }))
-                        .child(icon(if layer.visible { "eye" } else { "eye-off" }, 14.)),
+                        .child(
+                            div()
+                                .id(("layer-visibility", id.0 as usize))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(24.))
+                                .flex_shrink_0()
+                                .rounded_sm()
+                                .text_color(rgb(if layer.visible { MUTED } else { DISABLED }))
+                                .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                .tooltip(tooltip(if layer.visible {
+                                    "Hide layer"
+                                } else {
+                                    "Show layer"
+                                }))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_visibility(id, window, cx);
+                                }))
+                                .child(icon(if layer.visible { "eye" } else { "eye-off" }, 14.)),
+                        )
+                        .children(
+                            [
+                                ("lock-alpha", LayerCommand::AlphaLock, layer.locks.alpha),
+                                (
+                                    "lock-position",
+                                    LayerCommand::PositionLock,
+                                    layer.locks.position,
+                                ),
+                            ]
+                            .map(|(symbol, command, locked)| {
+                                let alpha = command == LayerCommand::AlphaLock;
+                                let enabled = locks_enabled && (!alpha || layer.text.is_none());
+                                let label = match (alpha, locked, layer.text.is_some()) {
+                                    (true, _, true) => "Lock Alpha — rasterize text first",
+                                    (true, true, _) => "Unlock Alpha — transparency is protected",
+                                    (true, false, _) => "Lock Alpha — preserve transparency",
+                                    (false, true, _) => {
+                                        "Unlock Position — moves and transforms are blocked"
+                                    }
+                                    (false, false, _) => {
+                                        "Lock Position — prevent moves and transforms"
+                                    }
+                                };
+                                div()
+                                    .id((symbol, id.0 as usize))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(24.))
+                                    .rounded_sm()
+                                    .text_color(rgb(if locked { ACCENT } else { DISABLED }))
+                                    .tooltip(tooltip(label))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if enabled {
+                                            this.toggle_layer_lock(tab_id, id, command, window, cx);
+                                        }
+                                    }))
+                                    .when(enabled, |button| {
+                                        button.cursor_pointer().hover(|button| {
+                                            button.bg(rgb(HOVER)).text_color(rgb(if locked {
+                                                ACCENT
+                                            } else {
+                                                TEXT
+                                            }))
+                                        })
+                                    })
+                                    .when(!enabled, |button| {
+                                        button.opacity(0.45).cursor(CursorStyle::Arrow)
+                                    })
+                                    .child(icon(
+                                        if locked {
+                                            symbol
+                                        } else if alpha {
+                                            "unlock-alpha"
+                                        } else {
+                                            "unlock-position"
+                                        },
+                                        14.,
+                                    ))
+                            }),
+                        ),
                 )
         });
 
@@ -748,15 +892,17 @@ impl Workspace {
         if !self.geometry_enabled() {
             return root;
         }
-        root.on_action(cx.listener(|this, action: &AlignLayer, window, cx| {
-            this.align_active(*action, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
-            this.layer_to_image_size(window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &CropLayerToContent, window, cx| {
-            this.crop_layer_to_content(window, cx);
-        }))
+        root.when(!self.active_position_locked(), |root| {
+            root.on_action(cx.listener(|this, action: &AlignLayer, window, cx| {
+                this.align_active(*action, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
+                this.layer_to_image_size(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CropLayerToContent, window, cx| {
+                this.crop_layer_to_content(window, cx);
+            }))
+        })
         .on_action(cx.listener(|this, _: &CropImageToContent, window, cx| {
             this.crop_image_to_content(window, cx);
         }))
@@ -767,6 +913,12 @@ impl Workspace {
             && self
                 .active_tab()
                 .is_some_and(|tab| !tab.busy() && self.form.is_none() && !self.dialog_open)
+    }
+
+    pub(super) fn active_position_locked(&self) -> bool {
+        self.active_tab()
+            .and_then(|tab| tab.document.content.layer(tab.active_layer))
+            .is_some_and(|layer| layer.locks.position)
     }
 
     fn align_active(&mut self, axis: AlignLayer, window: &mut Window, cx: &mut Context<Self>) {
@@ -1092,6 +1244,11 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
             return;
         };
+        if layer.locks.position {
+            tab.notice = Some("Unlock the layer's position before moving it.".into());
+            cx.notify();
+            return;
+        }
         if !layer.visible {
             tab.notice = Some("The active layer is hidden. Show it before moving.".into());
             cx.notify();
@@ -1362,6 +1519,92 @@ fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_lock_changes_undo_without_rebuilding_or_modifying_pixels() {
+        let mut tab = super::super::tests::opacity_tab();
+        let generation = tab.history.generation();
+        let original = tab.document.canvas.pixels.clone();
+        let layer_pixels = tab
+            .document
+            .content
+            .layer(tab.active_layer)
+            .unwrap()
+            .pixels
+            .clone();
+        let mut state = tab.state();
+        let dirty = state.content.set_layer_locks(
+            tab.active_layer,
+            document::LayerLocks {
+                alpha: true,
+                position: true,
+            },
+        );
+        assert_eq!(dirty, Dirty::Unpainted);
+        let patch = document::RenderedCanvas::prepare_patch(
+            &original,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            dirty,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Edit,
+                Some((state.content, state.active_layer, state.selection, patch)),
+                1
+            )
+            .0
+        );
+        assert!(tab.history.is_dirty());
+        assert!(Arc::ptr_eq(&original, &tab.document.canvas.pixels));
+        assert!(Arc::ptr_eq(
+            &layer_pixels,
+            &tab.document.content.layer(tab.active_layer).unwrap().pixels
+        ));
+        assert_eq!(
+            tab.document.content.set_layer_locks(
+                tab.active_layer,
+                document::LayerLocks {
+                    alpha: true,
+                    position: true
+                }
+            ),
+            Dirty::None
+        );
+        let old = tab.history.undo_target().unwrap().0.clone();
+        let patch = document::RenderedCanvas::prepare_patch(
+            &original,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &old.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                tab.history.generation(),
+                super::super::Change::Undo,
+                Some((old.content, old.active_layer, old.selection, patch)),
+                2
+            )
+            .0
+        );
+        assert!(
+            tab.document
+                .content
+                .layer(tab.active_layer)
+                .unwrap()
+                .locks
+                .is_unlocked()
+        );
+        assert!(!tab.history.is_dirty());
+        let redo = tab.history.redo_target().unwrap().0;
+        assert!(redo.content.layer(tab.active_layer).unwrap().locks.alpha);
+        assert!(redo.content.layer(tab.active_layer).unwrap().locks.position);
+    }
 
     #[test]
     fn keyboard_nudges_accumulate_without_changing_a_pointer_or_numeric_session() {

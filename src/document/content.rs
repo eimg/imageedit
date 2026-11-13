@@ -22,6 +22,19 @@ pub enum BlendMode {
     Normal,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayerLocks {
+    pub alpha: bool,
+    pub position: bool,
+}
+
+impl LayerLocks {
+    pub fn is_unlocked(&self) -> bool {
+        !self.alpha && !self.position
+    }
+}
+
 #[derive(Clone)]
 pub struct RasterLayer {
     pub id: LayerId,
@@ -31,6 +44,7 @@ pub struct RasterLayer {
     pub visible: bool,
     pub opacity: u8,
     pub blend_mode: BlendMode,
+    pub locks: LayerLocks,
     pub text: Option<crate::text::TextStyle>,
 }
 
@@ -79,6 +93,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: None,
             }],
             paths: Vec::new(),
@@ -448,6 +463,15 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
+        if self.layers[index].locks.alpha
+            || (self.layers[index].locks.position
+                && self.layers[index]
+                    .text
+                    .as_ref()
+                    .is_none_or(|text| text.anchor(self.layers[index].offset) != anchor))
+        {
+            return Dirty::None;
+        }
         let pixels = if self.mode == crate::transform::ColorMode::Rgb {
             rendered.image
         } else {
@@ -525,6 +549,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: Some(style),
             },
         );
@@ -564,9 +589,11 @@ impl DocumentContent {
     pub fn is_plain_raster(&self) -> bool {
         self.paths.is_empty()
             && self.guides.is_empty()
-            && self
-                .full_canvas_layer()
-                .is_some_and(|layer| layer.name == IMPORTED_LAYER_NAME && layer.text.is_none())
+            && self.full_canvas_layer().is_some_and(|layer| {
+                layer.name == IMPORTED_LAYER_NAME
+                    && layer.text.is_none()
+                    && layer.locks.is_unlocked()
+            })
     }
 
     pub fn composite(&self) -> Arc<RgbaImage> {
@@ -685,6 +712,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: None,
             },
         );
@@ -803,6 +831,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: None,
             },
         );
@@ -881,6 +910,17 @@ impl DocumentContent {
         }
     }
 
+    pub fn set_layer_locks(&mut self, id: LayerId, locks: LayerLocks) -> Dirty {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return Dirty::None;
+        };
+        if layer.locks == locks || (locks.alpha && layer.text.is_some()) {
+            return Dirty::None;
+        }
+        layer.locks = locks;
+        Dirty::Unpainted
+    }
+
     pub fn change_opacity(&mut self, id: LayerId, opacity: u8) -> Dirty {
         if !self.set_opacity(id, opacity) {
             return Dirty::None;
@@ -911,7 +951,13 @@ impl DocumentContent {
     fn merge_bounds(&self, id: LayerId) -> Option<(usize, PixelBounds)> {
         let index = self.layer_index(id)?.checked_sub(1)?;
         let [lower, upper] = [&self.layers[index], &self.layers[index + 1]];
-        if !lower.visible || !upper.visible || lower.text.is_some() || upper.text.is_some() {
+        if !lower.visible
+            || !upper.visible
+            || lower.text.is_some()
+            || upper.text.is_some()
+            || !lower.locks.is_unlocked()
+            || !upper.locks.is_unlocked()
+        {
             return None;
         }
         let union = lower.bounds().union(upper.bounds());
@@ -987,6 +1033,9 @@ impl DocumentContent {
             return None;
         }
         let color = self.mode.constrain(color);
+        if color[3] == 0 && self.layer(id).is_some_and(|layer| layer.locks.alpha) {
+            return None;
+        }
         let connected = (request.sample_all && request.mode == FillMode::Connected).then(|| {
             Selection::flood_within(&self.composite(), x, y, request.tolerance, selection)
         });
@@ -1002,11 +1051,15 @@ impl DocumentContent {
             )
         };
         let pixels = layer.pixels.clone();
+        let ink = FillInk {
+            color,
+            alpha_locked: layer.locks.alpha,
+        };
         let painted = match request.mode {
-            FillMode::Selection => paint_covered(&pixels, color, coverage)?,
+            FillMode::Selection => paint_covered(&pixels, ink, coverage)?,
             FillMode::Connected => {
                 if let Some(connected) = &connected {
-                    paint_covered(&pixels, color, |px, py| {
+                    paint_covered(&pixels, ink, |px, py| {
                         let cx = origin_x + i64::from(px);
                         let cy = origin_y + i64::from(py);
                         if connected.covers(cx, cy, canvas.0, canvas.1) {
@@ -1026,13 +1079,16 @@ impl DocumentContent {
                     let local_x = local_x as u32;
                     let local_y = local_y as u32;
                     let target = *pixels.get_pixel(local_x, local_y);
+                    if ink.alpha_locked && request.tolerance == 0 && target[3] == 0 {
+                        return None;
+                    }
                     if request.tolerance == 0 && target == color {
                         return None;
                     }
                     let included = |px, py| {
                         within_tolerance(*pixels.get_pixel(px, py), target, request.tolerance)
                     };
-                    bucket_fill(&pixels, local_x, local_y, color, coverage, included)?
+                    bucket_fill(&pixels, local_x, local_y, ink, coverage, included)?
                 }
             }
         };
@@ -1067,6 +1123,7 @@ impl DocumentContent {
             gradient,
             selection,
             (self.width, self.height),
+            self.layers[index].locks.alpha,
         ) else {
             return Dirty::None;
         };
@@ -1094,10 +1151,14 @@ impl DocumentContent {
         let offset = self.layers[index].offset;
         let canvas = (self.width, self.height);
         let mode = self.mode;
+        let alpha_locked = self.layers[index].locks.alpha;
         let Some(adjusted) = crate::adjustments::apply_pixels(
             &self.layers[index].pixels,
             adjustment,
             |x, y| {
+                if alpha_locked && self.layers[index].pixels.get_pixel(x, y)[3] == 0 {
+                    return 0;
+                }
                 selection.coverage(
                     i64::from(offset.0) + i64::from(x),
                     i64::from(offset.1) + i64::from(y),
@@ -1146,15 +1207,19 @@ impl DocumentContent {
         let offset = self.layers[index].offset;
         let canvas = (self.width, self.height);
         let mode = self.mode;
+        let alpha_locked = self.layers[index].locks.alpha;
         let source = Arc::clone(&self.layers[index].pixels);
         let filtered = match filtered {
-            None => crate::filters::gaussian_blur(&source, radius),
-            Some(amount) => crate::filters::sharpen(&source, radius, amount),
+            None => crate::filters::gaussian_blur_alpha(&source, radius, alpha_locked),
+            Some(amount) => crate::filters::sharpen_alpha(&source, radius, amount, alpha_locked),
         };
         let Some(adjusted) = crate::filters::apply_covered(
             &source,
             &filtered,
             |x, y| {
+                if alpha_locked && source.get_pixel(x, y)[3] == 0 {
+                    return 0;
+                }
                 selection.coverage(
                     i64::from(offset.0) + i64::from(x),
                     i64::from(offset.1) + i64::from(y),
@@ -1228,6 +1293,7 @@ impl DocumentContent {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: None,
             },
         );
@@ -1275,6 +1341,7 @@ impl DocumentContent {
         };
         composite::flatten_with(&self.layers, bounds, |layer, x, y| {
             if layer.id == id
+                && layer.locks.alpha == stroke.alpha_locked()
                 && let Some(pixel) = stroke.pixel(x, y)
             {
                 return pixel;
@@ -1287,7 +1354,9 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
-        if self.layers[index].text.is_some() {
+        if self.layers[index].text.is_some()
+            || self.layers[index].locks.alpha != stroke.alpha_locked()
+        {
             return Dirty::None;
         }
         let Some((pixels, mut regions)) =
@@ -1340,7 +1409,8 @@ impl DocumentContent {
         }
         let offset = self.layers[index].offset;
         let pixels = Arc::clone(&self.layers[index].pixels);
-        let mut stroke = crate::paint::Stroke::new(kind, self.mode.constrain(color), brush);
+        let mut stroke = crate::paint::Stroke::new(kind, self.mode.constrain(color), brush)
+            .with_alpha_lock(self.layers[index].locks.alpha);
         for line in lines {
             let local = line
                 .iter()
@@ -1358,7 +1428,7 @@ impl DocumentContent {
         }
         let canvas = (self.width, self.height);
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
-        if !layer.visible {
+        if !layer.visible || layer.locks.alpha {
             return None;
         }
         let origin_x = i64::from(layer.offset.0);
@@ -1407,7 +1477,7 @@ impl DocumentContent {
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
             return Dirty::None;
         };
-        if layer.offset == offset {
+        if layer.locks.position || layer.offset == offset {
             return Dirty::None;
         }
         let before = layer.bounds();
@@ -1447,7 +1517,7 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return Dirty::None;
         };
-        if self.layers[index].text.is_some() {
+        if self.layers[index].text.is_some() || self.layers[index].locks.position {
             return Dirty::None;
         }
         let pixels = self.mode.constrain_image(pixels);
@@ -1479,7 +1549,8 @@ impl DocumentContent {
 
     pub fn can_fit_layer(&self, id: LayerId) -> bool {
         self.layer(id).is_some_and(|layer| {
-            self.fits_stack(layer.pixels.as_raw().len() as u64, self.canvas_bytes())
+            !layer.locks.position
+                && self.fits_stack(layer.pixels.as_raw().len() as u64, self.canvas_bytes())
         })
     }
 
@@ -1505,7 +1576,7 @@ impl DocumentContent {
     }
 
     pub fn crop_layer_to_content(&mut self, id: LayerId) -> LayerGeometry {
-        if self.layer_is_text(id) {
+        if self.layer_is_text(id) || self.layer(id).is_none_or(|layer| layer.locks.position) {
             return LayerGeometry::Unchanged;
         }
         let Some(index) = self.layer_index(id) else {
@@ -1664,7 +1735,7 @@ impl DocumentContent {
     }
 
     pub fn turn_layer(&mut self, id: LayerId, turn: crate::transform::Turn) -> bool {
-        if self.layer_is_text(id) {
+        if self.layer_is_text(id) || self.layer(id).is_none_or(|layer| layer.locks.position) {
             return false;
         }
         let Some(index) = self.layer_index(id) else {
@@ -1680,7 +1751,7 @@ impl DocumentContent {
     }
 
     pub fn mirror_layer(&mut self, id: LayerId, mirror: crate::transform::Mirror) -> bool {
-        if self.layer_is_text(id) {
+        if self.layer_is_text(id) || self.layer(id).is_none_or(|layer| layer.locks.position) {
             return false;
         }
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
@@ -1776,7 +1847,11 @@ impl DocumentContent {
         height: u32,
         resample: crate::transform::Resample,
     ) -> bool {
-        if self.layer_is_text(id) || width == 0 || height == 0 {
+        if self.layer_is_text(id)
+            || self.layer(id).is_none_or(|layer| layer.locks.position)
+            || width == 0
+            || height == 0
+        {
             return false;
         }
         let Some(index) = self.layer_index(id) else {
@@ -1977,9 +2052,25 @@ fn copy_name(name: &str) -> String {
     copy
 }
 
+#[derive(Clone, Copy)]
+struct FillInk {
+    color: Rgba<u8>,
+    alpha_locked: bool,
+}
+
+impl FillInk {
+    fn mix(self, before: Rgba<u8>, coverage: u8) -> Rgba<u8> {
+        if self.alpha_locked {
+            crate::paint::source_atop(before, self.color, f64::from(coverage) / 255.)
+        } else {
+            mix_fill(before, self.color, coverage)
+        }
+    }
+}
+
 fn paint_covered(
     source: &RgbaImage,
-    color: Rgba<u8>,
+    ink: FillInk,
     coverage: impl Fn(u32, u32) -> u8,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
     let (width, height) = source.dimensions();
@@ -1992,7 +2083,7 @@ fn paint_covered(
                 continue;
             }
             let before = *source.get_pixel(x, y);
-            let after = mix_fill(before, color, amount);
+            let after = ink.mix(before, amount);
             if before == after {
                 continue;
             }
@@ -2017,6 +2108,7 @@ pub(crate) fn gradient_preview(
     gradient: crate::paint::Gradient,
     selection: &Selection,
     canvas: (u32, u32),
+    alpha_locked: bool,
     max_edge: u32,
 ) -> RgbaImage {
     let (width, height) = source.dimensions();
@@ -2032,7 +2124,11 @@ pub(crate) fn gradient_preview(
             return before;
         }
         let color = crate::paint::gradient_color(&gradient, cx as f64 + 0.5, cy as f64 + 0.5);
-        mix_fill(before, color, amount)
+        FillInk {
+            color,
+            alpha_locked,
+        }
+        .mix(before, amount)
     })
 }
 
@@ -2042,6 +2138,7 @@ pub(crate) fn render_gradient(
     gradient: crate::paint::Gradient,
     selection: &Selection,
     canvas: (u32, u32),
+    alpha_locked: bool,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
     let (width, height) = source.dimensions();
     let mut image = None;
@@ -2060,7 +2157,11 @@ pub(crate) fn render_gradient(
                 canvas_y as f64 + 0.5,
             );
             let before = *source.get_pixel(x, y);
-            let after = mix_fill(before, color, amount);
+            let after = FillInk {
+                color,
+                alpha_locked,
+            }
+            .mix(before, amount);
             if before == after {
                 continue;
             }
@@ -2083,7 +2184,7 @@ fn bucket_fill(
     source: &RgbaImage,
     x: u32,
     y: u32,
-    color: Rgba<u8>,
+    ink: FillInk,
     coverage: impl Fn(u32, u32) -> u8,
     included: impl Fn(u32, u32) -> bool,
 ) -> Option<(RgbaImage, u32, u32, u32, u32)> {
@@ -2115,7 +2216,7 @@ fn bucket_fill(
         for x in left..=right {
             visited[index(x, y)] = true;
             let before = *source.get_pixel(x, y);
-            let after = mix_fill(before, color, coverage(x, y));
+            let after = ink.mix(before, coverage(x, y));
             if before != after {
                 image
                     .get_or_insert_with(|| source.clone())
@@ -2170,6 +2271,249 @@ fn mix_fill(before: Rgba<u8>, color: Rgba<u8>, coverage: u8) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_lock_preserves_coverage_for_fills_gradients_filters_and_outline_strokes() {
+        let source = RgbaImage::from_fn(6, 4, |x, y| {
+            Rgba([
+                20 + x as u8 * 30,
+                30 + y as u8 * 40,
+                180,
+                if x == 0 { 0 } else { x as u8 * 45 },
+            ])
+        });
+        let mut original =
+            DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), source.clone());
+        let id = original.top_layer_id();
+        let composite = original.composite();
+        original.set_layer_locks(
+            id,
+            LayerLocks {
+                alpha: true,
+                position: false,
+            },
+        );
+        assert_eq!(*original.composite(), *composite);
+        let selection = Selection::Rect(PixelRect::new(0, 0, 5, 4)).feather(1, 6, 4);
+        let gradient = crate::paint::Gradient {
+            shape: crate::paint::GradientShape::Linear,
+            blend: crate::paint::GradientBlend::ForegroundToTransparent,
+            start: (0., 0.),
+            end: (6., 0.),
+            foreground: Rgba([240, 10, 30, 200]),
+            background: Rgba([0; 4]),
+        };
+        for operation in 0..7 {
+            let mut content = original.clone();
+            match operation {
+                0 | 1 => {
+                    content.fill_bucket(
+                        id,
+                        2,
+                        2,
+                        Rgba([220, 40, 20, 170]),
+                        &selection,
+                        FillRequest {
+                            mode: if operation == 0 {
+                                FillMode::Connected
+                            } else {
+                                FillMode::Selection
+                            },
+                            tolerance: 255,
+                            sample_all: operation == 0,
+                        },
+                    );
+                }
+                2 => {
+                    content.apply_gradient(id, gradient, &selection);
+                }
+                3 => {
+                    content.apply_filter(
+                        id,
+                        crate::filters::FilterSpec::Blur { radius: 2 },
+                        &selection,
+                    );
+                }
+                4 => {
+                    content.apply_filter(
+                        id,
+                        crate::filters::FilterSpec::Sharpen {
+                            radius: 1,
+                            amount: 75,
+                        },
+                        &selection,
+                    );
+                }
+                5 => {
+                    content.stroke_lines(
+                        id,
+                        &[vec![(0., 2.), (6., 2.)]],
+                        Rgba([255, 0, 0, 200]),
+                        crate::paint::Brush {
+                            diameter: 4,
+                            ..Default::default()
+                        },
+                    );
+                }
+                _ => {
+                    content.apply_adjustment(
+                        id,
+                        crate::adjustments::Adjustment::Invert,
+                        &selection,
+                    );
+                }
+            }
+            let pixels = &content.layer(id).unwrap().pixels;
+            assert_ne!(pixels.as_ref(), &source, "operation {operation}");
+            for (x, y, pixel) in pixels.enumerate_pixels() {
+                assert_eq!(pixel[3], source.get_pixel(x, y)[3]);
+                if x == 0 {
+                    assert_eq!(pixel, source.get_pixel(x, y), "operation {operation}");
+                }
+            }
+        }
+        let preview = gradient_preview(&source, (0, 0), gradient, &selection, (6, 4), true, 256);
+        let mut committed = original.clone();
+        committed.apply_gradient(id, gradient, &selection);
+        assert_eq!(preview, *committed.layer(id).unwrap().pixels);
+        assert!(original.clear(id, &selection).is_none());
+        let mut stale = crate::paint::Stroke::new(
+            crate::paint::StrokeKind::Paint,
+            Rgba([255; 4]),
+            crate::paint::Brush {
+                diameter: 5,
+                ..Default::default()
+            },
+        );
+        stale.sample(2., 2., &source, |_, _| 255);
+        assert_eq!(original.apply_stroke(id, &stale), Dirty::None);
+        assert!(!original.is_plain_raster());
+    }
+
+    #[test]
+    fn alpha_locked_filters_keep_faint_edge_colors_before_rounding_alpha() {
+        let mut source = RgbaImage::from_pixel(7, 7, Rgba([0, 255, 0, 0]));
+        source.put_pixel(3, 3, Rgba([70, 100, 200, 1]));
+        let mut content = DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), source.clone());
+        let id = content.top_layer_id();
+        content.set_layer_locks(
+            id,
+            LayerLocks {
+                alpha: true,
+                position: false,
+            },
+        );
+        for spec in [
+            crate::filters::FilterSpec::Blur { radius: 2 },
+            crate::filters::FilterSpec::Sharpen {
+                radius: 1,
+                amount: 75,
+            },
+        ] {
+            assert_eq!(
+                content.apply_filter(id, spec, &Selection::Full),
+                Dirty::None
+            );
+            assert_eq!(*content.layer(id).unwrap().pixels, source);
+        }
+    }
+
+    #[test]
+    fn position_lock_blocks_layer_geometry_but_follows_image_operations() {
+        let source = RgbaImage::from_fn(6, 4, |x, y| {
+            Rgba([
+                x as u8 * 30,
+                y as u8 * 40,
+                150,
+                if x == 0 { 0 } else { 200 },
+            ])
+        });
+        let mut content = DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), source.clone());
+        let id = content.top_layer_id();
+        content.set_layer_locks(
+            id,
+            LayerLocks {
+                alpha: false,
+                position: true,
+            },
+        );
+        assert_eq!(content.set_offset(id, (3, 2)), Dirty::None);
+        assert_eq!(
+            content.align_layer(id, crate::geometry::Alignment::Right),
+            Dirty::None
+        );
+        assert_eq!(
+            content.place_layer(id, RgbaImage::new(2, 2), (1, 1)),
+            Dirty::None
+        );
+        assert!(!content.turn_layer(id, crate::transform::Turn::Right));
+        assert!(!content.mirror_layer(id, crate::transform::Mirror::Horizontal));
+        assert!(!content.scale_layer(id, 3, 2, crate::transform::Resample::Nearest));
+        assert!(!content.can_fit_layer(id));
+        assert_eq!(content.layer_to_image_size(id), Dirty::None);
+        assert!(matches!(
+            content.crop_layer_to_content(id),
+            LayerGeometry::Unchanged
+        ));
+        assert_eq!(*content.layer(id).unwrap().pixels, source);
+        let copy = content.duplicate_layer(id).unwrap();
+        assert!(content.layer(copy).unwrap().locks.position);
+        assert!(!content.can_merge_down(copy));
+        assert!(content.merge_down(copy).is_none());
+        assert!(content.turn_image(crate::transform::Turn::Right));
+        assert!(content.layer(id).unwrap().locks.position);
+        assert_eq!(content.size(), (4, 6));
+        assert!(!content.is_plain_raster());
+    }
+
+    #[test]
+    fn text_position_lock_keeps_the_anchor_while_allowing_content_and_style_edits() {
+        let mut content =
+            DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), RgbaImage::new(3, 2));
+        let id = content.top_layer_id();
+        let style = crate::text::TextStyle {
+            source: "A".into(),
+            family: "sans-serif".into(),
+            face: Default::default(),
+            size: 16.,
+            color: Rgba([0, 0, 0, 255]),
+            spacing: Default::default(),
+            resolved_family: "sans-serif".into(),
+            origin: (0, 0),
+        };
+        content.layers[0].text = Some(style.clone());
+        assert_eq!(
+            content.set_layer_locks(
+                id,
+                LayerLocks {
+                    alpha: true,
+                    position: false
+                }
+            ),
+            Dirty::None
+        );
+        content.set_layer_locks(
+            id,
+            LayerLocks {
+                alpha: false,
+                position: true,
+            },
+        );
+        let rendered = crate::text::RenderedText {
+            image: Arc::new(RgbaImage::from_pixel(4, 3, Rgba([20; 4]))),
+            style: crate::text::TextStyle {
+                source: "AB".into(),
+                ..style
+            },
+        };
+        assert_eq!(content.set_text(id, (1, 1), rendered.clone()), Dirty::None);
+        assert_eq!(content.set_text(id, (0, 0), rendered), Dirty::Canvas);
+        assert_eq!(
+            content.layer(id).unwrap().text.as_ref().unwrap().source,
+            "AB"
+        );
+        assert_eq!(content.layer(id).unwrap().offset, (0, 0));
+    }
 
     #[test]
     fn import_preflight_checks_the_whole_batch_without_allocating_page_pixels() {
@@ -2379,6 +2723,7 @@ mod tests {
             visible: true,
             opacity: 128,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         content.layers.push(top.clone());
@@ -2482,6 +2827,7 @@ mod tests {
                 visible: true,
                 opacity: 255,
                 blend_mode: BlendMode::Normal,
+                locks: Default::default(),
                 text: None,
             })
             .collect();
@@ -2620,7 +2966,10 @@ mod tests {
             &source,
             1,
             1,
-            color,
+            FillInk {
+                color,
+                alpha_locked: false,
+            },
             |_, _| 255,
             |x, y| within_tolerance(*source.get_pixel(x, y), *source.get_pixel(1, 1), 1),
         )
@@ -2695,7 +3044,10 @@ mod tests {
             &image,
             0,
             0,
-            ink,
+            FillInk {
+                color: ink,
+                alpha_locked: false,
+            },
             |_, _| 255,
             |x, y| *image.get_pixel(x, y) == blank,
         )
@@ -3053,8 +3405,8 @@ mod tests {
         let mut gradient = red_blue_gradient(crate::paint::GradientShape::Linear);
         gradient.end = (1023.5, 0.5);
         let selection = Selection::Rect(PixelRect::new(256, 0, 256, 4));
-        let preview = gradient_preview(&source, (0, 0), gradient, &selection, (1024, 4), 64);
-        let rendered = render_gradient(&source, (0, 0), gradient, &selection, (1024, 4))
+        let preview = gradient_preview(&source, (0, 0), gradient, &selection, (1024, 4), false, 64);
+        let rendered = render_gradient(&source, (0, 0), gradient, &selection, (1024, 4), false)
             .unwrap()
             .0;
         assert_eq!(preview.dimensions(), (64, 1));

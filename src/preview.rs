@@ -503,6 +503,7 @@ mod tests {
             visible: true,
             opacity: 255,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         let glaze = RasterLayer {
@@ -513,6 +514,7 @@ mod tests {
             visible: true,
             opacity: 200,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         let content = DocumentContent::from_layers(300, 80, vec![base, glaze]).unwrap();

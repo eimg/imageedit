@@ -275,6 +275,10 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before painting.", cx);
             return;
         }
+        if self.tool == Tool::Eraser && layer.locks.alpha {
+            self.notice("Unlock the layer's alpha before erasing pixels.", cx);
+            return;
+        }
         let id = layer.id;
         let offset = layer.offset;
         let source = layer.pixels.clone();
@@ -310,7 +314,8 @@ impl Workspace {
             source,
             selection,
             canvas,
-            stroke: Stroke::new(kind, color, *self.active_brush()),
+            stroke: Stroke::new(kind, color, *self.active_brush())
+                .with_alpha_lock(layer.locks.alpha),
             last_point: here,
             clone_delta: match kind {
                 StrokeKind::Clone { dx, dy } if self.clone_aligned => Some((dx, dy)),

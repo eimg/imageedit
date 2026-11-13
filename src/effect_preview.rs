@@ -51,8 +51,15 @@ impl EffectPreview {
             return self.original().clone();
         }
         let prepared = adjustments::Prepared::from(adjustment);
+        let alpha_locked = self
+            .content
+            .layer(self.layer)
+            .is_some_and(|layer| layer.locks.alpha);
         self.composite(
             |pixel, x, y| {
+                if alpha_locked && pixel[3] == 0 {
+                    return pixel;
+                }
                 adjustments::blend_coverage(
                     pixel,
                     self.content.mode().constrain(prepared.map(pixel)),
@@ -103,6 +110,10 @@ impl EffectPreview {
         if radius == 0 {
             return self.original().clone();
         }
+        let alpha_locked = self
+            .content
+            .layer(self.layer)
+            .is_some_and(|layer| layer.locks.alpha);
         let filtered = filters::preview(
             &region.pixels,
             match spec {
@@ -113,13 +124,22 @@ impl EffectPreview {
             0,
             |_, _| 255,
             |pixel| self.content.mode().constrain(pixel),
+            alpha_locked,
         );
         self.composite(
             |pixel, x, y| {
+                if alpha_locked && pixel[3] == 0 {
+                    return pixel;
+                }
                 let sx = ((x - region.origin.0) as f64 * region.scale).floor() as u32;
                 let sy = ((y - region.origin.1) as f64 * region.scale).floor() as u32;
                 let target = *filtered
                     .get_pixel(sx.min(filtered.width() - 1), sy.min(filtered.height() - 1));
+                let target = if alpha_locked {
+                    crate::paint::preserve_alpha(pixel, target)
+                } else {
+                    target
+                };
                 filters::blend(pixel, target, self.coverage(x, y))
             },
             None,
@@ -263,6 +283,7 @@ mod tests {
             visible,
             opacity,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         DocumentContent::from_layers(
@@ -307,6 +328,40 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn locked_alpha_previews_match_commits_without_expanding_the_silhouette() {
+        let mut content = scene();
+        content.set_layer_locks(
+            LayerId(1),
+            crate::document::LayerLocks {
+                alpha: true,
+                position: false,
+            },
+        );
+        let selection = Selection::ellipse_rect_quality(PixelRect::new(0, 0, 8, 8), 12, 9, true);
+        let preview = EffectPreview::new(content.clone(), LayerId(1), selection.clone(), 256);
+        for spec in [
+            FilterSpec::Blur { radius: 2 },
+            FilterSpec::Sharpen {
+                radius: 1,
+                amount: 75,
+            },
+        ] {
+            let mut committed = content.clone();
+            committed.apply_filter(LayerId(1), spec, &selection);
+            assert_eq!(preview.filter(spec), *committed.composite());
+            for (before, after) in content
+                .layer(LayerId(1))
+                .unwrap()
+                .pixels
+                .pixels()
+                .zip(committed.layer(LayerId(1)).unwrap().pixels.pixels())
+            {
+                assert_eq!(before[3], after[3]);
+            }
+        }
     }
 
     #[test]
@@ -421,6 +476,7 @@ mod tests {
             visible: true,
             opacity: 180,
             blend_mode: BlendMode::Normal,
+            locks: Default::default(),
             text: None,
         };
         let content = DocumentContent::from_layers(8, 6, vec![layer]).unwrap();

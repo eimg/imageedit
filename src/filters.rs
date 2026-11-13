@@ -61,6 +61,14 @@ pub fn shadow_dimensions(width: u32, height: u32, radius: u32) -> Option<(u32, u
 }
 
 pub fn gaussian_blur(source: &RgbaImage, radius: u32) -> RgbaImage {
+    gaussian_blur_alpha(source, radius, false)
+}
+
+pub(crate) fn gaussian_blur_alpha(
+    source: &RgbaImage,
+    radius: u32,
+    alpha_locked: bool,
+) -> RgbaImage {
     if radius == 0 {
         return source.clone();
     }
@@ -95,18 +103,37 @@ pub fn gaussian_blur(source: &RgbaImage, radius: u32) -> RgbaImage {
                         sample[channel] += pixel[channel] * weight;
                     }
                 }
-                output.put_pixel(left + x, y, unpremultiply(sample));
+                let pixel = if alpha_locked {
+                    let before = *source.get_pixel(left + x, y);
+                    if before[3] == 0 || sample[3] <= 0. {
+                        before
+                    } else {
+                        // Recover color before alpha is rounded to a byte: a faint
+                        // blurred silhouette can round to zero but still carry color.
+                        let channel =
+                            |i: usize| (sample[i] * 255. / sample[3]).round().clamp(0., 255.) as u8;
+                        Rgba([channel(0), channel(1), channel(2), before[3]])
+                    }
+                } else {
+                    unpremultiply(sample)
+                };
+                output.put_pixel(left + x, y, pixel);
             }
         }
     }
     output
 }
 
-pub fn sharpen(source: &RgbaImage, radius: u32, amount: u8) -> RgbaImage {
+pub(crate) fn sharpen_alpha(
+    source: &RgbaImage,
+    radius: u32,
+    amount: u8,
+    alpha_locked: bool,
+) -> RgbaImage {
     if radius == 0 || amount == 0 {
         return source.clone();
     }
-    let blurred = gaussian_blur(source, radius);
+    let blurred = gaussian_blur_alpha(source, radius, alpha_locked);
     let factor = f64::from(amount.min(100)) / 100.0;
     let (width, height) = source.dimensions();
     RgbaImage::from_fn(width, height, |x, y| {
@@ -209,6 +236,7 @@ pub fn preview(
     max_edge: u32,
     coverage: impl Fn(u32, u32) -> u8,
     constrain: impl Fn(Rgba<u8>) -> Rgba<u8>,
+    alpha_locked: bool,
 ) -> RgbaImage {
     let (width, height) = source.dimensions();
     let (preview_width, preview_height) = crate::adjustments::preview_size(width, height, max_edge);
@@ -221,10 +249,18 @@ pub fn preview(
     let scale = f64::from(preview_width.max(preview_height)) / f64::from(width.max(height).max(1));
     let scaled = |radius: u32| (f64::from(radius) * scale).round() as u32;
     let constrain = &constrain;
+    let original_coverage = &coverage;
+    let coverage = |x, y| {
+        if alpha_locked && source.get_pixel(x, y)[3] == 0 {
+            0
+        } else {
+            original_coverage(x, y)
+        }
+    };
     match spec {
         FilterSpec::Blur { radius } => mix_covered(
             &reduced,
-            &gaussian_blur(&reduced, scaled(radius)),
+            &gaussian_blur_alpha(&reduced, scaled(radius), alpha_locked),
             width,
             height,
             &coverage,
@@ -232,7 +268,7 @@ pub fn preview(
         ),
         FilterSpec::Sharpen { radius, amount } => mix_covered(
             &reduced,
-            &sharpen(&reduced, scaled(radius), amount),
+            &sharpen_alpha(&reduced, scaled(radius), amount, alpha_locked),
             width,
             height,
             &coverage,
@@ -430,7 +466,15 @@ mod tests {
             }
             .is_identity()
         );
-        assert!(apply_covered(&source, &sharpen(&source, 1, 50), |_, _| 255, plain).is_none());
+        assert!(
+            apply_covered(
+                &source,
+                &sharpen_alpha(&source, 1, 50, false),
+                |_, _| 255,
+                plain
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -449,12 +493,12 @@ mod tests {
     fn sharpen_raises_the_impulse_and_lowers_its_neighbor() {
         let mut source = RgbaImage::from_pixel(5, 5, Rgba([100, 100, 100, 255]));
         source.put_pixel(2, 2, Rgba([140, 140, 140, 255]));
-        let sharpened = sharpen(&source, 1, 50);
+        let sharpened = sharpen_alpha(&source, 1, 50, false);
         assert_eq!(sharpened.get_pixel(2, 2).0, [157, 157, 157, 255]);
         assert_eq!(sharpened.get_pixel(3, 2).0, [98, 98, 98, 255]);
         let mut edge = RgbaImage::from_pixel(3, 1, Rgba([0, 255, 0, 0]));
         edge.put_pixel(1, 0, Rgba([255, 0, 0, 255]));
-        let sharpened = sharpen(&edge, 1, 50);
+        let sharpened = sharpen_alpha(&edge, 1, 50, false);
         assert_eq!(sharpened.get_pixel(1, 0).0[1], 0);
         assert_eq!(sharpened.get_pixel(1, 0).0[3], 255);
         assert_eq!(sharpened.get_pixel(0, 0).0, [0, 255, 0, 0]);
@@ -479,7 +523,7 @@ mod tests {
 
         let mut field = RgbaImage::from_pixel(5, 5, Rgba([100, 100, 100, 255]));
         field.put_pixel(2, 2, Rgba([140, 140, 140, 255]));
-        let sharpened = sharpen(&field, 1, 50);
+        let sharpened = sharpen_alpha(&field, 1, 50, false);
         let mixed = apply_covered(
             &field,
             &sharpened,
@@ -507,6 +551,7 @@ mod tests {
             64,
             |_, _| 255,
             plain,
+            false,
         );
         assert!(preview.width() <= 64 && preview.height() <= 64);
         assert!(render_shadow(&RgbaImage::new(8, 8), 1, 75, Rgba([0, 0, 0, 255])).is_none());

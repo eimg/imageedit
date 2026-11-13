@@ -513,7 +513,14 @@ impl Workspace {
         }
         match command {
             SelectionCommand::All | SelectionCommand::None | SelectionCommand::Invert => true,
-            SelectionCommand::Clear => tab.selection != Selection::Empty,
+            SelectionCommand::Clear => {
+                tab.selection != Selection::Empty
+                    && tab
+                        .document
+                        .content
+                        .layer(tab.active_layer)
+                        .is_some_and(|layer| !layer.locks.alpha)
+            }
             SelectionCommand::Crop => self.selection_crop().is_some(),
         }
     }

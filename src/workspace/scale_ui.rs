@@ -44,6 +44,9 @@ impl Workspace {
         }
         self.active_tab().and_then(|tab| {
             let layer = tab.document.content.layer(tab.active_layer)?;
+            if layer.locks.position {
+                return None;
+            }
             Some(PixelRect {
                 x: i64::from(layer.offset.0),
                 y: i64::from(layer.offset.1),
@@ -82,6 +85,10 @@ impl Workspace {
             Some(layer) => layer,
             None => return,
         };
+        if layer.locks.position {
+            self.notice("Unlock the layer's position before scaling it.", cx);
+            return;
+        }
         if !layer.visible {
             self.notice("The active layer is hidden. Show it before scaling.", cx);
             return;
@@ -142,6 +149,10 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
             return false;
         };
+        if layer.locks.position {
+            self.notice("Unlock the layer's position before scaling it.", cx);
+            return false;
+        }
         if !layer.visible || layer.text.is_some() {
             self.notice(
                 "Show the layer and rasterize editable text before scaling.",

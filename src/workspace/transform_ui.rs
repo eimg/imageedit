@@ -22,15 +22,19 @@ impl Workspace {
         root.on_action(cx.listener(|this, action: &ImageAdjust, window, cx| {
             this.adjust_image(*action, window, cx);
         }))
-        .on_action(cx.listener(|this, action: &LayerAdjust, window, cx| {
-            this.adjust_layer(*action, window, cx);
-        }))
+        .when(!self.active_position_locked(), |root| {
+            root.on_action(cx.listener(|this, action: &LayerAdjust, window, cx| {
+                this.adjust_layer(*action, window, cx);
+            }))
+        })
         .on_action(cx.listener(|this, _: &ScaleImage, window, cx| {
             this.scale_image_form(window, cx);
         }))
-        .on_action(cx.listener(|this, _: &ScaleLayer, window, cx| {
-            this.scale_layer_form(window, cx);
-        }))
+        .when(!self.active_position_locked(), |root| {
+            root.on_action(cx.listener(|this, _: &ScaleLayer, window, cx| {
+                this.scale_layer_form(window, cx);
+            }))
+        })
         .on_action(
             cx.listener(|this, _: &CanvasSize, window, cx| this.canvas_size_form(window, cx)),
         )
@@ -367,6 +371,10 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
             return;
         };
+        if layer.locks.position {
+            self.notice("Unlock the layer's position before transforming it.", cx);
+            return;
+        }
         if layer.text.is_some() {
             self.notice("Rasterize the text layer before using pixel tools.", cx);
             return;

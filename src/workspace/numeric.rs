@@ -188,6 +188,11 @@ pub(super) struct NumericEdit {
 pub(super) enum NumericFollowup {
     Key(Keystroke),
     Focus(NumericField),
+    LayerLock {
+        tab: usize,
+        layer: crate::document::LayerId,
+        command: super::layers::LayerCommand,
+    },
 }
 
 pub(super) struct PendingNumeric {
@@ -774,6 +779,14 @@ impl Workspace {
                         }
                         NumericFollowup::Focus(field) => {
                             this.begin_numeric_edit(field, window, cx);
+                            None
+                        }
+                        NumericFollowup::LayerLock {
+                            tab,
+                            layer,
+                            command,
+                        } => {
+                            this.toggle_layer_lock(tab, layer, command, window, cx);
                             None
                         }
                     }

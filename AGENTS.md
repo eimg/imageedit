@@ -65,6 +65,29 @@ one image pixel, or ten with Shift, independent of zoom. Release commits one
 undo step per key sequence; Escape, deactivation, or changing tools/tabs/layers
 cancels an unfinished sequence. Nudges queued during their own prior canvas
 commit resume only on the same tab, layer, and document generation.
+Layers have independent alpha and position locks, exposed as visible
+icon toggles beside each row's visibility button and through Layer menu actions.
+Lock toggles share visibility's background-free resting style and hover treatment;
+closed locks use the accent color, including while hovered, while open locks are dimmed. Position lock
+uses a plain padlock; alpha lock retains its transparency indicator.
+Row toggles target stable tab/layer IDs without changing the active layer; typed
+geometry and text commit first, with deferred actions validating their context.
+Alpha lock is disabled on editable text rows with an explanatory tooltip.
+Lock changes use `Dirty::Unpainted`, commit one image
+history step, preserve shared pixel/preview buffers, and require project Save.
+Alpha lock is available for raster layers: paint/clone/outline strokes use
+source-atop blending; fills and gradients use the same color mix; filters preserve
+the original alpha before selection blending. Fully transparent pixels keep
+their hidden RGB. Eraser/Cut/Clear cannot remove locked pixels. Adjustment alpha
+already stays fixed, and locked transparent samples are skipped. Blur/sharpen
+recover weighted colors before rounding faint alpha. Stroke preview/commit reject
+a stale lock policy. Duplicates retain both flags; new/imported/shadow layers
+start unlocked. Merge Down requires both participating layers unlocked.
+Position lock blocks manual layer moves (pointer, typed, and nudges), alignment,
+pixel transforms, scale, fit, and layer content crop. Image-wide operations still
+transform every layer and retain its locks. Editable text remains editable at its
+existing layout anchor, including automatic bitmap resizing; rasterize it before
+locking alpha. Opacity, visibility, order, and deletion remain available.
 The Layer menu can align, fit it to the canvas, or crop it to its opaque
 pixels. Image → Crop to Content
 does the same for the canvas. Image and Layer transforms rotate and flip
@@ -312,6 +335,12 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
   It handles crop, layer-local bucket fill, layer offsets, content crops, and outline strokes.
+  `RasterLayer::locks` owns the persistent `LayerLocks` flags. Model mutation
+  methods enforce them in addition to UI/action gates, and reject alpha-locked
+  editable text. Stroke sessions capture the lock policy; fill/gradient previews
+  and committed operations share it. Alpha lock does not prevent intentional
+  layer geometry changes; position lock handles those. Image transforms bypass
+  manual position protection and move the whole document consistently.
   `src/document/composite.rs` blends visible layers for display, sampling, and
   raster output.
 - `src/text.rs` rasterizes a layer's text with cosmic-text. One style covers
@@ -323,16 +352,20 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   and is now a direct dependency for these grapheme and word boundaries.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
-- `src/project.rs` reads project versions 6 and 7 and applies the same size limits
-  in both directions. Projects containing guides write version 7; without guides
+- `src/project.rs` reads project versions 6, 7, and 8 and applies the same size limits
+  in both directions. Any layer lock requires version 8 with an optional per-layer
+  `locks` object. Missing flags default to false; unlocked layers omit the object.
+  Without locks, projects containing guides write version 7; without guides
   they retain version 6 and omit the guides field for compatibility with older
-  builds. Version 6 manifests may not contain nonempty guides. Versions before 6
+  builds. Version 6 manifests may not contain nonempty guides. Versions 6/7 may
+  not contain active layer locks; alpha-locked text is rejected. Versions before 6
   are not supported. `fixtures/projects/` holds a golden
   project that the reader must keep opening. Regenerate it only when the
   format intentionally changes. The current fixture is version 6
   (`v6-two-layers.imageedit`); keep its legacy extension to exercise compatibility. New projects use `.lime`; the file magic
   stays unchanged; the existing version 6 fixture remains unchanged.
-  Text bold/italic flags are optional in both supported versions and default to regular for
+  `v8-layer-locks.lime` additionally covers the lock-bearing format.
+  Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
@@ -399,7 +432,15 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   aspect ratio and draw their checker only inside that area. The preview is
   display-only until the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options align the layer to canvas edges or center it with icon
-  buttons. The Layer menu has the fit and content-crop commands.
+  buttons. Move's Snapping disclosure starts collapsed, retains its session
+  state, shows the active snap modes while folded, and never changes settings
+  when folded. Tool options use their natural height up to half the inspector,
+  scrolling independently from Layers/Paths in the remaining space.
+  The right inspector is 272 px wide to accommodate visible per-row lock controls.
+  The resizable toolbox starts at the same total width, sharing the inspector
+  constant. Its outer container owns that width; the resize grip overlays its
+  inside edge instead of adding a separate layout column.
+  The Layer menu has the fit and content-crop commands.
   Pointer Move computes snapping from the unsnapped grab on every event, including
   final release and Control changes; it never accumulates snapped deltas.
   `src/guides.rs` owns bounded guide metadata, image transforms, grid density, and

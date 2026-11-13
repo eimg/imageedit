@@ -43,9 +43,12 @@ impl Workspace {
                 .is_some_and(|layer| layer.visible)
         });
         if visible
-            && self
-                .active_tab()
-                .is_some_and(|tab| !tab.document.content.layer_is_text(tab.active_layer))
+            && self.active_tab().is_some_and(|tab| {
+                tab.document
+                    .content
+                    .layer(tab.active_layer)
+                    .is_some_and(|layer| layer.text.is_none() && !layer.locks.alpha)
+            })
         {
             root = root.on_action(
                 cx.listener(|this, _: &CutImage, window, cx| this.copy_image(true, window, cx)),
@@ -91,6 +94,10 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(layer_id) else {
             return;
         };
+        if cut && layer.locks.alpha {
+            self.notice("Unlock the layer's alpha before cutting pixels.", cx);
+            return;
+        }
         if cut && !layer.visible {
             self.notice("The active layer is hidden. Show it before cutting.", cx);
             return;

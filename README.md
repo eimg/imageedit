@@ -8,6 +8,8 @@ tool and command icons, and a workspace that keeps the canvas in focus.
 ## Features
 
 - **Layers** — move, align, reorder, merge, and adjust opacity.
+  Alpha lock preserves transparency while recoloring; position lock protects
+  layers from manual moves and transforms.
   The opacity slider keeps your chosen value while the canvas updates; each drag
   is one undo step. You can keep dragging outside the slider and release at the
   desired position. Pending text commits before the opacity change.
@@ -104,6 +106,28 @@ one image pixel, or ten with Shift, regardless of zoom. Releasing an arrow commi
 one undo step for that key sequence. Hold Shift while dragging **Rotate** to snap
 to 15-degree angles.
 
+Each Layers row has **Lock Alpha** and **Lock Position** buttons beside its
+visibility button. Accent-colored closed locks are on; dimmed open locks are off. Like the
+visibility control, these icons have no persistent button background. Hover for
+their name and effect. These controls affect that row's layer without changing the
+active layer. The Layer menu toggles locks for the active layer.
+Alpha lock preserves each pixel's transparency through painting,
+clone strokes, fills, gradients, adjustments, and filters. Fully transparent
+pixels keep their stored colors. Eraser, Cut, and Clear cannot remove pixels
+while alpha is locked. Rasterize editable text before enabling alpha lock.
+
+Position lock blocks manual layer moves, numeric positions, arrow nudges,
+alignment, scaling, rotation, flipping, perspective, and layer fit/crop commands.
+Image-wide crop, scale, rotation, flip, and canvas resizing still transform the
+document together. Text remains editable at its original anchor; its bitmap can
+resize as text or styles change. Opacity, visibility, layer order, and deletion
+remain available. Unlock participating layers before Merge Down. Locks undo/redo
+and are retained when a layer is duplicated.
+
+Save locked layers in **`.lime`** projects. Lock-bearing projects use format
+version 8 and require this build or newer. Export still makes flattened raster
+copies; ordinary raster Save cannot discard the lock settings.
+
 **Clone Stamp** starts with Aligned enabled, preserving the source offset across
 strokes. Turn it off to start each stroke at the chosen source. Alt-click to set
 a source again after changing tabs/layers or moving/resizing the layer. Wand and
@@ -147,15 +171,22 @@ Drag an existing guide to reposition it; drag back onto a ruler or outside the
 canvas workspace to remove it. Escape cancels the drag. Guide edits undo/redo,
 and guides follow image crop, resize, scale, rotate, and flip.
 
-Move's **Snap to Grid** and **Snap to Guides** controls work independently of
+Expand Move's **Snapping** section for **Snap to Grid**, **Snap to Guides**, and
+grid spacing. It starts collapsed and remembers its open/closed state during the
+session. The header shows which snapping options are on; folding it keeps those
+settings. Compact Move options leave the remaining sidebar space for Layers.
+Both sidebars start at the same width, with the toolbox's resize grip inside its
+edge; the toolbox remains resizable.
+The snapping controls work independently of
 overlay visibility. They snap layer edges and centers within a small screen
 distance. Hold Control while dragging to bypass snapping and guide grabs.
 Typed positions and arrow nudges remain exact. Grid spacing is in image pixels;
 dots thin out at low zoom while snapping keeps the chosen spacing.
 
 Guides are stored in **`.lime`** projects, never flattened exports. A project
-containing guides uses format version 7 and needs this build or newer. Existing
-version 6 projects still open; projects without guides retain version 6 on save.
+containing guides uses format version 7 when its layers are unlocked. Existing
+version 6/7 projects still open; unlocked projects without guides retain version
+6 on save. Locked projects use version 8, with or without guides.
 
 In **Text**, drag over characters, Shift-click, or use Shift+arrows to select a
 range. Copy/Cut use that range; typing and Paste replace it. Selection highlights

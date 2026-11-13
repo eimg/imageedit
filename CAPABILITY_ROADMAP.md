@@ -109,8 +109,8 @@ preserve source and layout; failed commits retain recoverable drafts.
 
 ## Layers and compositing
 
-- [ ] Alpha lock for safe recoloring.
-- [ ] Position lock for protected backgrounds.
+- [x] Alpha lock for safe recoloring.
+- [x] Position lock for protected backgrounds.
 - [ ] A small useful blend-mode set: Multiply, Screen, Overlay.
 - [ ] Layer masks as a separately scoped architectural milestone.
 
@@ -537,7 +537,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 8 — PDF import cancellation, snapshots, and destination preflight
 
-Implemented, uncommitted:
+Committed as `9df5b6f`:
 
 - PDF inspection retains immutable, shared source bytes. Rendering parses that
   same snapshot, so replacing or removing the original after inspection cannot
@@ -592,3 +592,87 @@ Manual interaction testing stays with the maintainer. Useful checks:
   placement, page order/names, active layer, and retained selection. Cancel late
   during preparation and confirm pixels, layer stack, history, and saved state
   stay unchanged. A complex current step can delay completion of cancellation.
+
+## Pass 9 — alpha and position locks
+
+Implemented; committed at the start of Pass 10:
+
+- Layers have independent Lock Alpha and Lock Position icon toggles beside each
+  row's visibility button, with closed/open lock states and explanatory
+  tooltips, plus matching Layer menu actions. Row controls preserve the active
+  layer and validate the clicked tab/layer after numeric or text commits.
+  Editable text rows disable alpha lock until rasterized.
+  Active lock icons use the accent color, retained on hover; inactive open locks
+  are dimmed. They retain visibility's hover treatment without persistent
+  backgrounds or size changes. Position lock uses a plain padlock, without move arrows.
+  Toggling a lock is one undoable image
+  change with no pixel, composite, or thumbnail rebuild. Duplicate retains locks;
+  newly created, imported, and shadow layers start unlocked.
+- Move's Snapping section folds independently of its settings, starts collapsed,
+  remembers the session's fold state, and displays enabled modes in its header.
+  Tool options now take only their natural height (capped at half the inspector),
+  scrolling independently from Layers/Paths in the remaining space.
+  The inspector is widened from 232 to 272 px
+  for the visible per-row controls; the old active-layer lock checkboxes are
+  removed. The resizable toolbox also starts at 272 px for matching sidebar widths;
+  its explicit outer width contains the resize grip as an overlay along the
+  inside edge, so the grip cannot add layout width.
+- Alpha lock preserves each original pixel's alpha during paint, clone, outline
+  strokes, connected/selection fills, gradients, adjustments, and filters. Paint
+  and fills mix color with source-atop semantics, including opacity, flow, source
+  color alpha, and soft selection coverage. Transparent pixels retain hidden RGB.
+  Eraser, Cut, and Clear cannot remove locked pixels. Obvious transparent fill
+  no-ops skip unnecessary work. Stroke previews and commits reject stale policies.
+- Blur and Sharpen retain weighted color before rounding a faint blurred alpha,
+  then blend against the original mask. This avoids darkening a 1/255-alpha edge
+  just because the intermediate filtered alpha rounds to zero. Filter and
+  gradient previews use the same alpha policy as the committed result.
+- Position lock blocks pointer moves, numeric moves, nudges, alignment, scale,
+  quarter/free rotation, flips, perspective, and layer fit/content crop. UI entry
+  points avoid creating transform previews, and model mutations enforce the same
+  rule. Move's guide operations remain independent of the active layer lock.
+- Image-wide crop, scale, rotate/flip, and canvas resize still carry the whole
+  document with them and retain lock metadata. Alpha lock permits intentional
+  layer geometry changes; position lock controls those. Opacity, visibility,
+  stacking, and deletion remain available. Merge Down requires both layers
+  unlocked so it cannot silently replace a protected silhouette or geometry.
+- Editable text accepts position lock and remains editable at its current layout
+  anchor, including automatic bitmap resizing for content/style changes. Alpha
+  lock requires rasterization. Both the model and project codec reject alpha-
+  locked editable text; the panel/menu keep that toggle unavailable until then.
+- Projects with any lock use format version 8. Optional per-layer lock metadata
+  defaults to unlocked, and unsupported legacy-version lock combinations are
+  rejected. The reader continues to support versions 6/7; unlocked projects still
+  write version 6, or version 7 when guides are present. Ordinary raster Save
+  cannot discard lock metadata; flattened Export remains available.
+- Added `fixtures/projects/v8-layer-locks.lime`, preserving the existing v6
+  golden fixture and its legacy extension. No toolbox tool, dependency, package
+  version, or release publishing change. Blend modes and layer masks remain later.
+
+Automatic validation: formatting, Clippy with warnings denied, all 310 tests,
+and both release benchmarks pass. Eight new regression tests cover locked paint/
+clone/retouch, fill/gradient/filter/outline coverage, faint alpha, manual versus
+image-wide geometry, text anchors, lock-bearing/legacy project round trips and
+malformed metadata, preview/commit agreement, and undo with shared pixel buffers.
+Existing native-menu and raster tests were updated for the added actions/policy.
+The macOS bundle was rebuilt and its signature verified. No interactive or
+visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Fold/unfold Move snapping, switch tools, and confirm the header/settings and
+  Layers space remain correct. Toggle either lock on an inactive row and confirm
+  the active layer stays selected. Hover the buttons, click without triggering
+  rename/reordering, and toggle a lock immediately after typing a Move position.
+- Lock alpha on a layer with soft transparency; paint, clone, fill, gradient,
+  blur/sharpen, and stroke outlines. Compare previews with Apply/release, and try
+  Eraser, Cut, Clear, fully transparent areas, and low opacity/flow.
+- Lock position and try drags, X/Y, arrow nudges, alignment, Scale dimensions and
+  handles, Rotate/Flip/Perspective, layer fit/crop, and the native menu entries.
+  Confirm Move can still place/reposition guides. Unlock and retry normally.
+- Edit position-locked text and change its styles; its anchor should stay put.
+  Rasterize it, then enable alpha lock. Duplicate locked layers and check locks;
+  confirm Merge Down becomes available after unlocking both participants.
+- Toggle locks, undo/redo, save/reopen `.lime`, and export a raster copy. Undo to
+  the saved state should clear the dirty marker. Try Save on an imported PNG
+  after locking it; the app should preserve the settings through project Save.

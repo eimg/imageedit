@@ -368,6 +368,7 @@ pub struct Workspace {
     opacity_drag: Option<layers::OpacityDrag>,
     toolbox_width: f32,
     toolbox_folded: bool,
+    move_snapping_expanded: bool,
     toolbox_drag: Option<(f32, f32)>,
 }
 
@@ -623,6 +624,7 @@ impl Workspace {
             opacity_drag: None,
             toolbox_width: view::TOOLBOX_DEFAULT_WIDTH,
             toolbox_folded: false,
+            move_snapping_expanded: false,
             toolbox_drag: None,
         }
     }

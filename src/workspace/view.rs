@@ -8,8 +8,8 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, ContentMask, Context, Corners, CursorStyle, Div,
     ExternalPaths, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Transformation,
-    TransformationMatrix, Window, canvas, div, fill, percentage, point, prelude::*, px, rgb, rgba,
-    size, svg,
+    TransformationMatrix, Window, canvas, div, fill, percentage, point, prelude::*, px, relative,
+    rgb, rgba, size, svg,
 };
 
 use crate::commands::{
@@ -38,7 +38,9 @@ pub(super) use crate::theme::{
     SELECTED, TEXT,
 };
 const HEADER_HEIGHT: f32 = 36.;
-pub(super) const TOOLBOX_DEFAULT_WIDTH: f32 = 220.;
+const INSPECTOR_WIDTH: f32 = 272.;
+const TOOLBOX_RESIZE_HANDLE_WIDTH: f32 = 6.;
+pub(super) const TOOLBOX_DEFAULT_WIDTH: f32 = INSPECTOR_WIDTH;
 const TOOLBOX_MIN_WIDTH: f32 = 140.;
 const TOOLBOX_MAX_WIDTH: f32 = 400.;
 const TOOLBOX_FOLDED_WIDTH: f32 = 56.;
@@ -548,12 +550,15 @@ impl Workspace {
                 }))
         };
         div()
+            .relative()
+            .w(px(width))
             .flex_shrink_0()
             .flex()
             .child(
                 div()
                     .id("toolbox")
-                    .w(px(width))
+                    .w_full()
+                    .min_w_0()
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
@@ -668,7 +673,10 @@ impl Workspace {
         let dragging = self.toolbox_drag.is_some();
         div()
             .id("toolbox-resize")
-            .w(px(6.))
+            .absolute()
+            .top_0()
+            .right_0()
+            .w(px(TOOLBOX_RESIZE_HANDLE_WIDTH))
             .h_full()
             .flex_shrink_0()
             .cursor(CursorStyle::ResizeLeftRight)
@@ -1542,7 +1550,7 @@ impl Workspace {
     fn inspector(&self, cx: &Context<Self>) -> Div {
         let tool = self.tool.info();
         div()
-            .w(px(232.))
+            .w(px(INSPECTOR_WIDTH))
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -1553,7 +1561,8 @@ impl Workspace {
             .child(
                 div()
                     .id("inspector-scroll")
-                    .flex_1()
+                    .flex_shrink_0()
+                    .max_h(relative(0.5))
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(
@@ -1738,10 +1747,8 @@ impl Workspace {
                                     ]))
                             })
                             .when(self.tool == Tool::Move, |panel| {
-                                let enabled = self.geometry_enabled();
+                                let enabled = self.geometry_enabled() && !self.active_position_locked();
                                 let offset = self.move_offset();
-                                let snap_grid = self.snap_grid;
-                                let snap_guides = self.snap_guides;
                                 panel
                                     .when_some(offset, |panel, _| {
                                         panel
@@ -1755,10 +1762,7 @@ impl Workspace {
                                             )
                                             .child(section_label("ALIGN"))
                                             .child(align_controls(enabled, cx))
-                                            .child(section_label("SNAPPING"))
-                                            .child(toggle_button("Snap to Grid", snap_grid).on_click(cx.listener(move |this, _, _, cx| { this.snap_grid = !snap_grid; cx.notify(); })))
-                                            .child(toggle_button("Snap to Guides", snap_guides).on_click(cx.listener(move |this, _, _, cx| { this.snap_guides = !snap_guides; cx.notify(); })))
-                                            .child(self.numeric_chip(NumericField::GridSpacing, Some("Grid spacing (px)"), cx))
+                                            .child(self.move_snapping_options(cx))
                                     })
                             })
                             .when(self.tool == Tool::ScaleLayer, |panel| {
@@ -1916,9 +1920,79 @@ impl Workspace {
                                 },
                             ),
 
-                    )
-                    .child(self.inspector_tabs(cx)),
+                    ),
             )
+            .child(self.inspector_tabs(cx))
+    }
+
+    fn move_snapping_options(&self, cx: &Context<Self>) -> Div {
+        let expanded = self.move_snapping_expanded;
+        let status = match (self.snap_grid, self.snap_guides) {
+            (false, false) => "Off",
+            (true, false) => "Grid",
+            (false, true) => "Guides",
+            (true, true) => "Grid + guides",
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .id("move-snapping-disclosure")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(24.))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(MUTED))
+                    .hover(|row| row.bg(rgb(HOVER)))
+                    .tooltip(tooltip(if expanded {
+                        "Collapse snapping options"
+                    } else {
+                        "Expand snapping options"
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.move_snapping_expanded = !this.move_snapping_expanded;
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        if expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                    ))
+                    .child(section_label("SNAPPING"))
+                    .child(div().flex_1())
+                    .child(div().text_size(px(11.)).child(status)),
+            )
+            .when(expanded, |panel| {
+                panel
+                    .child(
+                        toggle_button("Snap to Grid", self.snap_grid).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.snap_grid = !this.snap_grid;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        toggle_button("Snap to Guides", self.snap_guides).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.snap_guides = !this.snap_guides;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(self.numeric_chip(
+                        NumericField::GridSpacing,
+                        Some("Grid spacing (px)"),
+                        cx,
+                    ))
+            })
     }
 
     fn inspector_tabs(&self, cx: &Context<Self>) -> Div {

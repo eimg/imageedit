@@ -24,8 +24,8 @@ pub(crate) use composite::source_over;
 pub(crate) use content::gradient_preview;
 pub use content::{
     BlendMode, CropRect, DocumentContent, FillMode, FillRequest, IMPORTED_LAYER_NAME, ImageLayer,
-    InsertStop, LayerGeometry, LayerId, MAX_LAYER_NAME_CHARS, MAX_LAYERS, MAX_STACK_BYTES,
-    RasterLayer,
+    InsertStop, LayerGeometry, LayerId, LayerLocks, MAX_LAYER_NAME_CHARS, MAX_LAYERS,
+    MAX_STACK_BYTES, RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
