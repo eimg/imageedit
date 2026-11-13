@@ -167,8 +167,8 @@ overwritten by Save.
 - [x] Insert anchors on segments without changing the curve.
 - [x] Select and move multiple anchors together.
 - [x] Editable intermediate gradient stops and Reverse.
-- [x] Reusable session gradient presets.
-- [ ] Persist a named gradient library across app launches.
+- [x] Reusable gradient presets.
+- [x] Persist a named gradient library across app launches.
 
 ## Document foundations
 
@@ -1212,7 +1212,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 19 — precise rotation pivot editing
 
-Implemented; committed at the start of Pass 20:
+Implemented; committed as `4e145ff` at the start of Pass 20:
 
 - Rotate now exposes a compact nine-anchor Pivot selector, signed canvas X/Y
   fields with tenths precision, and a contrast-rimmed circular crosshair. Presets
@@ -1262,3 +1262,66 @@ Manual interaction testing stays with the maintainer. Useful checks:
   placement limits, then restore a valid one and apply.
 - Cancel a preview, switch layers/tabs/tools, and try locked-position or editable
   text layers. Confirm no pivot or late preview can affect a different target.
+
+
+## Pass 20 — persistent named gradient library
+
+Implemented; committed at the start of Pass 21:
+
+- Replaced six numbered session slots with a personal library of up to 32 named
+  gradients. Save… opens the existing text-field dialog; Rename and Delete act
+  on the selected stable ID. Names trim surrounding whitespace, allow Unicode,
+  reject controls, and cap at 64 characters; lowercase-equivalent names collide.
+  Matching colors may be saved under different meaningful names.
+- Entries preserve literal RGBA stops (including hidden RGB at zero alpha),
+  Linear/Radial shape, and Reverse. Loading enters Custom mode while keeping
+  swatches and canvas endpoints; deleting leaves the current palette available.
+  Naming/loading first finishes inline stop edits so empty/restored text cannot
+  capture stale values or alter a newly loaded palette afterward.
+- Saved gradients is folded by default, shows the selected name or entry count,
+  and expands to a bounded scrollable list. Long names truncate with full-name
+  tooltips. Storage progress and a compact error/Reload action stay in Tool
+  Options; actual write failures also report through the workspace error UI.
+- A bounded, versioned JSON file lives in macOS Application Support/com.eimg.lime
+  or Windows LOCALAPPDATA/Lime. The library reloads with a new workspace/app;
+  loading does not automatically select or apply a gradient. Its data is not
+  project metadata and never changes image history or saved revision.
+- Initial reading, validation, and persistence run off the UI thread. Mutations
+  are serialized, remain candidates until successfully written, and then publish
+  to the UI. Same-directory temporary replacement syncs file data before rename;
+  OS locks serialize Lime writers, and original-byte checks reject conflicting
+  snapshots. Corrupt, oversized, unknown-version, and changed files remain
+  protected. Failures preserve accepted in-memory entries and require Reload.
+- Close/Quit waits for an active library write before normal unsaved-image checks;
+  failed persistence cancels that deferred close and reports the failure. File
+  reads are capped at 256 KiB. Decoding validates unique monotonic IDs, names,
+  shapes, color bytes, stop count, endpoints, and strict interior ordering.
+- Updated help, README, and AGENTS. No new toolbox tool, dependency, project
+  format, package version, publishing, installer, or icon changes.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 387 tests
+pass (the two existing performance benchmarks remain ignored for this storage/UI
+pass). Six new regression tests cover exact named RGBA/shape/direction round
+trips and stable IDs, name/capacity rejection without mutation, malformed/future
+wire validation, real filesystem save/reopen/rename/delete, stale and locked
+writers, protected corrupt/oversized files, I/O failures, and temporary-file
+cleanup. Existing gradient sampling, preview/Apply, selection, and history tests
+remain passing. `dist/Lime.app` is rebuilt and its signature verified.
+No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Save named Linear/Radial/reversed palettes with transparent and intermediate
+  stops; restart the app and load them. Confirm literal colors, shape, direction,
+  swatches, endpoints, and current document saved state. Renames/deletions should
+  survive another restart without changing the current gradient or image undo.
+- Try duplicate names with different case/whitespace, long Unicode names, Cancel,
+  and the 32-entry limit. Expand/fold the list, scroll it, and check name tooltips
+  and Layers space. Load or Save while a stop field is partially typed/empty.
+- Exercise reload after a file changed in another window, malformed or newer
+  library data, and an unwritable storage location. Failed saves must leave the
+  displayed accepted library intact and report the failure without replacing
+  the protected file. Use a disposable test profile for malformed-file checks.
+- Save a library change and immediately close/quit, including with unsaved image
+  work. The write should finish before the normal close decision. Changing tools
+  or colors during a write must not replace the active gradient with old data.

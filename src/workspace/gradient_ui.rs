@@ -6,17 +6,43 @@ use image::RgbaImage;
 use super::Workspace;
 use super::layers::{MovePaint, with_layer_opacity};
 use crate::document::{self, DocumentContent, FillMode, LayerId};
+use crate::gradient::library::{self, Library, PresetValue};
 use crate::paint::{Gradient, GradientBlend, GradientShape};
 use crate::selection::Selection;
 use crate::transform::ColorMode;
 
-pub(super) const MAX_PRESETS: usize = 6;
+pub(super) struct PresetStorage {
+    pub loading: bool,
+    pub saving: bool,
+    pub error: Option<String>,
+    pub exit_after_save: Option<bool>,
+    path: Option<std::path::PathBuf>,
+    original: Option<Vec<u8>>,
+    blocked: bool,
+}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct GradientPreset {
-    ramp: crate::gradient::ColorRamp,
-    shape: GradientShape,
-    reverse: bool,
+impl Default for PresetStorage {
+    fn default() -> Self {
+        Self {
+            loading: false,
+            saving: false,
+            error: None,
+            exit_after_save: None,
+            path: None,
+            original: None,
+            blocked: true,
+        }
+    }
+}
+
+fn library_error(error: anyhow::Error) -> String {
+    format!("{error:#}").chars().take(512).collect()
+}
+
+impl PresetStorage {
+    pub(super) fn ready(&self) -> bool {
+        !self.loading && !self.saving && !self.blocked && self.path.is_some()
+    }
 }
 
 pub(super) struct GradientFrame {
@@ -226,62 +252,157 @@ impl Workspace {
         }
     }
 
-    pub(super) fn save_gradient_preset(&mut self, cx: &mut Context<Self>) {
-        let ramp = if self.gradient_use_custom {
-            self.gradient_custom.unwrap_or_else(|| self.dynamic_ramp())
-        } else {
-            self.dynamic_ramp()
-        };
-        let preset = GradientPreset {
-            ramp,
+    pub(super) fn current_gradient_preset(&self) -> PresetValue {
+        PresetValue {
+            ramp: if self.gradient_use_custom {
+                self.gradient_custom.unwrap_or_else(|| self.dynamic_ramp())
+            } else {
+                self.dynamic_ramp()
+            },
             shape: self.gradient_shape,
             reverse: self.gradient_reverse,
-        };
-        if let Some(index) = self
-            .gradient_presets
-            .iter()
-            .position(|saved| *saved == preset)
-        {
-            self.gradient_selected_preset = Some(index);
+        }
+    }
+
+    pub(super) fn load_gradient_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gradient_store.loading || self.gradient_store.saving {
+            return;
+        }
+        self.gradient_store.path = library::default_path();
+        let Some(path) = self.gradient_store.path.clone() else {
+            self.gradient_store.blocked = true;
+            self.gradient_store.error =
+                Some("The gradient library location is unavailable.".into());
             cx.notify();
             return;
-        }
-        if self.gradient_presets.len() >= MAX_PRESETS {
-            return;
-        }
-        self.gradient_presets.push(preset);
-        self.gradient_selected_preset = Some(self.gradient_presets.len() - 1);
+        };
+        self.gradient_store.loading = true;
+        self.gradient_store.blocked = true;
+        self.gradient_store.error = None;
+        let job = cx
+            .background_executor()
+            .spawn(async move { library::load(&path) });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = job.await;
+            let _ = workspace.update_in(cx, |this, _, cx| {
+                this.gradient_store.loading = false;
+                match result {
+                    Ok((library, bytes)) => {
+                        this.gradient_library = library;
+                        this.gradient_store.original = bytes;
+                        this.gradient_store.blocked = false;
+                        this.gradient_selected_preset = None;
+                        this.gradient_presets_expanded = false;
+                    }
+                    Err(error) => this.gradient_store.error = Some(library_error(error)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
+    }
+
+    pub(super) fn write_gradient_library(
+        &mut self,
+        candidate: Library,
+        selected: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.gradient_store.ready() {
+            return false;
+        }
+        if candidate == self.gradient_library {
+            return true;
+        }
+        let Some(path) = self.gradient_store.path.clone() else {
+            return false;
+        };
+        let original = self.gradient_store.original.clone();
+        let saved = candidate.clone();
+        self.gradient_store.saving = true;
+        self.gradient_store.error = None;
+        let job = cx
+            .background_executor()
+            .spawn(async move { library::save(&path, original.as_deref(), &saved) });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = job.await;
+            let _ = workspace.update_in(cx, |this, window, cx| {
+                this.gradient_store.saving = false;
+                let requested_exit = this.gradient_store.exit_after_save.take();
+                match result {
+                    Ok(bytes) => {
+                        this.gradient_library = candidate;
+                        this.gradient_store.original = Some(bytes);
+                        this.gradient_selected_preset = selected.filter(|id| {
+                            this.gradient_library.get(*id).is_some_and(|preset| {
+                                preset.value == this.current_gradient_preset()
+                            })
+                        });
+                        this.gradient_presets_expanded = false;
+                        if let Some(quit) = requested_exit
+                            && this.request_exit(quit, window, cx)
+                        {
+                            if quit {
+                                cx.quit();
+                            } else {
+                                window.remove_window();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = library_error(error);
+                        this.errors
+                            .push(format!("Could not save gradients: {message}"));
+                        this.gradient_store.error = Some(message);
+                        this.gradient_store.blocked = true;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+        true
     }
 
     pub(super) fn load_gradient_preset(
         &mut self,
-        index: usize,
+        id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(preset) = self.gradient_presets.get(index).copied() else {
+        if self.gradient_store.loading || self.gradient_store.saving {
+            return;
+        }
+        self.commit_numeric_edit(window, cx);
+        let Some(value) = self.gradient_library.get(id).map(|preset| preset.value) else {
             return;
         };
-        self.gradient_custom = Some(preset.ramp);
+        self.gradient_custom = Some(value.ramp);
         self.gradient_use_custom = true;
-        self.gradient_shape = preset.shape;
-        self.gradient_reverse = preset.reverse;
+        self.gradient_shape = value.shape;
+        self.gradient_reverse = value.reverse;
         self.gradient_selected_stop = 0;
         self.gradient_settings_changed(window, cx);
-        self.gradient_selected_preset = Some(index);
+        self.gradient_selected_preset = Some(id);
+        self.gradient_presets_expanded = false;
     }
 
-    pub(super) fn delete_gradient_preset(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .gradient_selected_preset
-            .take()
-            .filter(|&index| index < self.gradient_presets.len())
-        {
-            self.gradient_presets.remove(index);
-            cx.notify();
+    pub(super) fn delete_gradient_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.gradient_store.ready() {
+            return;
+        }
+        let Some(id) = self.gradient_selected_preset else {
+            return;
+        };
+        let mut candidate = self.gradient_library.clone();
+        if candidate.remove(id) {
+            self.write_gradient_library(candidate, None, window, cx);
         }
     }
+
     pub(super) fn begin_gradient(
         &mut self,
         position: Point<Pixels>,

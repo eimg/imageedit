@@ -62,6 +62,11 @@ enum FormKind {
         id: LayerId,
         name: Field,
     },
+    GradientPreset {
+        id: Option<u64>,
+        value: crate::gradient::library::PresetValue,
+        name: Field,
+    },
     LayerOpacity {
         id: LayerId,
         percent: Field,
@@ -588,6 +593,45 @@ impl Workspace {
         self.show_form(
             FormKind::RenameLayer {
                 id,
+                name: Field::new(name),
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn gradient_preset_form(
+        &mut self,
+        rename: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_numeric_edit(window, cx);
+        if !self.gradient_store.ready() {
+            return;
+        }
+        let (id, value, name) = if rename {
+            let Some(preset) = self
+                .gradient_selected_preset
+                .and_then(|id| self.gradient_library.get(id))
+            else {
+                return;
+            };
+            (Some(preset.id), preset.value, preset.name.clone())
+        } else {
+            if self.gradient_library.presets().len() >= crate::gradient::library::MAX_PRESETS {
+                return;
+            }
+            (
+                None,
+                self.current_gradient_preset(),
+                self.gradient_library.suggested_name(),
+            )
+        };
+        self.show_form(
+            FormKind::GradientPreset {
+                id,
+                value,
                 name: Field::new(name),
             },
             window,
@@ -1134,6 +1178,31 @@ impl Workspace {
                 self.dismiss_form(window, cx);
                 self.reshape_selection(edit, radius, window, cx);
             }
+            FormKind::GradientPreset { id, value, name } => {
+                let mut candidate = self.gradient_library.clone();
+                let result = if let Some(id) = *id {
+                    candidate.rename(id, &name.text).map(|_| id)
+                } else {
+                    candidate.insert(&name.text, *value)
+                };
+                let selected = match result {
+                    Ok(id) => id,
+                    Err(error) => {
+                        form.error = Some(error.to_string());
+                        cx.notify();
+                        return;
+                    }
+                };
+                if self.write_gradient_library(candidate, Some(selected), window, cx) {
+                    self.dismiss_form(window, cx);
+                } else if let Some(form) = self.form.as_mut() {
+                    form.error = Some(
+                        "The gradient library is busy or unavailable. Reload it and try again."
+                            .into(),
+                    );
+                    cx.notify();
+                }
+            }
             FormKind::LayerOpacity { id, percent } => {
                 let Some(percent) = percent
                     .text
@@ -1252,7 +1321,9 @@ impl Workspace {
                     FormKind::JpegQuality { quality } => {
                         quality.handle_key(event, FieldMode::Digits { max: 3 }, cx)
                     }
-                    FormKind::NewLayer { name, .. } | FormKind::RenameLayer { name, .. } => {
+                    FormKind::NewLayer { name, .. }
+                    | FormKind::RenameLayer { name, .. }
+                    | FormKind::GradientPreset { name, .. } => {
                         name.handle_key(event, FieldMode::Name, cx)
                     }
                     FormKind::LayerOpacity { percent, .. } => {
@@ -1886,6 +1957,11 @@ impl Workspace {
                         .gap_1()
                         .child("Name")
                         .child(name.view(true)),
+                ),
+                FormKind::GradientPreset { id, name, .. } => (
+                    if id.is_some() { "Rename Gradient" } else { "Save Gradient" },
+                    if id.is_some() { "Rename" } else { "Save" },
+                    div().flex().flex_col().gap_1().child("Name").child(name.view(true)),
                 ),
                 FormKind::LayerOpacity { percent, .. } => (
                     "Layer Opacity",

@@ -418,6 +418,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.gradient_store.saving {
+            self.gradient_store.exit_after_save =
+                Some(quit || self.gradient_store.exit_after_save.unwrap_or(false));
+            return false;
+        }
         if self.dialog_open
             || self.creating
             || self.pdf_job.is_some()

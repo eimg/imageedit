@@ -177,10 +177,18 @@ the color direction without moving linear/radial geometry. Custom positions use
 editor exposes RGB picking, alpha and position percentages, and Add/Remove Stop;
 adding splits the largest gap with its current interpolated color. Colors
 interpolate in premultiplied alpha so transparent hidden RGB cannot tint edges.
-Six bounded, deduplicated session presets capture literal colors, shape, and
-Reverse; loading preserves canvas endpoints and initializes Custom mode. They
-are not project data or a persistent gradient library. Settings/preset edits
-refresh the coalesced preview without image history. Apply uses the same sampler,
+A personal persistent library holds up to 32 named gradients, capturing literal
+RGBA stops, shape, and Reverse. Names are trimmed, limited to 64 characters,
+control-free, and unique by lowercase comparison. Stable monotonic IDs identify
+entries through rename/delete and callbacks. Loading initializes Custom mode
+without changing swatches or canvas endpoints. The library is folded by default;
+its expanded list scrolls within 156 screen points. Save/Rename use the shared
+name dialog. All library mutations publish a candidate only after the background
+write succeeds. Failed writes keep the existing in-memory library and report an error;
+Reload re-reads disk before further mutations. Library load/save never creates
+image history or changes project saved state. Loading or naming a preset finishes
+inline stop edits before capturing/replacing palette values. Settings and preset
+loads refresh the coalesced preview without image history. Apply uses the same sampler,
 selection coverage, color-mode conversion, and alpha-lock policy. Color picker
 targets carry a palette revision and stop index; stale targets cannot recolor
 another palette, and RGB changes preserve stop alpha. Percentage editing stores
@@ -386,8 +394,20 @@ document is a single plain layer without paths, guides, or editable text.
   establishes alignment only after the stroke result publishes successfully.
   `src/gradient.rs` owns bounded color ramps, ordered stop edits, and premultiplied
   interpolation. `src/workspace/gradient_ui.rs` shares one specification between
-  the coalesced preview and Apply, owns session palettes/presets, and preserves
-  geometry when loading presets. Apply/Cancel remain above the stop editor.
+  the coalesced preview and Apply, owns the session palette and persistent named
+  library UI, and preserves geometry when loading presets. Apply/Cancel remain above the stop editor.
+- `src/gradient/library.rs` validates the version 1 JSON gradient library,
+  including IDs, unique names, at most 32 entries, 2–8 strictly ordered stops,
+  and a 256 KiB file bound. `ColorRamp::from_stops` validates reconstruction.
+  Files live under macOS Application Support/com.eimg.lime or Windows
+  LOCALAPPDATA/Lime, separate from projects. Initial loading and writes use the
+  background executor. Same-directory temporary files are synced then atomically
+  persisted; an OS advisory lock serializes Lime writers, and expected-byte
+  checks reject stale snapshots. Corrupt or newer files are not overwritten.
+  Workspace preset mutations are serialized and acknowledged after persistence;
+  store failures block mutations until Reload, while existing gradients remain
+  usable. Close/Quit defers while a library write is active, resumes the normal
+  close checks after success, and stays open on failure. No idle polling is used.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
   the live GPU-scaled preview, and the commit that resamples the layer. It prepares
   the preview in the background and rejects results after release or cancellation.

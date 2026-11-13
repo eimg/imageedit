@@ -2056,53 +2056,157 @@ impl Workspace {
                         }),
                 ]));
         }
-        let can_save = self.gradient_presets.len() < super::gradient_ui::MAX_PRESETS;
+        let can_save = self.gradient_store.ready()
+            && self.gradient_library.presets().len() < crate::gradient::library::MAX_PRESETS;
+        let selected = self
+            .gradient_selected_preset
+            .and_then(|id| self.gradient_library.get(id));
+        let can_edit = self.gradient_store.ready() && selected.is_some();
+        let expanded = self.gradient_presets_expanded;
+        let label = selected.map_or_else(
+            || {
+                format!(
+                    "Saved gradients ({})",
+                    self.gradient_library.presets().len()
+                )
+            },
+            |preset| preset.name.clone(),
+        );
         panel
-            .child(section_label("SESSION PRESETS"))
-            .when(!self.gradient_presets.is_empty(), |panel| {
+            .child(
+                div()
+                    .id("gradient-library-disclosure")
+                    .h(px(26.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(|row| row.bg(rgb(HOVER)))
+                    .tooltip(tooltip("Show or hide the saved gradient library"))
+                    .child(icon(
+                        if expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.gradient_presets_expanded = !this.gradient_presets_expanded;
+                        cx.notify();
+                    })),
+            )
+            .when(expanded, |panel| {
                 panel.child(
                     div()
+                        .id("gradient-library-list")
+                        .max_h(px(156.))
+                        .overflow_y_scroll()
                         .flex()
+                        .flex_col()
                         .gap_1()
-                        .children((0..self.gradient_presets.len()).map(|index| {
+                        .children(self.gradient_library.presets().iter().map(|preset| {
+                            let id = preset.id;
                             div()
-                                .id(("gradient-preset", index))
-                                .flex_1()
+                                .id(("gradient-preset", id as usize))
                                 .h(px(26.))
+                                .flex_shrink_0()
                                 .flex()
                                 .items_center()
-                                .justify_center()
+                                .px_2()
                                 .rounded_sm()
-                                .bg(rgb(if self.gradient_selected_preset == Some(index) {
+                                .bg(rgb(if self.gradient_selected_preset == Some(id) {
                                     SELECTED
                                 } else {
                                     CANVAS
                                 }))
+                                .text_size(px(12.))
                                 .cursor_pointer()
-                                .child((index + 1).to_string())
-                                .tooltip(tooltip(
-                                    "Load saved gradient colors, shape, and direction",
-                                ))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.load_gradient_preset(index, window, cx)
-                                }))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .child(preset.name.clone()),
+                                )
+                                .tooltip(tooltip(preset.name.clone()))
+                                .when(
+                                    !self.gradient_store.loading && !self.gradient_store.saving,
+                                    |row| {
+                                        row.on_click(cx.listener(move |this, _, window, cx| {
+                                            this.load_gradient_preset(id, window, cx)
+                                        }))
+                                    },
+                                )
                         })),
                 )
             })
+            .when(
+                self.gradient_store.loading || self.gradient_store.saving,
+                |panel| {
+                    panel.child(div().text_xs().text_color(rgb(MUTED)).child(
+                        if self.gradient_store.saving {
+                            "Saving gradients…"
+                        } else {
+                            "Loading gradients…"
+                        },
+                    ))
+                },
+            )
+            .when_some(self.gradient_store.error.clone(), |panel, error| {
+                panel
+                    .child(
+                        div()
+                            .id("gradient-library-error")
+                            .text_xs()
+                            .text_color(rgb(0xffd699))
+                            .child("Saved gradients unavailable")
+                            .tooltip(tooltip(error)),
+                    )
+                    .child(option_action("Reload Library", false).when(
+                        !self.gradient_store.loading && !self.gradient_store.saving,
+                        |button| {
+                            button.on_click(cx.listener(|this, _, window, cx| {
+                                this.load_gradient_library(window, cx)
+                            }))
+                        },
+                    ))
+            })
             .child(action_row([
-                option_action("Save Preset", false)
+                option_action("Save…", false)
                     .when(can_save, |button| {
-                        button.on_click(cx.listener(|this, _, _, cx| this.save_gradient_preset(cx)))
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.gradient_preset_form(false, window, cx)
+                        }))
                     })
                     .when(!can_save, |button| {
                         button.opacity(0.45).cursor(CursorStyle::Arrow)
                     }),
-                option_action("Delete Preset", false)
-                    .when(self.gradient_selected_preset.is_some(), |button| {
-                        button
-                            .on_click(cx.listener(|this, _, _, cx| this.delete_gradient_preset(cx)))
+                option_action("Rename", false)
+                    .when(can_edit, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.gradient_preset_form(true, window, cx)
+                        }))
                     })
-                    .when(self.gradient_selected_preset.is_none(), |button| {
+                    .when(!can_edit, |button| {
+                        button.opacity(0.45).cursor(CursorStyle::Arrow)
+                    }),
+                option_action("Delete", false)
+                    .when(can_edit, |button| {
+                        button.on_click(cx.listener(|this, _, window, cx| {
+                            this.delete_gradient_preset(window, cx)
+                        }))
+                    })
+                    .when(!can_edit, |button| {
                         button.opacity(0.45).cursor(CursorStyle::Arrow)
                     }),
             ]))

@@ -1,5 +1,7 @@
 use image::Rgba;
 
+pub mod library;
+
 pub const MAX_STOPS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,22 @@ impl PartialEq for ColorRamp {
 impl Eq for ColorRamp {}
 
 impl ColorRamp {
+    pub fn from_stops(stops: &[ColorStop]) -> Option<Self> {
+        if !(2..=MAX_STOPS).contains(&stops.len())
+            || stops.first()?.position != 0
+            || stops.last()?.position != 1000
+            || stops
+                .windows(2)
+                .any(|pair| pair[0].position >= pair[1].position)
+        {
+            return None;
+        }
+        let mut ramp = Self::new(stops[0].color, stops[stops.len() - 1].color);
+        ramp.stops[..stops.len()].copy_from_slice(stops);
+        ramp.count = stops.len();
+        Some(ramp)
+    }
+
     pub fn new(start: Rgba<u8>, end: Rgba<u8>) -> Self {
         let mut stops = [ColorStop {
             position: 0,

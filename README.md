@@ -275,12 +275,22 @@ Stop** splits the largest gap using its current interpolated color. Switching
 back to a swatch mode keeps the custom palette available for later.
 Transparent stops blend without letting hidden RGB tint visible edges.
 
-**Save Preset** stores the current colors, shape, and Reverse setting in one of
-six session slots. Click a numbered slot to reuse it; its colors stay fixed even
-if the swatches change. Loading leaves the current canvas endpoints in place.
-Select a saved slot to delete it. Presets survive tool/tab changes within the
-workspace session, and are cleared when that workspace closes.
-Stop and preset edits update the gradient preview but do not edit image history;
+**Save…** names the current colors, shape, and Reverse setting in a personal
+library of up to 32 gradients. Names can contain up to 64 characters and must
+be unique ignoring case. **Saved gradients** folds away; expand it to select a
+named gradient from a scrollable list. Loading uses literal colors, including
+opacity, and leaves the swatches and current canvas endpoints in place. Rename
+or Delete manages the selected library entry; deleting keeps the current gradient
+available to paint or save again. Library entries survive app restarts.
+
+The library lives in `~/Library/Application Support/com.eimg.lime/gradients.json`
+on macOS and `%LOCALAPPDATA%\Lime\gradients.json` on Windows. Reads and writes run
+in the background, and library changes appear after a successful save. Close/Quit
+waits for an active library write before checking unsaved images. A write failure
+keeps the window open and reports the error. Unreadable, unsupported-version, or
+externally changed libraries are protected from overwrite; use **Reload Library**
+after resolving the error. Library data is separate from projects and image undo.
+Stop edits and loading a saved gradient update the preview without image history;
 Apply commits the selected area in one undo step and honors alpha lock and the
 image's color mode. Cancel leaves pixels unchanged.
 

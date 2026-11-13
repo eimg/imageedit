@@ -314,8 +314,10 @@ pub struct Workspace {
     gradient_reverse: bool,
     gradient_selected_stop: usize,
     gradient_revision: u64,
-    gradient_presets: Vec<gradient_ui::GradientPreset>,
-    gradient_selected_preset: Option<usize>,
+    gradient_library: crate::gradient::library::Library,
+    gradient_store: gradient_ui::PresetStorage,
+    gradient_presets_expanded: bool,
+    gradient_selected_preset: Option<u64>,
     clone_source: Option<paint_ui::CloneSource>,
     clone_aligned: bool,
     clone_sample_all: bool,
@@ -517,7 +519,7 @@ impl Workspace {
         })
         .detach();
 
-        Self {
+        let mut workspace = Self {
             focus,
             numeric_focus,
             numeric_edit: None,
@@ -588,7 +590,9 @@ impl Workspace {
             gradient_reverse: false,
             gradient_selected_stop: 0,
             gradient_revision: 0,
-            gradient_presets: Vec::new(),
+            gradient_library: Default::default(),
+            gradient_store: Default::default(),
+            gradient_presets_expanded: false,
             gradient_selected_preset: None,
             clone_source: None,
             clone_aligned: true,
@@ -661,7 +665,9 @@ impl Workspace {
             toolbox_folded: false,
             move_snapping_expanded: false,
             toolbox_drag: None,
-        }
+        };
+        workspace.load_gradient_library(window, cx);
+        workspace
     }
 
     fn set_color(&mut self, swatch: usize, color: u32) {
