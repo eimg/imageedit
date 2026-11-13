@@ -128,22 +128,27 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
 - [x] Match the renderer's fractional pixel rounding during DPI preflight; reject
       invalid/subpixel page dimensions and inconsistent probe data. Preserve
       existing document/page/stack budgets and convert probe/render panics to errors.
-- [ ] Add per-page progress and cancellation, including long probes/renders.
-- [ ] Preflight the destination stack budget before Open as Layers renders pages;
-      consider incremental rendering/publication to bound peak working memory.
+- [x] Add stage/per-page progress and cooperative cancellation during read,
+      inspection, rendering, and document/layer preparation; discard canceled results.
+- [ ] Interrupt an already-running parser, page render, or image-preparation
+      call; evaluate worker isolation for prompt cancellation and resource limits.
+- [x] Preflight the destination stack budget before Open as Layers renders pages.
+- [ ] Consider incremental rendering/preparation to lower peak working memory,
+      while retaining deliberate publication and undo semantics.
 - [ ] Preview page thumbnails and allow noncontiguous page selection.
 - [ ] Offer white versus transparent page background and remember import options.
 - [ ] Offer layered canvas sizing (first page versus largest selected page), with
       an indication when larger page layers extend outside the first-page canvas.
-- [ ] Detect a source PDF changed between probe and render, or retain a consistent
+- [x] Detect a source PDF changed between probe and render, or retain a consistent
       source snapshot for the import session.
 - [ ] Expand automated fixtures for CropBox/rotation, fonts, transparency, images,
       and representative malformed/encrypted documents on macOS and Windows.
 - [ ] Consider storing source/page/DPI metadata for explicit reimport later.
 
-The fixes above are part of Pass 4. Cancellation, previews, source tracking, and
-the other unchecked options are follow-up capabilities rather than claims of
-current support. Existing source PDFs are never overwritten by Save.
+The first reliability fixes are part of Pass 4; source snapshots, progress,
+cooperative cancellation, and destination preflight are part of Pass 8. The
+unchecked options remain follow-up work. Existing source PDFs are never
+overwritten by Save.
 
 ## Adjustments and filters
 
@@ -468,7 +473,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 7 — composition previews and comparison
 
-Implemented, uncommitted:
+Committed as `93d1aba`:
 
 - Adjustment and filter dialogs now preview the full canvas composition. Other
   visible layers, their order, offsets, opacity, and transparency are retained;
@@ -529,3 +534,61 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Close and reopen effect dialogs rapidly, switch documents after dismissing,
   and confirm stale previews never appear in the later dialog. Check the panel
   in a small window and leave appearance feedback for the next pass.
+
+## Pass 8 — PDF import cancellation, snapshots, and destination preflight
+
+Implemented, uncommitted:
+
+- PDF inspection retains immutable, shared source bytes. Rendering parses that
+  same snapshot, so replacing or removing the original after inspection cannot
+  change the imported pages or invalidate the inspected dimensions. Queued PDFs
+  hold only paths until their turn; they no longer retain many source snapshots.
+- A PDF progress modal reports reading, inspection, rendering each selected page,
+  and preparing new documents or destination layers. Cancel and Escape request
+  cancellation. Stage/page events drive updates without polling while idle.
+  Cancellation is checked around parsing, between 64 KiB read chunks, between
+  pages, during per-layer insertion/conversion, and around final image preparation.
+- Cancellation is cooperative. A running parser, page-render, or composite/tile
+  preparation call finishes before cancellation settles. The modal explicitly
+  shows Canceling while it waits. Interrupting those calls and bounding their
+  working resources through isolation remain unchecked follow-up work.
+- Canceled jobs discard every prepared document/layer candidate, including a
+  completed prefix. A final UI publication gate checks cancellation and job
+  identity again, covering cancellation after the worker finishes. Dropping the
+  workspace job requests cancellation. Later queued files remain available.
+- Open as Layers validates the entire selected range against destination layer
+  count, available IDs, and pixel bytes before rendering. A range that does not
+  fit stays in the options dialog with an error; it no longer renders pages only
+  to import a prefix. Budget admission shares raster-import checks and needs no
+  allocated page image to preflight a size.
+- Existing-layer preparation now builds the candidate content, composite, tiles,
+  and thumbnails within the cancellable background job. Publication validates
+  the original tab/revision/anchor and adds all selected pages in one undo step,
+  preserving selection and choosing the last imported layer. Ordinary content
+  edits and PDF insertion share preview cleanup before candidate preparation.
+- The existing document, page, DPI, and source-size limits remain. Selected page
+  rasters are still accumulated before preparation; incremental processing to
+  lower peak working memory is not implemented. No tool, dependency, project
+  format, or version change.
+
+Automatic validation: formatting, Clippy with warnings denied, all 302 tests,
+and both release benchmarks pass. Seven new regression tests cover immutable
+source snapshots, cancellation before/after rendering and preparation (including
+completed prefixes), job teardown/late-publication rejection, whole-batch size/
+layer/ID admission without allocating large images, and successful prepared-layer
+publication as one undo step. The macOS bundle was rebuilt and its signature
+verified. No interactive or visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Open a mixed PDF/raster batch and multiple PDFs. Cancel during inspection,
+  page rendering, and preparation; confirm later requests still appear and no
+  partial PDF tabs/layers are added. Try Escape and the Cancel button.
+- Change or remove the source PDF while its options dialog is open; importing
+  should still use the inspected snapshot. Reopen the path to inspect new bytes.
+- Open as Layers into a nearly full stack. Choose a range that exceeds available
+  count or memory, reduce range/DPI after the error, import, and undo/redo once.
+- Import into grayscale and partially occupied documents, and check centered
+  placement, page order/names, active layer, and retained selection. Cancel late
+  during preparation and confirm pixels, layer stack, history, and saved state
+  stay unchanged. A complex current step can delay completion of cancellation.

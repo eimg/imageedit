@@ -733,13 +733,42 @@ impl DocumentContent {
         extra_bytes: u64,
         pixels: &RgbaImage,
     ) -> Result<(), InsertStop> {
-        if self.layers.len().saturating_add(extra_layers) >= MAX_LAYERS {
+        self.room_for_size(extra_layers, extra_bytes, pixels.dimensions())
+    }
+
+    pub fn room_for_sizes(&self, sizes: &[(u32, u32)]) -> Result<(), InsertStop> {
+        let mut bytes = 0;
+        for (index, &size) in sizes.iter().enumerate() {
+            self.room_for_size(index, bytes, size)?;
+            bytes += u64::from(size.0) * u64::from(size.1) * 4;
+        }
+        Ok(())
+    }
+
+    fn room_for_size(
+        &self,
+        extra_layers: usize,
+        extra_bytes: u64,
+        size: (u32, u32),
+    ) -> Result<(), InsertStop> {
+        if self.layers.len().saturating_add(extra_layers) >= MAX_LAYERS
+            || self
+                .layers
+                .iter()
+                .map(|layer| layer.id.0)
+                .max()
+                .and_then(|id| id.checked_add(extra_layers as u64)?.checked_add(1))
+                .is_none()
+        {
             return Err(InsertStop::Full);
         }
-        let Some(bytes) = image_bytes(pixels) else {
+        let Some(bytes) = u64::from(size.0)
+            .checked_mul(u64::from(size.1))
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
             return Err(InsertStop::TooLarge);
         };
-        if bytes == 0 || bytes > MAX_IMAGE_BYTES {
+        if size.0 == 0 || size.1 == 0 || bytes > MAX_IMAGE_BYTES {
             return Err(InsertStop::TooLarge);
         }
         let used = self.stack_bytes().saturating_add(extra_bytes);
@@ -2141,6 +2170,39 @@ fn mix_fill(before: Rgba<u8>, color: Rgba<u8>, coverage: u8) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_preflight_checks_the_whole_batch_without_allocating_page_pixels() {
+        let mut content = DocumentContent::single_layer("Base".into(), RgbaImage::new(1, 1));
+        assert_eq!(content.room_for_sizes(&[(8192, 8192)]), Ok(()));
+        assert_eq!(
+            content.room_for_sizes(&[(8192, 8192), (8192, 8192)]),
+            Err(InsertStop::TooLarge)
+        );
+        assert_eq!(
+            content.room_for_sizes(&vec![(1, 1); MAX_LAYERS - 1]),
+            Ok(())
+        );
+        assert_eq!(
+            content.room_for_sizes(&vec![(1, 1); MAX_LAYERS]),
+            Err(InsertStop::Full)
+        );
+        for size in [(0, 10), (10, 0), (u32::MAX, u32::MAX), (16384, 16384)] {
+            assert_eq!(content.room_for_sizes(&[size]), Err(InsertStop::TooLarge));
+        }
+        content.layers[0].id = LayerId(u64::MAX - 1);
+        assert_eq!(content.room_for_sizes(&[(1, 1)]), Ok(()));
+        assert_eq!(
+            content.room_for_sizes(&[(1, 1), (1, 1)]),
+            Err(InsertStop::Full)
+        );
+        content.layers[0].id = LayerId(u64::MAX);
+        assert_eq!(
+            content.room_for(0, 0, &RgbaImage::new(1, 1)),
+            Err(InsertStop::Full)
+        );
+        assert_eq!(content.layers.len(), 1);
+    }
 
     #[test]
     fn antialiased_selection_coverage_is_shared_by_fill_and_clear() {

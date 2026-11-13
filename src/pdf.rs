@@ -3,13 +3,17 @@ use std::{
     io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use hayro::{
     PixmapSettings, RenderCache, RenderSettings,
     hayro_interpret::InterpreterSettings,
-    hayro_syntax::Pdf,
+    hayro_syntax::{Pdf, PdfData},
     render,
     vello_cpu::{color::palette::css::WHITE, peniko::ImageAlphaType},
 };
@@ -36,6 +40,56 @@ pub struct PdfInfo {
 }
 
 #[derive(Clone, Debug)]
+pub struct PdfSource {
+    data: PdfData,
+    pub info: PdfInfo,
+}
+
+#[derive(Clone, Default)]
+pub struct PdfControl(Arc<AtomicBool>);
+
+#[derive(Debug)]
+pub struct PdfCanceled;
+
+impl std::fmt::Display for PdfCanceled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PDF import canceled.")
+    }
+}
+impl std::error::Error for PdfCanceled {}
+
+impl PdfControl {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    pub fn canceled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+    pub fn check(&self) -> Result<()> {
+        if self.canceled() {
+            Err(PdfCanceled.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfProgress {
+    Reading,
+    Inspecting,
+    Rendering {
+        page: usize,
+        done: usize,
+        total: usize,
+    },
+    Preparing {
+        done: usize,
+        total: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct PdfOptions {
     pub path: PathBuf,
     pub first: usize,
@@ -50,19 +104,38 @@ pub fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
-pub fn read_info(path: &Path) -> Result<PdfInfo> {
-    let bytes = read_pdf(path)?;
+pub fn read_source(
+    path: &Path,
+    control: &PdfControl,
+    progress: impl Fn(PdfProgress),
+) -> Result<PdfSource> {
+    control.check()?;
+    progress(PdfProgress::Reading);
+    control.check()?;
+    let bytes = read_pdf(path, control)?;
+    let data = PdfData::from(bytes);
+    progress(PdfProgress::Inspecting);
+    control.check()?;
     catch_unwind(AssertUnwindSafe(|| {
-        let pdf = load_pdf(bytes)?;
-        info_from_pdf(&pdf)
+        let pdf = load_pdf(data.clone())?;
+        let info = info_from_pdf(&pdf, control)?;
+        control.check()?;
+        Ok(PdfSource { data, info })
     }))
     .map_err(|_| anyhow!("The PDF could not be read."))?
 }
 
-pub fn render_pages(options: &PdfOptions) -> Result<Vec<RgbaImage>> {
-    let bytes = read_pdf(&options.path)?;
-    catch_unwind(AssertUnwindSafe(|| render_bytes(bytes, options)))
-        .map_err(|_| anyhow!("The PDF could not be rendered."))?
+pub fn render_pages(
+    source: &PdfSource,
+    options: &PdfOptions,
+    control: &PdfControl,
+    progress: impl Fn(PdfProgress),
+) -> Result<Vec<RgbaImage>> {
+    control.check()?;
+    catch_unwind(AssertUnwindSafe(|| {
+        render_data(source.data.clone(), options, control, &progress)
+    }))
+    .map_err(|_| anyhow!("The PDF could not be rendered."))?
 }
 
 pub fn scaled_page_size(size: (f32, f32), dpi: u32) -> (u32, u32) {
@@ -126,7 +199,8 @@ pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32
     Ok(sizes)
 }
 
-fn read_pdf(path: &Path) -> Result<Vec<u8>> {
+fn read_pdf(path: &Path, control: &PdfControl) -> Result<Vec<u8>> {
+    control.check()?;
     let path = path.canonicalize().context("The file could not be found")?;
     ensure!(path.is_file(), "Choose a PDF file");
     let metadata = std::fs::metadata(&path).context("The file could not be opened")?;
@@ -136,11 +210,24 @@ fn read_pdf(path: &Path) -> Result<Vec<u8>> {
         MAX_PDF_BYTES / (1024 * 1024)
     );
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(&path)
+    let mut file = File::open(&path)
         .context("The file could not be opened")?
-        .take(MAX_PDF_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .context("The PDF could not be read")?;
+        .take(MAX_PDF_BYTES + 1);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        control.check()?;
+        let read = file.read(&mut chunk).context("The PDF could not be read")?;
+        if read == 0 {
+            break;
+        }
+        ensure!(
+            bytes.len() as u64 + read as u64 <= MAX_PDF_BYTES,
+            "The PDF is larger than {} MB.",
+            MAX_PDF_BYTES / (1024 * 1024)
+        );
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    control.check()?;
     ensure!(
         bytes.len() as u64 <= MAX_PDF_BYTES,
         "The PDF is larger than {} MB.",
@@ -153,7 +240,7 @@ fn read_pdf(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn load_pdf(bytes: Vec<u8>) -> Result<Pdf> {
+fn load_pdf(bytes: impl Into<PdfData>) -> Result<Pdf> {
     let pdf = catch_unwind(AssertUnwindSafe(|| Pdf::new(bytes)))
         .map_err(|_| anyhow!("The PDF could not be read."))?;
     pdf.map_err(|error| {
@@ -167,8 +254,10 @@ fn load_pdf(bytes: Vec<u8>) -> Result<Pdf> {
     })
 }
 
-fn info_from_pdf(pdf: &Pdf) -> Result<PdfInfo> {
+fn info_from_pdf(pdf: &Pdf, control: &PdfControl) -> Result<PdfInfo> {
+    control.check()?;
     let pages = pdf.pages();
+    control.check()?;
     ensure!(!pages.is_empty(), "The PDF has no pages.");
     ensure!(
         pages.len() <= MAX_PDF_PAGES,
@@ -176,13 +265,27 @@ fn info_from_pdf(pdf: &Pdf) -> Result<PdfInfo> {
     );
     Ok(PdfInfo {
         pages: pages.len(),
-        sizes: pages.iter().map(|page| page.render_dimensions()).collect(),
+        sizes: pages
+            .iter()
+            .map(|page| {
+                control.check()?;
+                Ok(page.render_dimensions())
+            })
+            .collect::<Result<_>>()?,
     })
 }
 
-fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> {
-    let pdf = load_pdf(bytes)?;
-    let info = info_from_pdf(&pdf)?;
+fn render_data(
+    data: PdfData,
+    options: &PdfOptions,
+    control: &PdfControl,
+    progress: &impl Fn(PdfProgress),
+) -> Result<Vec<RgbaImage>> {
+    control.check()?;
+    progress(PdfProgress::Inspecting);
+    control.check()?;
+    let pdf = load_pdf(data)?;
+    let info = info_from_pdf(&pdf, control)?;
     let expected = validate_options(&info, options)?;
     let pages = pdf.pages();
     let cache = RenderCache::new();
@@ -194,6 +297,13 @@ fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> 
 
     for (index, page) in pages[options.first - 1..options.last].iter().enumerate() {
         let page_number = options.first + index;
+        control.check()?;
+        progress(PdfProgress::Rendering {
+            page: page_number,
+            done: index,
+            total: expected.len(),
+        });
+        control.check()?;
         let pixmap = catch_unwind(AssertUnwindSafe(|| {
             render(
                 page,
@@ -208,6 +318,7 @@ fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> 
             )
         }))
         .map_err(|_| anyhow!("Page {page_number} could not be rendered."))?;
+        control.check()?;
         let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
         ensure!(
             (width, height) == expected[index],
@@ -224,13 +335,113 @@ fn render_bytes(bytes: Vec<u8>, options: &PdfOptions) -> Result<Vec<RgbaImage>> 
             "The selected pages need too much memory. Use a lower resolution or fewer pages."
         );
         rendered.push(image);
+        progress(PdfProgress::Rendering {
+            page: page_number,
+            done: index + 1,
+            total: expected.len(),
+        });
     }
+    control.check()?;
     Ok(rendered)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_snapshot_survives_replacement_and_removal_of_the_original_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.pdf");
+        std::fs::write(&path, test_pdf(&[(12., 18.), (20., 10.)])).unwrap();
+        let stages = std::cell::RefCell::new(Vec::new());
+        let source = read_source(&path, &PdfControl::default(), |stage| {
+            stages.borrow_mut().push(stage)
+        })
+        .unwrap();
+        assert_eq!(
+            *stages.borrow(),
+            [PdfProgress::Reading, PdfProgress::Inspecting]
+        );
+        assert_eq!(source.info.pages, 2);
+        std::fs::write(&path, test_pdf(&[(50., 40.)])).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let options = PdfOptions {
+            path,
+            first: 1,
+            last: 2,
+            dpi: 72,
+            mode: PdfMode::Separate,
+        };
+        let pages = render_pages(&source, &options, &PdfControl::default(), |_| {}).unwrap();
+        assert_eq!(
+            pages.iter().map(RgbaImage::dimensions).collect::<Vec<_>>(),
+            [(12, 18), (20, 10)]
+        );
+        assert_eq!(pages[0].get_pixel(1, 1).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn canceled_reads_and_inspection_return_cancellation_without_a_source() {
+        let control = PdfControl::default();
+        control.cancel();
+        assert!(
+            read_source(Path::new("missing.pdf"), &control, |_| {})
+                .unwrap_err()
+                .is::<PdfCanceled>()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.pdf");
+        // A valid header but malformed body proves inspection never parses it
+        // after the cancellation checkpoint.
+        std::fs::write(&path, b"%PDF-1.4\nmalformed").unwrap();
+        for stop in [PdfProgress::Reading, PdfProgress::Inspecting] {
+            let control = PdfControl::default();
+            let result = read_source(&path, &control, |stage| {
+                if stage == stop {
+                    control.cancel();
+                }
+            });
+            assert!(result.unwrap_err().is::<PdfCanceled>());
+        }
+    }
+
+    #[test]
+    fn cancellation_before_after_and_between_pages_discards_the_entire_render() {
+        let source = PdfSource {
+            data: test_pdf(&[(12., 18.), (20., 10.)]).into(),
+            info: PdfInfo {
+                pages: 2,
+                sizes: vec![(12., 18.), (20., 10.)],
+            },
+        };
+        let options = PdfOptions {
+            path: "source.pdf".into(),
+            first: 1,
+            last: 2,
+            dpi: 72,
+            mode: PdfMode::Layers,
+        };
+        for stop_done in [0, 1, 2] {
+            let control = PdfControl::default();
+            let progress = std::cell::RefCell::new(Vec::new());
+            let result = render_pages(&source, &options, &control, |stage| {
+                progress.borrow_mut().push(stage);
+                if matches!(stage, PdfProgress::Rendering { done, .. } if done == stop_done) {
+                    control.cancel();
+                }
+            });
+            assert!(result.unwrap_err().is::<PdfCanceled>());
+            if stop_done < 2 {
+                assert!(
+                    !progress
+                        .borrow()
+                        .iter()
+                        .any(|stage| matches!(stage, PdfProgress::Rendering { page: 2, .. }))
+                );
+            }
+        }
+    }
 
     #[test]
     fn renderer_limits_and_invalid_probe_dimensions_are_rejected_before_rendering() {
@@ -283,7 +494,13 @@ mod tests {
             .is_ok()
         );
         assert_eq!(scaled_page_size((72.5, 73.5), 72), (72, 73));
-        let pages = render_bytes(test_pdf(&[(72.5, 73.5)]), &options).unwrap();
+        let pages = render_data(
+            test_pdf(&[(72.5, 73.5)]).into(),
+            &options,
+            &PdfControl::default(),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(pages[0].dimensions(), (72, 73));
     }
 
@@ -349,8 +566,11 @@ mod tests {
 
     #[test]
     fn probe_reports_page_count_and_page_sizes() {
-        let info =
-            info_from_pdf(&load_pdf(test_pdf(&[(100., 200.), (50., 25.)])).unwrap()).unwrap();
+        let info = info_from_pdf(
+            &load_pdf(test_pdf(&[(100., 200.), (50., 25.)])).unwrap(),
+            &PdfControl::default(),
+        )
+        .unwrap();
         assert_eq!(info.pages, 2);
         assert!((info.sizes[0].0 - 100.).abs() < 0.01);
         assert!((info.sizes[0].1 - 200.).abs() < 0.01);
@@ -367,7 +587,13 @@ mod tests {
             dpi: 144,
             mode: PdfMode::Separate,
         };
-        let pages = render_bytes(test_pdf(&[(72., 72.), (72., 144.)]), &options).unwrap();
+        let pages = render_data(
+            test_pdf(&[(72., 72.), (72., 144.)]).into(),
+            &options,
+            &PdfControl::default(),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].dimensions(), (144, 288));
         assert_eq!(pages[0].get_pixel(10, 10).0, [255, 0, 0, 255]);

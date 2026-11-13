@@ -50,6 +50,17 @@ new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
 not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
 together keep their import dialogs queued. Pages are rasterized at the chosen
 DPI; PDF text and vector objects do not become editable text or paths.
+Reading, inspection, rendering, and image preparation show progress. Use Cancel
+or Escape to discard the current import. Cancellation waits for a running page,
+parser call, or image-preparation step to finish; no partial result is added.
+Canceling one file leaves later queued files available to open.
+
+Each PDF is inspected when its turn opens, and its bytes are retained for that
+import. Replacing or deleting the original file afterward does not change the
+pages being imported. Open as Layers checks the whole selected range against
+the destination's remaining layer and memory capacity before rendering. If it
+does not fit, reduce the page range or DPI; a successful import adds all selected
+pages in one undo step.
 Pick a tool on the left and adjust its settings on the right. Hover the **?**
 beside a tool name for gestures and shortcuts.
 

@@ -104,7 +104,7 @@ impl Workspace {
     }
 
     pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open || self.form.is_some() {
+        if self.dialog_open || self.form.is_some() || self.pdf_job.is_some() {
             return;
         }
         self.dialog_open = true;
@@ -420,7 +420,7 @@ impl Workspace {
     ) -> bool {
         if self.dialog_open
             || self.creating
-            || self.pdf_busy
+            || self.pdf_job.is_some()
             || self.tabs.iter().any(|tab| tab.busy())
         {
             return false;

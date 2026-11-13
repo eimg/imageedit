@@ -177,7 +177,14 @@ pages or a range, sets a resolution from 1 to 1200 DPI, and renders pages as
 layers on the first page's canvas or as separate tabs. PDF imports use the
 normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
 save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
-one PDF at a time. Each tab can undo and redo crops, fills, selections and
+one PDF at a time. PDF read/inspection/render/preparation jobs show progress and
+accept Cancel or Escape. Cancellation is cooperative: an in-progress parser,
+page render, or image-preparation call finishes before cancellation settles;
+its results are discarded. New documents and Open as Layers publish no partial
+prefix. PDF bytes are retained from inspection through rendering, independent
+of later source-file replacement/deletion. Open as Layers preflights the entire
+range against remaining layer count, IDs, and stack bytes before rendering and
+publishes all selected layers as one undo step. Each tab can undo and redo crops, fills, selections and
 layer changes, path edits, strokes, text edits, and rasterizing text. Selection changes preserve the saved revision, and undoing
 back to the saved state clears the unsaved marker.
 Tabs retain zoom and pan. The canvas
@@ -329,23 +336,38 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   projects written before those controls were added.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
-  a white background. `src/workspace/pdf_ui.rs` owns probe and render jobs and
+  a white background. `PdfSource` retains the immutable shared `PdfData` bytes
+  and inspected dimensions; render jobs parse those same bytes without reopening
+  the path. `PdfControl` checks cancellation between bounded read chunks, page
+  inspection/rendering, and document preparation; renderer/parser calls themselves
+  remain uninterruptible. `src/workspace/pdf_ui.rs` owns probe and render jobs and
   turns the result into new documents or layers above the active layer. Import
-  results publish only while their import token and target tab are current.
+  results publish only while their import token and target tab are current and
+  cancellation has not been requested. Dropping a job requests cancellation.
+  An event stream carries stage and page progress, without idle polling.
   Probe/page-tree and rendering panics are converted into import errors. Page
   preflight uses the renderer's f32/truncated dimensions, rejects nonfinite or
   subpixel dimensions, and retains the tighter document size/memory budgets.
-  Preparing new Documents (composite, tiles, preview, thumbnails) stays on the
-  background executor. Ordinary PDF and raster opens share a publication queue;
+  Preparing new Documents and existing-layer destination patches (composite,
+  tiles, preview, thumbnails) stays on the background executor. The PDF modal
+  remains active through preparation, including per-page grayscale conversion
+  and the final patch build. Cancellation discards the prepared candidate before
+  any history publication. Ordinary PDF and raster opens share a publication queue;
   frame callbacks show them in order after modal UI, document edits, and PDF work
   settle, so neither a second PDF nor a raster tab dismisses a pending PDF form.
-  Open as Layers still accepts a single PDF and validates its target.
+  Queued PDFs hold paths until their turn; only the active PDF retains a byte
+  snapshot. Open as Layers accepts a single PDF and validates its target both
+  before rendering and before publication. `DocumentContent::room_for_sizes`
+  shares raster import admission rules without allocating destination images;
+  complete ranges must fit, including available layer IDs. Peak render/preview
+  working memory is not limited solely by the retained-layer pixel budget.
 - `src/workspace.rs` owns tabs, view state, and background open, edit, undo
   and redo jobs. A job publishes only if its tab's edit generation is
   unchanged. A coarser preview level publishes only while the composite it
   was built from is still current. The canonical path identifies an already
-  open file. PDF paths probe before the import form opens; raster paths decode
-  directly.
+  open file. PDF paths queue until their turn, then probe before the import form
+  opens; raster paths decode directly. Content edits and PDF insertion share
+  preview cleanup before preparing their immutable candidate.
 - `src/workspace/history.rs` holds each tab's undo and redo snapshots, its
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.

@@ -55,7 +55,7 @@ impl Render for Workspace {
         crate::windows_menu::request_sync(cx);
         self.schedule_pending_open(window, cx);
         self.request_preview_level(window, cx);
-        let interactive = self.form.is_none() && !self.dialog_open;
+        let interactive = self.form.is_none() && !self.dialog_open && self.pdf_job.is_none();
         let active = self.active_tab();
         div()
             .relative()
@@ -89,7 +89,12 @@ impl Render for Workspace {
                 },
             ))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                this.begin_space_pan(event, cx);
+                if this.pdf_job.is_some() && event.keystroke.key == "escape" {
+                    this.cancel_pdf_job(cx);
+                    cx.stop_propagation();
+                } else {
+                    this.begin_space_pan(event, cx);
+                }
             }))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
                 this.end_space_pan(event, cx);
@@ -453,6 +458,7 @@ impl Render for Workspace {
             )
             .child(self.status_bar())
             .children(self.form_overlay(cx))
+            .children(self.pdf_progress_overlay(cx))
     }
 }
 
@@ -1978,8 +1984,8 @@ impl Workspace {
     }
 
     fn status_bar(&self) -> Div {
-        let summary = if self.pdf_busy {
-            "Importing PDF…".to_owned()
+        let summary = if let Some(job) = &self.pdf_job {
+            job.label()
         } else if self.creating {
             "Creating image…".to_owned()
         } else {

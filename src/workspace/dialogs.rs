@@ -1,4 +1,4 @@
-use std::{cell::Cell, path::PathBuf, rc::Rc};
+use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
     Bounds, ClipboardItem, Context, CursorStyle, Div, FocusHandle, KeyDownEvent, Keystroke,
@@ -21,7 +21,7 @@ use crate::document::{
     Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, file_name, solid_color,
 };
 use crate::filters::{self, FilterSpec};
-use crate::pdf::{self, DEFAULT_DPI, PdfInfo, PdfMode, PdfOptions};
+use crate::pdf::{self, DEFAULT_DPI, PdfMode, PdfOptions, PdfSource};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
 
@@ -104,7 +104,7 @@ enum FormKind {
     },
     PdfImport {
         path: PathBuf,
-        info: PdfInfo,
+        source: Arc<PdfSource>,
         dpi: Field,
         from: Field,
         to: Field,
@@ -570,18 +570,18 @@ impl Workspace {
     pub(super) fn pdf_import_form(
         &mut self,
         path: PathBuf,
-        info: PdfInfo,
+        source: Arc<PdfSource>,
         target: PdfTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.dialog_open || self.form.is_some() || self.creating || self.pdf_busy {
+        if self.dialog_open || self.form.is_some() || self.creating || self.pdf_job.is_some() {
             self.errors
                 .push("Wait for the current file operation to finish.".into());
             cx.notify();
             return false;
         }
-        if info.pages == 0 {
+        if source.info.pages == 0 {
             self.errors.push("The PDF has no pages.".into());
             cx.notify();
             return false;
@@ -591,11 +591,11 @@ impl Workspace {
                 path,
                 dpi: Field::new(DEFAULT_DPI.to_string()),
                 from: Field::new("1".into()),
-                to: Field::new(info.pages.to_string()),
+                to: Field::new(source.info.pages.to_string()),
                 all_pages: true,
                 mode: PdfMode::Layers,
                 target,
-                info,
+                source,
                 active: 0,
             },
             window,
@@ -973,7 +973,7 @@ impl Workspace {
             }
             FormKind::PdfImport {
                 path,
-                info,
+                source,
                 dpi,
                 from,
                 to,
@@ -982,6 +982,7 @@ impl Workspace {
                 target,
                 ..
             } => {
+                let info = &source.info;
                 let Ok(dpi) = dpi.text.parse::<u32>() else {
                     form.error = Some("Enter a resolution in DPI.".into());
                     cx.notify();
@@ -1011,32 +1012,25 @@ impl Workspace {
                     dpi,
                     mode,
                 };
-                if let Err(error) = pdf::validate_options(info, &options) {
-                    form.error = Some(error.to_string());
-                    cx.notify();
-                    return;
-                }
-                let target = *target;
-                if let PdfTarget::Layers {
-                    tab_id, generation, ..
-                } = target
-                {
-                    let valid = self.tab_index(tab_id).is_some_and(|index| {
-                        let tab = &self.tabs[index];
-                        tab.history.generation() == generation && !tab.busy()
-                    });
-                    if !valid {
-                        if let Some(form) = &mut self.form {
-                            form.error = Some(
-                                "The target image changed. Close this dialog and try again.".into(),
-                            );
-                        }
+                let sizes = match pdf::validate_options(info, &options) {
+                    Ok(sizes) => sizes,
+                    Err(error) => {
+                        form.error = Some(error.to_string());
                         cx.notify();
                         return;
                     }
+                };
+                let target = *target;
+                let source = source.clone();
+                if let Err(error) = self.validate_pdf_target(target, &sizes) {
+                    if let Some(form) = self.form.as_mut() {
+                        form.error = Some(error.to_string());
+                    }
+                    cx.notify();
+                    return;
                 }
                 self.dismiss_form(window, cx);
-                self.begin_pdf_import(options, target, window, cx);
+                self.begin_pdf_import(source, options, target, window, cx);
             }
             FormKind::Adjustment { .. } => {
                 self.apply_adjustment(window, cx);
@@ -1718,7 +1712,7 @@ impl Workspace {
                 ),
                 FormKind::PdfImport {
                     path,
-                    info,
+                    source,
                     dpi,
                     from,
                     to,
@@ -1727,6 +1721,7 @@ impl Workspace {
                     target,
                     active,
                 } => {
+                    let info = &source.info;
                     let pages = if info.pages == 1 {
                         "1 page".to_owned()
                     } else {

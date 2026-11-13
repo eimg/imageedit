@@ -158,6 +158,7 @@ impl Workspace {
             || self.space_pan
             || self.form.is_some()
             || self.dialog_open
+            || self.pdf_job.is_some()
             || self.text_draft.is_some()
             || self.active_tab().is_none()
         {

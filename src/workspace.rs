@@ -353,7 +353,7 @@ pub struct Workspace {
     copy_token: u64,
     paste_token: u64,
     pdf_import_token: u64,
-    pdf_busy: bool,
+    pdf_job: Option<pdf_ui::PdfJob>,
     pending_opens: std::collections::VecDeque<pdf_ui::PendingOpen>,
     open_scheduled: bool,
     dialog_open: bool,
@@ -464,23 +464,12 @@ impl Workspace {
             while let Some(path) = requests.next().await {
                 let name = file_name(&path);
                 if crate::pdf::is_pdf_path(&path) {
-                    let probe_path = path.clone();
-                    let info = executor
-                        .spawn(async move { crate::pdf::read_info(&probe_path) })
-                        .await;
                     if workspace
-                        .update_in(cx, |workspace, _window, cx| {
+                        .update_in(cx, |workspace, _, cx| {
                             workspace.pending -= 1;
-                            match info {
-                                Ok(info) => {
-                                    workspace
-                                        .pending_opens
-                                        .push_back(pdf_ui::PendingOpen::Pdf { path, info });
-                                }
-                                Err(error) => {
-                                    workspace.errors.push(format!("{name}: {error:#}"));
-                                }
-                            }
+                            workspace
+                                .pending_opens
+                                .push_back(pdf_ui::PendingOpen::Pdf { path });
                             cx.notify();
                         })
                         .is_err()
@@ -496,7 +485,7 @@ impl Workspace {
                         match result {
                             Ok(document) => workspace
                                 .pending_opens
-                                .push_back(pdf_ui::PendingOpen::Raster(document)),
+                                .push_back(pdf_ui::PendingOpen::Raster(Box::new(document))),
                             Err(error) => workspace.errors.push(format!("{name}: {error}")),
                         }
                         cx.notify();
@@ -619,7 +608,7 @@ impl Workspace {
             copy_token: 0,
             paste_token: 0,
             pdf_import_token: 0,
-            pdf_busy: false,
+            pdf_job: None,
             pending_opens: Default::default(),
             open_scheduled: false,
             dialog_open: false,
@@ -836,6 +825,20 @@ impl Workspace {
         }
     }
 
+    fn clear_content_previews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_guide(cx);
+        self.dismiss_effect_form(window, cx);
+        self.clear_crop();
+        self.clear_selection_gesture();
+        self.cancel_path_gesture(cx);
+        self.opacity_drag = None;
+        self.cancel_text(window, cx);
+        self.cancel_warp(window, cx);
+        self.cancel_stroke(window, cx);
+        self.cancel_gradient(window, cx);
+        self.cancel_scale(window, cx);
+    }
+
     fn start_change(
         &mut self,
         change: Change,
@@ -859,17 +862,7 @@ impl Workspace {
             });
             return;
         }
-        self.cancel_guide(cx);
-        self.dismiss_effect_form(window, cx);
-        self.clear_crop();
-        self.clear_selection_gesture();
-        self.cancel_path_gesture(cx);
-        self.opacity_drag = None;
-        self.cancel_text(window, cx);
-        self.cancel_warp(window, cx);
-        self.cancel_stroke(window, cx);
-        self.cancel_gradient(window, cx);
-        self.cancel_scale(window, cx);
+        self.clear_content_previews(window, cx);
         let tab = &mut self.tabs[index];
         self.free_points.clear();
         let target = match change {
