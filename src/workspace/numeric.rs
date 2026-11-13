@@ -41,6 +41,7 @@ pub(super) enum NumericField {
     SelectionRatioHeight,
     CropRatioWidth,
     CropRatioHeight,
+    BrushFlow,
 }
 
 impl NumericField {
@@ -74,6 +75,7 @@ impl NumericField {
             Self::SelectionRatioHeight => 25,
             Self::CropRatioWidth => 26,
             Self::CropRatioHeight => 27,
+            Self::BrushFlow => 28,
         }
     }
 
@@ -141,6 +143,7 @@ impl NumericField {
                 | Self::BrushSpacing
                 | Self::BrushHardness
                 | Self::BrushOpacity
+                | Self::BrushFlow
                 | Self::PathStrokeSize
                 | Self::RotateAngle
                 | Self::GridSpacing
@@ -162,7 +165,7 @@ impl NumericField {
             Self::RotateAngle => (-3600, 3600),
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
             Self::BrushSpacing => (1, 100),
-            Self::BrushHardness | Self::BrushOpacity => (0, 100),
+            Self::BrushHardness | Self::BrushOpacity | Self::BrushFlow => (0, 100),
             Self::TextLetterSpacing => (
                 crate::text::MIN_LETTER_SPACING as i64,
                 crate::text::MAX_LETTER_SPACING as i64,
@@ -352,6 +355,7 @@ impl Workspace {
             NumericField::BrushSpacing => Some(i64::from(self.brush_value(BrushField::Spacing))),
             NumericField::BrushHardness => Some(i64::from(self.brush_value(BrushField::Hardness))),
             NumericField::BrushOpacity => Some(i64::from(self.brush_value(BrushField::Opacity))),
+            NumericField::BrushFlow => Some(i64::from(self.brush_value(BrushField::Flow))),
             NumericField::PathStrokeSize => Some(i64::from(self.brushes.outline.diameter)),
             NumericField::ScaleWidth => self.scale_size().map(|size| i64::from(size.0)),
             NumericField::ScaleHeight => self.scale_size().map(|size| i64::from(size.1)),
@@ -886,6 +890,7 @@ impl Workspace {
             NumericField::BrushOpacity => {
                 self.set_brush_value(BrushField::Opacity, value as u32, cx)
             }
+            NumericField::BrushFlow => self.set_brush_value(BrushField::Flow, value as u32, cx),
             NumericField::PathStrokeSize => self.brushes.outline.diameter = value as u32,
             NumericField::RotateAngle => self.set_warp_angle(value as f64 / 10., window, cx),
             NumericField::TextLetterSpacing => {
@@ -1192,6 +1197,7 @@ mod tests {
             (NumericField::BrushSpacing, 1, 100),
             (NumericField::BrushHardness, 0, 100),
             (NumericField::BrushOpacity, 0, 100),
+            (NumericField::BrushFlow, 0, 100),
             (NumericField::PathStrokeSize, 1, 500),
             (NumericField::TextLetterSpacing, -64, 256),
             (NumericField::SelectionRatioWidth, 1, 16384),

@@ -304,16 +304,16 @@ impl Tool {
                 "Click a connected region to select it. Sample All Layers uses the visible composite; otherwise only the active layer is sampled. Tolerance is shared with Bucket Fill; zero matches exactly, ignoring stored RGB when both pixels are fully transparent. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::Pencil | Self::Brush => {
-                "Paint with the foreground color inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size. Pencil has a hard edge; Brush uses the chosen hardness."
+                "Paint with the foreground color inside the selection. Opacity limits each stroke; overlapping dabs do not exceed it. Buildup uses Flow per dab to approach that limit; new strokes compound. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size. Pencil has a hard edge; Brush uses the chosen hardness."
             }
             Self::Eraser => {
-                "Paint to erase to transparency inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
+                "Paint to erase to transparency inside the selection. Opacity limits how much each stroke removes. Buildup uses Flow per dab to approach that limit; new strokes remove more. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
             }
             Self::Blur | Self::Sharpen => {
-                "Paint to change local detail on the active layer, inside the selection. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
+                "Paint to change local detail on the active layer, inside the selection. Strength limits each stroke's effect, using the pixels at its start. Buildup uses Flow per dab to approach that strength; release and paint again for another pass. Release commits one stroke; Escape cancels. Shift-click continues from the last stroke endpoint. The bracket keys [ and ] change the brush size."
             }
             Self::CloneStamp => {
-                "Alt-click inside the active raster layer to set the source. Aligned keeps the source offset across strokes; turn it off to restart each stroke at the source. Changing the mode resets alignment. Choose a new source after changing tabs or layers, or moving/resizing the layer. The selection limits the destination. Release commits one stroke; Escape cancels. The bracket keys [ and ] change the brush size."
+                "Alt-click inside the active raster layer to set the source. Aligned keeps the source offset across strokes; turn it off to restart each stroke at the source. Changing the mode resets alignment. Choose a new source after changing tabs or layers, or moving/resizing the layer. The selection limits the destination. Opacity limits each stroke; Buildup uses Flow per dab to approach it. Release commits one stroke; Escape cancels. The bracket keys [ and ] change the brush size."
             }
             Self::BucketFill => {
                 "Click to fill with the foreground color. Connected fills a connected region; Selection covers the whole selection. Sample All Layers reads visible layers to find the region, then paints only the active layer. Tolerance 0 matches exactly, ignoring stored RGB when both pixels are fully transparent."

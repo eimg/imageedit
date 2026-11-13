@@ -36,6 +36,7 @@ pub(super) enum BrushField {
     Spacing,
     Hardness,
     Opacity,
+    Flow,
 }
 
 pub(super) struct CloneSource {
@@ -139,6 +140,7 @@ impl Workspace {
             BrushField::Spacing => u32::from(brush.spacing),
             BrushField::Hardness => u32::from(brush.hardness),
             BrushField::Opacity => u32::from(brush.opacity),
+            BrushField::Flow => u32::from(brush.flow),
         }
     }
 
@@ -156,7 +158,7 @@ impl Workspace {
         let (min, max) = match field {
             BrushField::Size => (1, 500),
             BrushField::Spacing => (1, 100),
-            BrushField::Hardness | BrushField::Opacity => (0, 100),
+            BrushField::Hardness | BrushField::Opacity | BrushField::Flow => (0, 100),
         };
         let next = value.clamp(min, max);
         let brush = self.brushes.get_mut(self.tool);
@@ -165,6 +167,7 @@ impl Workspace {
             BrushField::Spacing => brush.spacing = next as u8,
             BrushField::Hardness => brush.hardness = next as u8,
             BrushField::Opacity => brush.opacity = next as u8,
+            BrushField::Flow => brush.flow = next as u8,
         }
         *brush = brush.clamped();
         cx.notify();
@@ -172,6 +175,15 @@ impl Workspace {
 
     pub(super) fn adjust_brush_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.nudge_brush(BrushField::Size, delta, cx);
+    }
+
+    pub(super) fn brush_buildup(&self) -> bool {
+        self.active_brush().buildup
+    }
+
+    pub(super) fn set_brush_buildup(&mut self, buildup: bool, cx: &mut Context<Self>) {
+        self.brushes.get_mut(self.tool).buildup = buildup;
+        cx.notify();
     }
 
     pub(super) fn set_clone_source(
@@ -641,10 +653,14 @@ mod tests {
             let brush = settings.get_mut(*tool);
             brush.diameter = index as u32 + 2;
             brush.opacity = (index as u8 + 1) * 10;
+            brush.flow = (index as u8 + 2) * 10;
+            brush.buildup = index % 2 == 1;
         }
         for (index, tool) in tools.iter().enumerate() {
             assert_eq!(settings.get(*tool).diameter, index as u32 + 2);
             assert_eq!(settings.get(*tool).opacity, (index as u8 + 1) * 10);
+            assert_eq!(settings.get(*tool).flow, (index as u8 + 2) * 10);
+            assert_eq!(settings.get(*tool).buildup, index % 2 == 1);
         }
         assert_eq!(settings.outline.diameter, 8);
     }

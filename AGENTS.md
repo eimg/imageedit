@@ -90,7 +90,16 @@ stroke commits when the pointer is released. Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
 pixels under the brush. Blur and Sharpen have no shortcut.
 The paint and retouch tools retain independent brush settings during the session;
-path and selection outlines share their own settings. The bracket keys adjust
+path and selection outlines share their own settings. Opacity limits each stroke
+relative to its starting pixels. A 16-bit coverage buffer per touched tile keeps
+overlapping dabs from exceeding that limit and applies soft selection coverage
+once. Buildup defaults off; when on, Flow (0–100) accumulates dab coverage toward
+the opacity limit. Flow and buildup are remembered per tool during the session.
+Blur/Sharpen label opacity Strength and blend the original stroke pixels toward
+a fixed local filtered result; a new stroke applies another pass. Outline strokes
+use the same coverage cap. Zero opacity, buildup with zero flow, and unchanged targets publish no
+pixel changes; sub-byte buildup accumulates without changing hidden RGB until
+alpha becomes visible. The bracket keys adjust
 the brush size for the paint tools. Gradient fills the active layer between two colors, and
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer in a
@@ -207,7 +216,11 @@ document is a single plain layer without paths, guides, or editable text.
   Reduced transparent previews and thumbnails use premultiplied resampling so
   hidden RGB values cannot tint visible edges.
 - `src/paint.rs` spaces pencil, brush, eraser, blur, sharpen, and clone-stamp
-  dabs along the pointer path and stores touched 64 px tiles. It also samples linear and radial gradients
+  dabs along the pointer path and stores touched 64 px tiles with their 16-bit
+  stroke coverage. Non-buildup uses maximum dab coverage; buildup uses Flow and
+  combines coverage before applying opacity and selection once against the
+  original pixels. Only changed pixel tiles invalidate the live preview.
+  It also samples linear and radial gradients
   and strokes a polyline in one pass, skipping a repeated endpoint.
   `src/workspace/paint_ui.rs` composites the live tiles over the existing
   preview and owns the per-tool brush settings. Release commits dirty regions
@@ -356,7 +369,7 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
-  fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity, path
+  fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
   Rotate angle, and text size/letter/line
   spacing inline with a caret and text selection. Values preview live; selection,

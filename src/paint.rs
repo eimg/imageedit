@@ -14,6 +14,8 @@ pub struct Brush {
     pub spacing: u8,
     pub hardness: u8,
     pub opacity: u8,
+    pub flow: u8,
+    pub buildup: bool,
 }
 
 impl Default for Brush {
@@ -23,6 +25,8 @@ impl Default for Brush {
             spacing: 10,
             hardness: 100,
             opacity: 100,
+            flow: 100,
+            buildup: false,
         }
     }
 }
@@ -34,6 +38,8 @@ impl Brush {
             spacing: self.spacing.clamp(1, 100),
             hardness: self.hardness.min(100),
             opacity: self.opacity.min(100),
+            flow: self.flow.min(100),
+            buildup: self.buildup,
         }
     }
 
@@ -168,8 +174,39 @@ pub struct Stroke {
     color: Rgba<u8>,
     brush: Brush,
     plotter: Plotter,
-    tiles: HashMap<TileKey, RgbaImage>,
+    tiles: HashMap<TileKey, StrokeTile>,
     pending: BTreeSet<TileKey>,
+    changed: bool,
+}
+
+#[derive(Debug, PartialEq)]
+struct StrokeTile {
+    pixels: RgbaImage,
+    // Coverage belongs to the stroke, before opacity and selection are applied.
+    // Sixteen bits avoid repeated 8-bit rounding while keeping scratch storage
+    // to half the size of the touched RGBA pixels.
+    coverage: Box<[u16]>,
+}
+
+impl StrokeTile {
+    fn new(source: &RgbaImage, key: TileKey) -> Self {
+        let (x, y) = (key.0 * STROKE_TILE, key.1 * STROKE_TILE);
+        let pixels = image::imageops::crop_imm(
+            source,
+            x,
+            y,
+            STROKE_TILE.min(source.width() - x),
+            STROKE_TILE.min(source.height() - y),
+        )
+        .to_image();
+        let coverage =
+            vec![0; pixels.width() as usize * pixels.height() as usize].into_boxed_slice();
+        Self { pixels, coverage }
+    }
+
+    fn index(&self, x: u32, y: u32) -> usize {
+        ((y % STROKE_TILE) * self.pixels.width() + x % STROKE_TILE) as usize
+    }
 }
 
 impl Stroke {
@@ -182,11 +219,12 @@ impl Stroke {
             brush,
             tiles: HashMap::new(),
             pending: BTreeSet::new(),
+            changed: false,
         }
     }
 
     pub fn changed(&self) -> bool {
-        !self.tiles.is_empty()
+        self.changed
     }
 
     pub fn take_pending_tiles(&mut self) -> BTreeSet<TileKey> {
@@ -194,7 +232,7 @@ impl Stroke {
     }
 
     pub fn tile_bounds(&self, key: TileKey) -> Option<PixelRect> {
-        let pixels = self.tiles.get(&key)?;
+        let pixels = &self.tiles.get(&key)?.pixels;
         Some(PixelRect::new(
             i64::from(key.0 * STROKE_TILE),
             i64::from(key.1 * STROKE_TILE),
@@ -205,7 +243,7 @@ impl Stroke {
 
     pub fn pixel(&self, x: u32, y: u32) -> Option<Rgba<u8>> {
         let tile = self.tiles.get(&(x / STROKE_TILE, y / STROKE_TILE))?;
-        Some(*tile.get_pixel(x % STROKE_TILE, y % STROKE_TILE))
+        Some(*tile.pixels.get_pixel(x % STROKE_TILE, y % STROKE_TILE))
     }
 
     pub fn sample(
@@ -226,7 +264,11 @@ impl Stroke {
         coverage: impl Fn(i32, i32) -> u8,
         omit_endpoint: bool,
     ) {
-        if !x.is_finite() || !y.is_finite() || self.brush.opacity == 0 {
+        if !x.is_finite()
+            || !y.is_finite()
+            || self.brush.opacity == 0
+            || (self.brush.buildup && self.brush.flow == 0)
+        {
             return;
         }
         let point = PlotPoint { x, y };
@@ -315,29 +357,37 @@ impl Stroke {
                 if falloff <= 0.0 {
                     continue;
                 }
-                let amount = falloff * f64::from(self.brush.opacity) / 100.0
-                    * f64::from(coverage(px, py))
-                    / 255.0;
-                if amount <= 0.0 {
+                let selected = coverage(px, py);
+                if selected == 0 || self.brush.opacity == 0 {
                     continue;
                 }
                 let (px, py) = (px as u32, py as u32);
-                let before = self
-                    .pixel(px, py)
-                    .unwrap_or_else(|| *source.get_pixel(px, py));
-                let after = match self.kind {
-                    StrokeKind::Pencil | StrokeKind::Paint => {
-                        source_over(before, self.color, amount)
-                    }
-                    StrokeKind::Erase => erase(before, amount),
-                    StrokeKind::Blur => {
-                        let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
-                        filters::blend(before, blur_pixel(source, px, py), coverage)
-                    }
-                    StrokeKind::Sharpen => {
-                        let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
-                        filters::blend(before, sharpen_pixel(source, px, py), coverage)
-                    }
+                let key = (px / STROKE_TILE, py / STROKE_TILE);
+                let previous = self
+                    .tiles
+                    .get(&key)
+                    .map_or(0, |tile| tile.coverage[tile.index(px, py)]);
+                let old = f64::from(previous) / f64::from(u16::MAX);
+                let covered = if self.brush.buildup {
+                    old + (1. - old) * falloff * f64::from(self.brush.flow) / 100.
+                } else {
+                    old.max(falloff)
+                };
+                let covered = (covered.clamp(0., 1.) * f64::from(u16::MAX)).round() as u16;
+                if covered <= previous {
+                    continue;
+                }
+                let amount =
+                    f64::from(covered) / f64::from(u16::MAX) * f64::from(self.brush.opacity) / 100.
+                        * f64::from(selected)
+                        / 255.;
+                let base = *source.get_pixel(px, py);
+                let before = self.pixel(px, py).unwrap_or(base);
+                let target = match self.kind {
+                    StrokeKind::Pencil | StrokeKind::Paint => self.color,
+                    StrokeKind::Erase => Rgba([0; 4]),
+                    StrokeKind::Blur => blur_pixel(source, px, py),
+                    StrokeKind::Sharpen => sharpen_pixel(source, px, py),
                     StrokeKind::Clone { dx, dy } => {
                         let sx = i64::from(px) + dx;
                         let sy = i64::from(py) + dy;
@@ -348,24 +398,41 @@ impl Stroke {
                         {
                             continue;
                         }
-                        source_over(before, *source.get_pixel(sx as u32, sy as u32), amount)
+                        *source.get_pixel(sx as u32, sy as u32)
                     }
                 };
+                let after = match self.kind {
+                    StrokeKind::Erase => {
+                        if base[3] == 0 {
+                            continue;
+                        }
+                        erase(base, amount)
+                    }
+                    StrokeKind::Blur | StrokeKind::Sharpen => {
+                        if target == base {
+                            continue;
+                        }
+                        let coverage = (amount * 255.).round().clamp(0., 255.) as u8;
+                        filters::blend(base, target, coverage)
+                    }
+                    _ => {
+                        if source_over(base, target, 1.) == base {
+                            continue;
+                        }
+                        source_over(base, target, amount)
+                    }
+                };
+                let tile = self
+                    .tiles
+                    .entry(key)
+                    .or_insert_with(|| StrokeTile::new(source, key));
+                let index = tile.index(px, py);
+                tile.coverage[index] = covered;
                 if before != after {
-                    let key = (px / STROKE_TILE, py / STROKE_TILE);
-                    let tile = self.tiles.entry(key).or_insert_with(|| {
-                        let (x, y) = (key.0 * STROKE_TILE, key.1 * STROKE_TILE);
-                        image::imageops::crop_imm(
-                            source,
-                            x,
-                            y,
-                            STROKE_TILE.min(source.width() - x),
-                            STROKE_TILE.min(source.height() - y),
-                        )
-                        .to_image()
-                    });
-                    tile.put_pixel(px % STROKE_TILE, py % STROKE_TILE, after);
+                    tile.pixels
+                        .put_pixel(px % STROKE_TILE, py % STROKE_TILE, after);
                     self.pending.insert(key);
+                    self.changed = true;
                 }
             }
         }
@@ -379,7 +446,7 @@ pub fn apply_stroke(source: &RgbaImage, stroke: &Stroke) -> Option<(RgbaImage, V
         let (origin_x, origin_y) = (column * STROKE_TILE, row * STROKE_TILE);
         let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
         let (mut max_x, mut max_y) = (0, 0);
-        for (x, y, pixel) in tile.enumerate_pixels() {
+        for (x, y, pixel) in tile.pixels.enumerate_pixels() {
             let (x, y) = (origin_x + x, origin_y + y);
             if source.get_pixel(x, y) != pixel {
                 image
@@ -463,10 +530,16 @@ fn dab_falloff(dx: f64, dy: f64, radius: f64, hardness: u8) -> f64 {
 
 fn source_over(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
     let src_a = f64::from(src.0[3]) / 255.0 * amount.clamp(0.0, 1.0);
+    if src_a <= 0. {
+        return dst;
+    }
     let dst_a = f64::from(dst.0[3]) / 255.0;
     let out_a = src_a + dst_a * (1.0 - src_a);
-    if out_a <= 0.0 {
-        return Rgba([0, 0, 0, 0]);
+    let alpha = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+    if alpha == 0 {
+        // Keep an invisible sub-byte dab from changing hidden RGB or creating
+        // a history entry. The separate stroke coverage still accumulates.
+        return dst;
     }
     let mix = |src_channel: u8, dst_channel: u8| {
         let value = (f64::from(src_channel) / 255.0 * src_a
@@ -478,7 +551,7 @@ fn source_over(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
         mix(src.0[0], dst.0[0]),
         mix(src.0[1], dst.0[1]),
         mix(src.0[2], dst.0[2]),
-        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+        alpha,
     ])
 }
 
@@ -616,6 +689,178 @@ mod tests {
     }
 
     #[test]
+    fn opacity_caps_overlapping_dabs_for_paint_erase_clone_and_retouch() {
+        let source = RgbaImage::from_fn(8, 5, |x, y| {
+            Rgba([40 + x as u8 * 20, 30 + y as u8 * 30, 80, 180])
+        });
+        let mut source = source;
+        source.put_pixel(2, 2, Rgba([170, 150, 120, 200]));
+        for kind in [
+            StrokeKind::Pencil,
+            StrokeKind::Paint,
+            StrokeKind::Erase,
+            StrokeKind::Clone { dx: 2, dy: 0 },
+            StrokeKind::Blur,
+            StrokeKind::Sharpen,
+        ] {
+            for selected in [128, 255] {
+                let brush = Brush {
+                    diameter: 5,
+                    opacity: 40,
+                    ..Default::default()
+                };
+                let mut stroke = Stroke::new(kind, Rgba([200, 10, 50, 150]), brush);
+                let point = PlotPoint { x: 2.5, y: 2.5 };
+                stroke.dab(point, &source, &|_, _| selected);
+                let once = stroke.pixel(2, 2).unwrap();
+                assert_ne!(once, *source.get_pixel(2, 2));
+                for _ in 0..50 {
+                    stroke.dab(point, &source, &|_, _| selected);
+                }
+                assert_eq!(stroke.pixel(2, 2), Some(once), "{kind:?}");
+                let mut built = Stroke::new(
+                    kind,
+                    Rgba([200, 10, 50, 150]),
+                    Brush {
+                        buildup: true,
+                        flow: 25,
+                        ..brush
+                    },
+                );
+                for _ in 0..100 {
+                    built.dab(point, &source, &|_, _| selected);
+                }
+                assert_eq!(built.pixel(2, 2), Some(once), "buildup cap for {kind:?}");
+                let (committed, _) = apply_stroke(&source, &stroke).unwrap();
+                assert_eq!(*committed.get_pixel(2, 2), once);
+                // Releasing and starting a new stroke deliberately compounds.
+                let mut next = Stroke::new(kind, Rgba([200, 10, 50, 150]), brush);
+                next.dab(point, &committed, &|_, _| selected);
+                assert_ne!(next.pixel(2, 2).unwrap_or(once), once, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn flow_builds_coverage_while_opacity_color_alpha_and_selection_each_apply_once() {
+        let source = RgbaImage::new(5, 5);
+        let brush = Brush {
+            diameter: 3,
+            opacity: 40,
+            flow: 50,
+            buildup: true,
+            ..Default::default()
+        };
+        let mut stroke = Stroke::new(StrokeKind::Paint, Rgba([255, 20, 10, 128]), brush);
+        let point = PlotPoint { x: 2.5, y: 2.5 };
+        for (dabs, covered) in [(1, 0.5), (2, 0.75), (3, 0.875)] {
+            stroke.dab(point, &source, &|_, _| 128);
+            let expected = (128.0_f64 * 0.4 * (128. / 255.) * covered).round() as u8;
+            assert_eq!(stroke.pixel(2, 2).unwrap()[3], expected, "{dabs} dabs");
+        }
+        for _ in 0..100 {
+            stroke.dab(point, &source, &|_, _| 128);
+        }
+        assert_eq!(stroke.pixel(2, 2).unwrap(), Rgba([255, 20, 10, 26]));
+
+        let mut low = Stroke::new(
+            StrokeKind::Paint,
+            Rgba([255, 0, 0, 255]),
+            Brush {
+                opacity: 10,
+                flow: 1,
+                ..brush
+            },
+        );
+        low.dab(point, &source, &|_, _| 255);
+        assert!(!low.changed()); // Sub-byte coverage must still accumulate.
+        for _ in 0..1000 {
+            low.dab(point, &source, &|_, _| 255);
+        }
+        assert!(low.changed());
+        assert_eq!(low.pixel(2, 2).unwrap()[3], 25);
+    }
+
+    #[test]
+    fn dense_and_sparse_pointer_events_render_identical_soft_strokes_in_both_modes() {
+        let source = RgbaImage::from_pixel(100, 8, Rgba([10, 20, 60, 180]));
+        for buildup in [false, true] {
+            let brush = Brush {
+                diameter: 7,
+                hardness: 35,
+                opacity: 37,
+                flow: 17,
+                spacing: 25,
+                buildup,
+            };
+            let render = |points: &[(f64, f64)]| {
+                let mut stroke = Stroke::new(StrokeKind::Paint, Rgba([220, 10, 30, 120]), brush);
+                for &(x, y) in points {
+                    stroke.sample(x, y, &source, |_, _| 137);
+                }
+                stroke.finish(&source, |_, _| 137);
+                apply_stroke(&source, &stroke).unwrap().0
+            };
+            let dense: Vec<_> = (0..=40).map(|x| (50.5 + f64::from(x), 3.5)).collect();
+            assert_eq!(render(&dense), render(&[(50.5, 3.5), (90.5, 3.5)]));
+        }
+    }
+
+    #[test]
+    fn zero_flow_and_unchanged_targets_do_not_allocate_stroke_tiles_or_publish_changes() {
+        let clear = RgbaImage::new(5, 5);
+        let hidden = RgbaImage::from_pixel(5, 5, Rgba([99, 80, 120, 0]));
+        let solid = RgbaImage::from_pixel(5, 5, Rgba([50, 50, 50, 255]));
+        for (kind, source, brush) in [
+            (
+                StrokeKind::Paint,
+                &clear,
+                Brush {
+                    buildup: true,
+                    flow: 0,
+                    ..Default::default()
+                },
+            ),
+            (StrokeKind::Erase, &clear, Brush::default()),
+            (StrokeKind::Erase, &hidden, Brush::default()),
+            (
+                StrokeKind::Paint,
+                &clear,
+                Brush {
+                    opacity: 0,
+                    ..Default::default()
+                },
+            ),
+            (StrokeKind::Blur, &solid, Brush::default()),
+            (StrokeKind::Sharpen, &solid, Brush::default()),
+            (StrokeKind::Clone { dx: 0, dy: 0 }, &solid, Brush::default()),
+            (
+                StrokeKind::Clone { dx: 0, dy: 0 },
+                &hidden,
+                Brush::default(),
+            ),
+        ] {
+            let mut stroke = Stroke::new(kind, Rgba([50, 50, 50, 255]), brush);
+            stroke.sample(2.5, 2.5, source, |_, _| 255);
+            stroke.finish(source, |_, _| 255);
+            assert!(!stroke.changed());
+            assert!(stroke.tiles.is_empty());
+            assert!(stroke.take_pending_tiles().is_empty());
+            assert!(apply_stroke(source, &stroke).is_none());
+        }
+        assert_eq!(
+            Brush {
+                flow: 255,
+                opacity: 255,
+                ..Default::default()
+            }
+            .clamped()
+            .flow,
+            100
+        );
+    }
+
+    #[test]
     fn clone_stamp_copies_pixels_from_its_offset() {
         let mut source = RgbaImage::new(4, 1);
         source.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
@@ -625,6 +870,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 100,
+            ..Default::default()
         };
         let mut stroke = Stroke::new(
             StrokeKind::Clone { dx: 3, dy: 0 },
@@ -645,6 +891,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 100,
+            ..Default::default()
         };
         let mut blur = Stroke::new(StrokeKind::Blur, Rgba([0, 0, 0, 255]), brush);
         blur.sample(2.5, 2.5, &source, |_, _| 255);
@@ -705,6 +952,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 50,
+            ..Default::default()
         };
         let once = paint_at(&clear, StrokeKind::Paint, soft, &[(0.5, 0.5)]);
         let pixel = once.pixel(0, 0).unwrap().0;
@@ -713,8 +961,7 @@ mod tests {
         soft.diameter = 3;
         soft.spacing = 1;
         let twice = paint_at(&clear, StrokeKind::Paint, soft, &[(0.5, 0.5), (1.5, 0.5)]);
-        let compounded = twice.pixel(0, 0).unwrap().0[3];
-        assert!(compounded > pixel[3] && compounded < 255, "{compounded}");
+        assert_eq!(twice.pixel(0, 0).unwrap().0[3], pixel[3]);
         soft.diameter = 1;
 
         soft.opacity = 100;
@@ -734,6 +981,7 @@ mod tests {
                 spacing: 100,
                 hardness: 100,
                 opacity: 100,
+                ..Default::default()
             },
         );
         stroke.sample(1.5, 0.5, &opaque, |x, _| if x >= 2 { 0 } else { 255 });
@@ -751,6 +999,7 @@ mod tests {
                 spacing: 100,
                 hardness: 100,
                 opacity: 50,
+                ..Default::default()
             },
         );
         half.sample(0.5, 0.5, &opaque, |_, _| 128);
@@ -767,6 +1016,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 100,
+            ..Default::default()
         };
         let mut stroke = Stroke::new(StrokeKind::Paint, Rgba([0, 0, 0, 255]), brush);
         stroke.sample(0.5, 10.5, &image, |_, _| 255);
@@ -776,7 +1026,7 @@ mod tests {
             stroke
                 .tiles
                 .values()
-                .map(|tile| tile.as_raw().len())
+                .map(|tile| tile.pixels.as_raw().len() + tile.coverage.len() * size_of::<u16>())
                 .sum::<usize>()
                 < image.as_raw().len()
         );
@@ -799,6 +1049,7 @@ mod tests {
                 spacing: 100,
                 hardness: 100,
                 opacity: 100,
+                ..Default::default()
             },
             &[(0.5, 0.5), (10.5, 0.5)],
         );
@@ -868,7 +1119,10 @@ mod tests {
                 diameter: 1,
                 spacing: 100,
                 hardness: 100,
-                opacity: 50,
+                opacity: 100,
+                flow: 50,
+                buildup: true,
+                ..Default::default()
             },
         );
         stroke.trace(
@@ -885,7 +1139,10 @@ mod tests {
                 diameter: 1,
                 spacing: 100,
                 hardness: 100,
-                opacity: 50,
+                opacity: 100,
+                flow: 50,
+                buildup: true,
+                ..Default::default()
             },
         );
         repeated.trace(
@@ -937,6 +1194,7 @@ mod tests {
                 spacing: 100,
                 hardness: 100,
                 opacity: 100,
+                ..Default::default()
             },
         );
         stroke.sample(10.5, 10.5, &image, |_, _| 255);
@@ -973,6 +1231,7 @@ mod tests {
                 spacing: 25,
                 hardness: 80,
                 opacity: 100,
+                ..Default::default()
             },
         );
         let started = Instant::now();
@@ -1069,7 +1328,10 @@ mod tests {
             diameter: 3,
             spacing: 100,
             hardness: 100,
-            opacity: 50,
+            opacity: 100,
+            flow: 50,
+            buildup: true,
+            ..Default::default()
         };
         let plain = render_trace(&[(2.0, 3.0), (12.0, 3.0)], brush);
         let repeated = render_trace(&[(2.0, 3.0), (2.0, 3.0), (12.0, 3.0), (12.0, 3.0)], brush);

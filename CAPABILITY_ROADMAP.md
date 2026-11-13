@@ -78,10 +78,10 @@ Implementation considerations for that pass:
 
 - [x] Independent remembered settings for Brush, Pencil, Eraser, Blur, Sharpen,
       Clone Stamp, and outline strokes.
-- [ ] Define stroke opacity separately from dab/flow buildup; expose incremental
+- [x] Define stroke opacity separately from dab/flow buildup; expose incremental
       behavior deliberately rather than making spacing determine the meaning.
 - [ ] Optional stroke smoothing with bounded latency.
-- [ ] Predictable strength and repeat-pass behavior for Blur/Sharpen.
+- [x] Predictable strength and repeat-pass behavior for Blur/Sharpen.
 - [x] Clone aligned/unaligned behavior and scoped source validation.
 - [ ] Clone merged sampling and source preview.
 
@@ -365,7 +365,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 5 — selection and crop precision
 
-Implemented, uncommitted:
+Committed as `b35a519`:
 
 - Rectangle and oval selections have editable X/Y as well as Width/Height.
   Numeric edits preview live and commit one selection-only undo step; empty text
@@ -415,3 +415,53 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Move selections numerically, clear a field, press Escape, and undo/redo.
   Confirm selection-only changes do not mark a saved image unsaved. Apply a crop
   and confirm it remains one image undo step. Check controls in a narrow sidebar.
+
+## Pass 6 — paint opacity, flow, and retouch strength
+
+Implemented, uncommitted:
+
+- Opacity is now a per-stroke limit for Pencil, Brush, Eraser, and Clone Stamp.
+  Ordinary overlapping dabs use maximum coverage against the starting pixels,
+  so a 40% stroke no longer approaches full strength just because spacing is
+  tight. Releasing and painting again deliberately compounds a new stroke.
+- Optional Buildup reveals a separate Flow setting. Flow accumulates each dab's
+  coverage toward the opacity limit; selection coverage and color alpha apply
+  once after that accumulation. Defaults are Buildup off and Flow 100%. Each
+  paint/retouch tool remembers these settings independently during the session.
+  Buildup is distance sampled, with no stationary-pointer airbrush timer.
+- Blur and Sharpen label the limit Strength. Each stroke blends its original
+  pixels toward the existing local filter result; repeated dabs respect the
+  chosen strength. Buildup approaches it gradually, and each new stroke applies
+  another pass. Brush size still controls the affected area, not kernel radius.
+- Path/selection outline strokes use the same per-stroke coverage cap, including
+  overlapping contours. Their default remains non-buildup. Existing closed-join
+  and repeated-endpoint tests now also exercise the explicit buildup mode.
+- Touched 64 px tiles keep a 16-bit coverage buffer, adding scratch memory equal
+  to half their RGBA storage. It is transient stroke data, never project/history
+  data. Only real pixel changes invalidate previews or make the stroke dirty.
+  Zero opacity, zero flow in buildup mode, and unchanged targets remain no-ops.
+  Sub-byte buildup is retained without publishing invisible hidden-RGB edits.
+- Existing spacing and pointer resampling remain in place: event density along
+  the same path does not affect the result. Flow buildup intentionally depends
+  on the number of spatial dabs, so spacing still affects its rate. Pencil keeps
+  its hard edge and pixel snapping. No tool, dependency, or project-format change.
+- Smoothing and merged Clone sampling/source previews remain later work.
+
+Automatic validation: formatting, Clippy with warnings denied, all 291 tests,
+and both release benchmarks pass. Four new regression tests cover opacity and
+buildup caps across all six tools, repeat passes, source alpha/selection math,
+low-flow accumulation, pointer-event density, and no-op scratch/publication.
+Existing numeric limits and independent-setting tests include Flow/Buildup.
+The macOS bundle was rebuilt and its signature verified. No interactive or
+visual smoke tests were run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Paint, erase, and clone at 40% with tight spacing, crossing the same region
+  within one stroke, then release and repaint. Include soft and feathered edges.
+- Enable Buildup at low Flow; compare its gradual result to ordinary strokes,
+  try Flow/Opacity zero, and switch tools to check independent settings.
+- Blur/Sharpen at low Strength, revisit an area during the same stroke, then
+  apply another stroke. Undo/redo and Escape should retain their usual behavior.
+- Check live preview/commit agreement on offset or partially off-canvas layers
+  and at non-100% layer opacity; exercise Shift-click and release endpoints.

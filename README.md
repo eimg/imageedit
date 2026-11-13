@@ -21,6 +21,7 @@ tool and command icons, and a workspace that keeps the canvas in focus.
 - **Painting and retouching** — pencil, brush, eraser, clone stamp, gradients,
   and fills.
   Paint and retouch tools remember separate brush settings for the session.
+  Opacity limits each stroke; optional Buildup and Flow control gradual coverage.
 - **Text and paths** — editable text, searchable fonts, bold and italic,
   plus paths and strokes.
 - **Color and effects** — brightness, contrast, hue, saturation, levels,
@@ -96,6 +97,21 @@ strokes. Turn it off to start each stroke at the chosen source. Alt-click to set
 a source again after changing tabs/layers or moving/resizing the layer. Wand and
 connected Fill treat fully transparent pixels as the same color even when their
 stored RGB differs; other alpha and tolerance comparisons stay in effect.
+
+For **Pencil**, **Brush**, **Eraser**, and **Clone Stamp**, **Opacity** limits the
+effect of one stroke, including where its dabs overlap. Release and paint again
+to build up another stroke. **Buildup** starts off; enabling it reveals **Flow**,
+the coverage added by each dab toward the opacity limit. Lower flow builds more
+gradually as you paint over an area. Spacing controls the distance between dabs;
+pointer event frequency does not change the result along the same path. Soft
+selection edges and the paint color's alpha still limit coverage.
+
+**Blur** and **Sharpen** show **Strength** instead of Opacity. One stroke blends
+toward a local filtered result from the pixels at its start. Overlapping dabs
+respect that strength; Buildup and Flow optionally approach it gradually. A new
+stroke applies another filter pass. Each paint and retouch tool remembers its
+own flow and buildup setting during the session. Path and selection outline
+strokes also limit overlapping dabs to their stroke opacity.
 
 Use **View → Toggle Grid** for a dotted grid anchored to image pixels, with
 contrasting dots and a default spacing of 16 image pixels.

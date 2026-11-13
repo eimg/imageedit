@@ -576,6 +576,7 @@ mod tests {
                 spacing: 100,
                 hardness: 100,
                 opacity: 100,
+                ..Default::default()
             },
         );
         stroke.sample(0.5, 0.5, &image, |_, _| 255);
@@ -1051,6 +1052,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 100,
+            ..Default::default()
         };
         session.edit(
             |content| {

@@ -3388,6 +3388,7 @@ mod tests {
             spacing: 100,
             hardness: 100,
             opacity: 100,
+            ..Default::default()
         }
     }
 

@@ -1894,10 +1894,19 @@ impl Workspace {
                                         })
                                         .child(brush_row(
                                             self,
-                                            "Opacity",
+                                            if matches!(self.tool, Tool::Blur | Tool::Sharpen) { "Strength" } else { "Opacity" },
                                             super::paint_ui::BrushField::Opacity,
                                             cx,
                                         ))
+                                        .child(toggle_button("Buildup", self.brush_buildup()).on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_brush_buildup(!this.brush_buildup(), cx);
+                                        })))
+                                        .when(self.brush_buildup(), |panel| panel.child(brush_row(
+                                            self,
+                                            "Flow",
+                                            super::paint_ui::BrushField::Flow,
+                                            cx,
+                                        )))
                                 },
                             ),
 
@@ -3280,6 +3289,7 @@ fn brush_row(
         super::paint_ui::BrushField::Spacing => NumericField::BrushSpacing,
         super::paint_ui::BrushField::Hardness => NumericField::BrushHardness,
         super::paint_ui::BrushField::Opacity => NumericField::BrushOpacity,
+        super::paint_ui::BrushField::Flow => NumericField::BrushFlow,
     };
     option_row(
         label,
