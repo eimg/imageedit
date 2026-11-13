@@ -23,7 +23,10 @@ pub(super) enum NumericField {
     TextSize,
     TextLineSpacing,
     TextLetterSpacing,
-    Tolerance,
+    WandTolerance,
+    FillTolerance,
+    WandGapRadius,
+    FillGapRadius,
     BrushSize,
     BrushSpacing,
     BrushHardness,
@@ -60,7 +63,10 @@ impl NumericField {
             Self::TextSize => 7,
             Self::TextLineSpacing => 8,
             Self::TextLetterSpacing => 9,
-            Self::Tolerance => 10,
+            Self::WandTolerance => 10,
+            Self::FillTolerance => 32,
+            Self::WandGapRadius => 33,
+            Self::FillGapRadius => 34,
             Self::BrushSize => 11,
             Self::BrushSpacing => 12,
             Self::BrushHardness => 13,
@@ -159,7 +165,10 @@ impl NumericField {
         matches!(
             self,
             Self::TextLetterSpacing
-                | Self::Tolerance
+                | Self::WandTolerance
+                | Self::FillTolerance
+                | Self::WandGapRadius
+                | Self::FillGapRadius
                 | Self::BrushSize
                 | Self::BrushSpacing
                 | Self::BrushHardness
@@ -180,7 +189,10 @@ impl NumericField {
 
     fn constrain(self, value: i64) -> i64 {
         let (min, max) = match self {
-            Self::Tolerance => (0, 255),
+            Self::WandTolerance | Self::FillTolerance => (0, 255),
+            Self::WandGapRadius | Self::FillGapRadius => {
+                (0, i64::from(crate::selection::MAX_GAP_RADIUS))
+            }
             Self::GridSpacing => (1, 4096),
             Self::SelectionFeatherRadius => (0, 128),
             Self::GradientStopPosition => (0, 1000),
@@ -385,7 +397,10 @@ impl Workspace {
                 Some((self.text_line_spacing() * 100.0).round() as i64)
             }
             NumericField::TextLetterSpacing => Some(self.text_letter_spacing().round() as i64),
-            NumericField::Tolerance => Some(i64::from(self.tolerance)),
+            NumericField::WandTolerance => Some(i64::from(self.wand_match.tolerance)),
+            NumericField::FillTolerance => Some(i64::from(self.fill_match.tolerance)),
+            NumericField::WandGapRadius => Some(i64::from(self.wand_match.gap_radius)),
+            NumericField::FillGapRadius => Some(i64::from(self.fill_match.gap_radius)),
             NumericField::BrushSize => Some(i64::from(self.brush_value(BrushField::Size))),
             NumericField::BrushSpacing => Some(i64::from(self.brush_value(BrushField::Spacing))),
             NumericField::BrushHardness => Some(i64::from(self.brush_value(BrushField::Hardness))),
@@ -916,7 +931,10 @@ impl Workspace {
     ) {
         let value = field.constrain(value);
         match field {
-            NumericField::Tolerance => self.tolerance = value as u8,
+            NumericField::WandTolerance => self.wand_match.tolerance = value as u8,
+            NumericField::FillTolerance => self.fill_match.tolerance = value as u8,
+            NumericField::WandGapRadius => self.wand_match.gap_radius = value as u8,
+            NumericField::FillGapRadius => self.fill_match.gap_radius = value as u8,
             NumericField::GridSpacing => self.grid_spacing = value as u32,
             NumericField::SelectionFeatherRadius => self.selection_feather_radius = value as u32,
             NumericField::GradientStopPosition => self.move_gradient_stop(value as u16, window, cx),
@@ -1290,14 +1308,25 @@ mod tests {
 
     #[test]
     fn typed_tool_values_obey_the_same_limits_as_the_step_buttons() {
-        let mut edit = NumericEdit::new(NumericField::Tolerance, 32, None);
+        let mut edit = NumericEdit::new(NumericField::WandTolerance, 32, None);
         edit.insert_digits("255");
         assert_eq!(parse_numeric(&edit.text), Some(255));
         edit.move_left();
         edit.backspace();
         assert_eq!(parse_numeric(&edit.text), Some(25));
         for (field, min, max) in [
-            (NumericField::Tolerance, 0, 255),
+            (NumericField::WandTolerance, 0, 255),
+            (NumericField::FillTolerance, 0, 255),
+            (
+                NumericField::WandGapRadius,
+                0,
+                i64::from(crate::selection::MAX_GAP_RADIUS),
+            ),
+            (
+                NumericField::FillGapRadius,
+                0,
+                i64::from(crate::selection::MAX_GAP_RADIUS),
+            ),
             (NumericField::BrushSize, 1, 500),
             (NumericField::BrushSpacing, 1, 100),
             (NumericField::BrushHardness, 0, 100),

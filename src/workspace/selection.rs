@@ -700,6 +700,27 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn nudge_region_match(
+        &mut self,
+        wand: bool,
+        gap: bool,
+        delta: i16,
+        cx: &mut Context<Self>,
+    ) {
+        let matching = if wand {
+            &mut self.wand_match
+        } else {
+            &mut self.fill_match
+        };
+        let (value, max) = if gap {
+            (&mut matching.gap_radius, crate::selection::MAX_GAP_RADIUS)
+        } else {
+            (&mut matching.tolerance, u8::MAX)
+        };
+        *value = (i16::from(*value) + delta).clamp(0, i16::from(max)) as u8;
+        cx.notify();
+    }
+
     pub(super) fn wand_at(
         &mut self,
         position: Point<Pixels>,
@@ -727,21 +748,32 @@ impl Workspace {
         let content = tab.document.content.clone();
         let layer = tab.active_layer;
         let op = selection_op(modifiers);
-        let tolerance = self.tolerance;
+        let matching = self.wand_match;
         let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, size| {
                 let Some(source) = wand_source(&content, layer, sample_all, (x, y)) else {
                     return current;
                 };
-                let shape = Selection::flood(
-                    &source.pixels,
-                    source.point.0,
-                    source.point.1,
-                    tolerance,
-                    source.offset,
-                    size,
-                );
+                let shape = if matching.gap_radius == 0 {
+                    Selection::flood(
+                        &source.pixels,
+                        source.point.0,
+                        source.point.1,
+                        matching.tolerance,
+                        source.offset,
+                        size,
+                    )
+                } else {
+                    Selection::flood_region(
+                        &source.pixels,
+                        source.point,
+                        matching,
+                        source.offset,
+                        size,
+                        None,
+                    )
+                };
                 combine_created_selection(current, shape, op, size, feather)
             },
             window,

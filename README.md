@@ -187,8 +187,19 @@ changing sampling, tabs/layers, or layer/canvas geometry. Sampling and alignment
 cannot change during an active stroke. These settings are independent of the
 Wand and Bucket Fill sample settings.
 
-Wand and connected Fill treat fully transparent pixels as the same color even when their
-stored RGB differs; other alpha and tolerance comparisons stay in effect.
+Wand and connected Fill treat fully transparent pixels as the same color even
+when their stored RGB differs; other alpha and tolerance comparisons stay in
+effect. Each tool remembers its own **Tolerance** and **Gap radius** for the
+session. Tolerance 0 matches exactly. Gap radius starts at 0 (off); increase it
+up to 8 image pixels to close small breaks in line-art boundaries before finding
+the connected region. Larger radii can also seal narrow passages or small
+regions, so start low. The boundary mask is temporary; the artwork is unchanged
+until you fill, and original nonmatching pixels are never included in the fill.
+
+Wand applies new-selection feathering after gap closure, then combines the new
+region with the existing selection. Bucket's Selection mode fills the whole
+selection and hides the connected-only tolerance, gap, and sampling controls;
+their remembered values return when you choose Connected.
 
 For **Pencil**, **Brush**, **Eraser**, and **Clone Stamp**, **Opacity** limits the
 effect of one stroke, including where its dabs overlap. Release and paint again

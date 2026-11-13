@@ -459,7 +459,8 @@ impl Workspace {
         let request = crate::document::FillRequest {
             mode: self.fill_mode,
             sample_all: self.sample_all,
-            tolerance: self.tolerance,
+            tolerance: self.fill_match.tolerance,
+            gap_radius: self.fill_match.gap_radius,
         };
         self.edit_content(
             move |content, _, selection| {

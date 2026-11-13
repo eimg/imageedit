@@ -5,6 +5,49 @@ use image::{Rgba, RgbaImage};
 
 use crate::preview::PixelRect;
 
+pub const MAX_GAP_RADIUS: u8 = 8;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegionMatch {
+    pub tolerance: u8,
+    pub gap_radius: u8,
+}
+
+impl RegionMatch {
+    /// Close small breaks in the nonmatching boundaries, in source-pixel space.
+    /// Original nonmatching pixels remain blocked independently of this mask.
+    pub fn gap_barrier(self, image: &RgbaImage, seed: (u32, u32)) -> Option<Selection> {
+        let radius = u32::from(self.gap_radius.min(MAX_GAP_RADIUS));
+        if radius == 0 || seed.0 >= image.width() || seed.1 >= image.height() {
+            return None;
+        }
+        let target = *image.get_pixel(seed.0, seed.1);
+        let mut pixels: Vec<u8> = image
+            .pixels()
+            .map(|pixel| u8::from(!within_tolerance(*pixel, target, self.tolerance)) * 255)
+            .collect();
+        let (width, height) = image.dimensions();
+        // The source is a finite domain: erosion ignores nonexistent neighbors
+        // so nearby image edges do not reopen a bridge. Homogeneous sources
+        // still have no barriers, including one-pixel-wide images.
+        extrema_image(
+            &mut pixels,
+            (width as usize, height as usize),
+            radius as usize,
+            true,
+            0,
+        );
+        extrema_image(
+            &mut pixels,
+            (width as usize, height as usize),
+            radius as usize,
+            false,
+            255,
+        );
+        Some(finish_mask(0, 0, width, height, pixels, width, height))
+    }
+}
+
 // A canvas-space selection. Unrestricted, empty, full, a rectangle, and its inverse stay
 // allocation-free. A combined or feathered selection stores coverage inside the canvas.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -907,6 +950,37 @@ impl Selection {
         flood_selection(image, x, y, tolerance, offset, canvas, |_, _| true)
     }
 
+    pub fn flood_region(
+        image: &RgbaImage,
+        seed: (u32, u32),
+        matching: RegionMatch,
+        offset: (i32, i32),
+        canvas: (u32, u32),
+        limit: Option<&Selection>,
+    ) -> Self {
+        let barrier = matching.gap_barrier(image, seed);
+        flood_selection(
+            image,
+            seed.0,
+            seed.1,
+            matching.tolerance,
+            offset,
+            canvas,
+            |px, py| {
+                barrier.as_ref().is_none_or(|barrier| {
+                    !barrier.covers(i64::from(px), i64::from(py), image.width(), image.height())
+                }) && limit.is_none_or(|limit| {
+                    limit.covers(
+                        i64::from(px) + i64::from(offset.0),
+                        i64::from(py) + i64::from(offset.1),
+                        canvas.0,
+                        canvas.1,
+                    )
+                })
+            },
+        )
+    }
+
     pub fn flood_within(
         image: &RgbaImage,
         x: u32,
@@ -1750,27 +1824,13 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
     }
     if matches!(kind, Reshape::Grow | Reshape::Shrink) {
         let grow = matches!(kind, Reshape::Grow);
-        let columns = buf_w as usize;
-        let rows = buf_h as usize;
-        let mut horizontal = vec![0; source.len()];
-        for row in 0..rows {
-            extrema_line(
-                columns,
-                radius as usize,
-                grow,
-                |column| source[row * columns + column],
-                |column, value| horizontal[row * columns + column] = value,
-            );
-        }
-        for column in 0..columns {
-            extrema_line(
-                rows,
-                radius as usize,
-                grow,
-                |row| horizontal[row * columns + column],
-                |row, value| source[row * columns + column] = value,
-            );
-        }
+        extrema_image(
+            &mut source,
+            (buf_w as usize, buf_h as usize),
+            radius as usize,
+            grow,
+            0,
+        );
         return finish_mask(left, top, buf_w, buf_h, source, width, height);
     }
     let area = u64::from(radius * 2 + 1) * u64::from(radius * 2 + 1);
@@ -1814,12 +1874,39 @@ fn reshape(selection: Selection, radius: u32, width: u32, height: u32, kind: Res
     finish_mask(left, top, buf_w, buf_h, output, width, height)
 }
 
+fn extrema_image(source: &mut [u8], size: (usize, usize), radius: usize, grow: bool, outside: u8) {
+    let (columns, rows) = size;
+    let mut horizontal = vec![0; source.len()];
+    for row in 0..rows {
+        extrema_line(
+            columns,
+            radius,
+            grow,
+            outside,
+            |column| source[row * columns + column],
+            |column, value| horizontal[row * columns + column] = value,
+        );
+    }
+    for column in 0..columns {
+        extrema_line(
+            rows,
+            radius,
+            grow,
+            outside,
+            |row| horizontal[row * columns + column],
+            |row, value| source[row * columns + column] = value,
+        );
+    }
+}
+
 // A monotonic deque gives a running max/min in linear time, retaining soft
-// coverage. Pixels outside the image have zero coverage, including for erosion.
+// coverage. Ordinary selection morphology uses zero outside coverage; boundary
+// closing uses 255 for erosion so nonexistent source pixels do not reopen gaps.
 fn extrema_line(
     length: usize,
     radius: usize,
     grow: bool,
+    outside: u8,
     sample: impl Fn(usize) -> u8,
     mut store: impl FnMut(usize, u8),
 ) {
@@ -1845,10 +1932,15 @@ fn extrema_line(
         while queue.front().is_some_and(|&at| at < start) {
             queue.pop_front();
         }
-        let value = if !grow && (center < radius || radius >= length - center) {
-            0
+        let inside = queue.front().map_or(outside, |&at| sample(at));
+        let value = if center < radius || radius >= length - center {
+            if grow {
+                inside.max(outside)
+            } else {
+                inside.min(outside)
+            }
         } else {
-            queue.front().map_or(0, |&at| sample(at))
+            inside
         };
         store(center, value);
     }
@@ -1993,6 +2085,218 @@ fn invert_mask(mask: &Mask, width: u32, height: u32) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gap_radius_seals_small_breaks_but_preserves_larger_openings_and_original_ink() {
+        let line_art = |gap: std::ops::RangeInclusive<u32>| {
+            RgbaImage::from_fn(9, 9, |x, y| {
+                let wall = ((x == 1 || x == 7) && (1..=7).contains(&y))
+                    || ((y == 1 || y == 7) && (1..=7).contains(&x));
+                Rgba(if wall && !(y == 1 && gap.contains(&x)) {
+                    [0, 0, 0, 255]
+                } else {
+                    [255; 4]
+                })
+            })
+        };
+        let select = |image: &RgbaImage, radius| {
+            Selection::flood_region(
+                image,
+                (4, 4),
+                RegionMatch {
+                    tolerance: 0,
+                    gap_radius: radius,
+                },
+                (0, 0),
+                (9, 9),
+                None,
+            )
+        };
+        let narrow = line_art(4..=4);
+        assert!(select(&narrow, 0).covers(0, 0, 9, 9));
+        let sealed = select(&narrow, 1);
+        assert!(sealed.covers(4, 4, 9, 9));
+        assert!(!sealed.covers(0, 0, 9, 9));
+        assert!(!sealed.covers(4, 1, 9, 9));
+        assert!(!sealed.covers(1, 4, 9, 9));
+        let wide = line_art(3..=5);
+        assert!(select(&wide, 1).covers(4, 0, 9, 9));
+        assert!(select(&wide, 2).covers(4, 4, 9, 9));
+        assert!(!select(&wide, 2).covers(4, 0, 9, 9));
+        assert_eq!(
+            select(&narrow, 0),
+            Selection::flood(&narrow, 4, 4, 0, (0, 0), (9, 9))
+        );
+        // Disabled gap closure does not even allocate a boundary mask.
+        assert!(
+            RegionMatch::default()
+                .gap_barrier(&narrow, (4, 4))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gap_flood_honors_canvas_space_limits_and_rejects_invalid_seeds() {
+        let image = RgbaImage::from_pixel(5, 5, Rgba([255; 4]));
+        let matching = RegionMatch {
+            tolerance: 0,
+            gap_radius: u8::MAX,
+        };
+        let limit = Selection::Inverse(PixelRect::new(4, 0, 1, 7));
+        let region =
+            Selection::flood_region(&image, (0, 2), matching, (2, 1), (9, 7), Some(&limit));
+        assert!(region.covers(2, 3, 9, 7));
+        assert!(!region.covers(4, 3, 9, 7));
+        assert!(!region.covers(5, 3, 9, 7));
+        assert_eq!(
+            region,
+            Selection::flood_region(
+                &image,
+                (0, 2),
+                RegionMatch {
+                    gap_radius: MAX_GAP_RADIUS,
+                    ..matching
+                },
+                (2, 1),
+                (9, 7),
+                Some(&limit)
+            )
+        );
+        assert_eq!(
+            Selection::flood_region(&image, (2, 2), matching, (2, 1), (9, 7), Some(&limit)),
+            Selection::Empty
+        );
+        assert_eq!(
+            Selection::flood_region(&image, (5, 5), matching, (0, 0), (5, 5), None),
+            Selection::Empty
+        );
+        assert_eq!(
+            Selection::flood_region(
+                &RgbaImage::new(0, 0),
+                (0, 0),
+                matching,
+                (0, 0),
+                (5, 5),
+                None
+            ),
+            Selection::Empty
+        );
+    }
+
+    #[test]
+    fn gap_aware_flood_matches_an_independent_binary_closing_and_connectivity_oracle() {
+        let mut random = 17u32;
+        for (width, height) in [(1, 1), (1, 6), (6, 1), (5, 7), (8, 6)] {
+            for radius in 0..=2u8 {
+                for _ in 0..8 {
+                    let image = RgbaImage::from_fn(width, height, |_, _| {
+                        random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                        match random % 4 {
+                            0 => Rgba([3, 20, 70, 0]),
+                            1 => Rgba([210, 9, 35, 0]),
+                            2 => Rgba([250, 248, 246, 255]),
+                            _ => Rgba([255; 4]),
+                        }
+                    });
+                    let seed = (width / 2, height / 2);
+                    let target = image.get_pixel(seed.0, seed.1).0;
+                    for tolerance in [0, 8, 255] {
+                        let count = (width * height) as usize;
+                        let matching: Vec<_> = image
+                            .pixels()
+                            .map(|pixel| {
+                                (pixel[3] == 0 && target[3] == 0)
+                                    || (0..4).all(|channel| {
+                                        pixel[channel].abs_diff(target[channel]) <= tolerance
+                                    })
+                            })
+                            .collect();
+                        let mut dilated = vec![false; count];
+                        let mut closed = vec![false; count];
+                        if radius > 0 {
+                            let r = i32::from(radius);
+                            for y in 0..height as i32 {
+                                for x in 0..width as i32 {
+                                    dilated[(y as u32 * width + x as u32) as usize] =
+                                        (-r..=r).any(|dy| {
+                                            (-r..=r).any(|dx| {
+                                                let (nx, ny) = (x + dx, y + dy);
+                                                nx >= 0
+                                                    && ny >= 0
+                                                    && nx < width as i32
+                                                    && ny < height as i32
+                                                    && !matching
+                                                        [(ny as u32 * width + nx as u32) as usize]
+                                            })
+                                        });
+                                }
+                            }
+                            for y in 0..height as i32 {
+                                for x in 0..width as i32 {
+                                    closed[(y as u32 * width + x as u32) as usize] =
+                                        (-r..=r).all(|dy| {
+                                            (-r..=r).all(|dx| {
+                                                let (nx, ny) = (x + dx, y + dy);
+                                                nx < 0
+                                                    || ny < 0
+                                                    || nx >= width as i32
+                                                    || ny >= height as i32
+                                                    || dilated
+                                                        [(ny as u32 * width + nx as u32) as usize]
+                                            })
+                                        });
+                                }
+                            }
+                        }
+                        let mut reached = vec![false; count];
+                        let mut queue = std::collections::VecDeque::from([seed]);
+                        while let Some((x, y)) = queue.pop_front() {
+                            let index = (y * width + x) as usize;
+                            if reached[index] || !matching[index] || closed[index] {
+                                continue;
+                            }
+                            reached[index] = true;
+                            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                                if nx >= 0 && ny >= 0 && nx < width as i32 && ny < height as i32 {
+                                    queue.push_back((nx as u32, ny as u32));
+                                }
+                            }
+                        }
+                        // Include clipping and off-canvas traversal in the comparison.
+                        let offset = (-1, 1);
+                        let canvas = (width + 1, height + 2);
+                        let selected = Selection::flood_region(
+                            &image,
+                            seed,
+                            RegionMatch {
+                                tolerance,
+                                gap_radius: radius,
+                            },
+                            offset,
+                            canvas,
+                            None,
+                        );
+                        for y in 0..canvas.1 {
+                            for x in 0..canvas.0 {
+                                let (sx, sy) = (x as i32 - offset.0, y as i32 - offset.1);
+                                let expected = sx >= 0
+                                    && sy >= 0
+                                    && sx < width as i32
+                                    && sy < height as i32
+                                    && reached[(sy as u32 * width + sx as u32) as usize];
+                                assert_eq!(
+                                    selected.covers(i64::from(x), i64::from(y), canvas.0, canvas.1),
+                                    expected,
+                                    "{width}x{height}, radius {radius}, tolerance {tolerance}, ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn antialiased_curves_match_subpixel_coverage_and_keep_geometry_when_clipped() {
@@ -2526,6 +2830,7 @@ mod tests {
                 mode: FillMode::Selection,
                 sample_all: false,
                 tolerance: 0,
+                gap_radius: 0,
             },
         );
         let mut cleared = DocumentContent::single_layer(

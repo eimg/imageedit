@@ -1008,6 +1008,7 @@ impl DocumentContent {
                 mode: FillMode::Connected,
                 sample_all: false,
                 tolerance,
+                gap_radius: 0,
             },
         )
     }
@@ -1036,7 +1037,22 @@ impl DocumentContent {
             return None;
         }
         let connected = (request.sample_all && request.mode == FillMode::Connected).then(|| {
-            Selection::flood_within(&self.composite(), x, y, request.tolerance, selection)
+            let source = self.composite();
+            if request.gap_radius == 0 {
+                Selection::flood_within(&source, x, y, request.tolerance, selection)
+            } else {
+                Selection::flood_region(
+                    &source,
+                    (x, y),
+                    crate::selection::RegionMatch {
+                        tolerance: request.tolerance,
+                        gap_radius: request.gap_radius,
+                    },
+                    (0, 0),
+                    canvas,
+                    Some(selection),
+                )
+            }
         });
         let layer = self.layers.iter_mut().find(|layer| layer.id == id)?;
         let origin_x = i64::from(layer.offset.0);
@@ -1084,8 +1100,21 @@ impl DocumentContent {
                     if request.tolerance == 0 && target == color {
                         return None;
                     }
+                    let barrier = crate::selection::RegionMatch {
+                        tolerance: request.tolerance,
+                        gap_radius: request.gap_radius,
+                    }
+                    .gap_barrier(&pixels, (local_x, local_y));
                     let included = |px, py| {
                         within_tolerance(*pixels.get_pixel(px, py), target, request.tolerance)
+                            && barrier.as_ref().is_none_or(|barrier| {
+                                !barrier.covers(
+                                    i64::from(px),
+                                    i64::from(py),
+                                    pixels.width(),
+                                    pixels.height(),
+                                )
+                            })
                     };
                     bucket_fill(&pixels, local_x, local_y, ink, coverage, included)?
                 }
@@ -2010,6 +2039,7 @@ pub struct FillRequest {
     pub mode: FillMode,
     pub sample_all: bool,
     pub tolerance: u8,
+    pub gap_radius: u8,
 }
 
 pub struct ImageLayer {
@@ -2270,6 +2300,184 @@ fn mix_fill(before: Rgba<u8>, color: Rgba<u8>, coverage: u8) -> Rgba<u8> {
 mod tests {
     use super::*;
 
+    fn gap_line_art() -> RgbaImage {
+        RgbaImage::from_fn(9, 9, |x, y| {
+            let wall = ((x == 1 || x == 7) && (1..=7).contains(&y))
+                || ((y == 1 || y == 7) && (1..=7).contains(&x));
+            if wall && (x, y) != (4, 1) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255; 4])
+            }
+        })
+    }
+
+    #[test]
+    fn gap_aware_bucket_uses_active_or_merged_boundaries_without_repainting_the_ink() {
+        let red = Rgba([255, 0, 0, 255]);
+        for sample_all in [false, true] {
+            let art = gap_line_art();
+            let mut content = DocumentContent::single_layer("ink".into(), art);
+            let ink = content.top_layer_id();
+            let original = content.layer(ink).unwrap().pixels.clone();
+            let target = if sample_all {
+                content
+                    .add_layer(ink, "color".into(), Rgba([0; 4]))
+                    .unwrap()
+            } else {
+                ink
+            };
+            let before = content.layer(target).unwrap().pixels.clone();
+            let request = FillRequest {
+                mode: FillMode::Connected,
+                sample_all,
+                tolerance: 0,
+                gap_radius: 1,
+            };
+            let mut leaky = content.clone();
+            assert!(
+                leaky
+                    .fill_bucket(
+                        target,
+                        4,
+                        4,
+                        red,
+                        &Selection::Unrestricted,
+                        FillRequest {
+                            gap_radius: 0,
+                            ..request
+                        }
+                    )
+                    .is_some()
+            );
+            assert_eq!(*leaky.layer(target).unwrap().pixels.get_pixel(4, 0), red);
+            assert!(
+                content
+                    .fill_bucket(target, 4, 4, red, &Selection::Unrestricted, request)
+                    .is_some()
+            );
+            let result = &content.layer(target).unwrap().pixels;
+            assert_eq!(*result.get_pixel(4, 4), red);
+            for point in [(4, 0), (4, 1), (1, 4)] {
+                assert_eq!(
+                    result.get_pixel(point.0, point.1),
+                    before.get_pixel(point.0, point.1)
+                );
+            }
+            if sample_all {
+                assert!(Arc::ptr_eq(&original, &content.layer(ink).unwrap().pixels));
+            }
+            assert_eq!(*original.get_pixel(4, 4), Rgba([255; 4]));
+        }
+    }
+
+    #[test]
+    fn gap_fill_preserves_layer_offsets_off_canvas_coverage_soft_masks_gray_and_alpha_lock() {
+        for kind in 0..3 {
+            for locked in [false, true] {
+                let mut art = gap_line_art();
+                for pixel in art.pixels_mut() {
+                    if pixel[0] == 255 {
+                        pixel[3] = 128;
+                    }
+                }
+                let mut content = DocumentContent::single_layer("ink".into(), art.clone());
+                let id = content.top_layer_id();
+                content.place_layer(id, art, (-3, 1));
+                content.set_color_mode(crate::transform::ColorMode::Grayscale);
+                content.set_layer_locks(
+                    id,
+                    LayerLocks {
+                        alpha: locked,
+                        position: false,
+                    },
+                );
+                let selection = match kind {
+                    0 => Selection::Unrestricted,
+                    1 => Selection::Full,
+                    _ => Selection::Rect(PixelRect::new(0, 1, 7, 7)).feather(2, 9, 9),
+                };
+                let original = content.layer(id).unwrap().pixels.clone();
+                assert!(
+                    content
+                        .fill_bucket(
+                            id,
+                            1,
+                            5,
+                            Rgba([220, 40, 10, 180]),
+                            &selection,
+                            FillRequest {
+                                mode: FillMode::Connected,
+                                sample_all: false,
+                                tolerance: 0,
+                                gap_radius: 1
+                            }
+                        )
+                        .is_some()
+                );
+                let result = &content.layer(id).unwrap().pixels;
+                assert_ne!(result.get_pixel(4, 4), original.get_pixel(4, 4));
+                for (x, y, previous) in original.enumerate_pixels() {
+                    let next = result.get_pixel(x, y);
+                    assert_eq!(next[0], next[1]);
+                    assert_eq!(next[1], next[2]);
+                    if locked {
+                        assert_eq!(next[3], previous[3]);
+                    }
+                    if selection.coverage(i64::from(x) - 3, i64::from(y) + 1, 9, 9) == 0 {
+                        assert_eq!(next, previous);
+                    }
+                }
+                if kind == 0 {
+                    assert_ne!(result.get_pixel(2, 4), original.get_pixel(2, 4));
+                } else {
+                    assert_eq!(result.get_pixel(2, 4), original.get_pixel(2, 4));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whole_selection_fill_ignores_connected_match_gap_and_sampling_settings() {
+        let mut plain = DocumentContent::single_layer("ink".into(), gap_line_art());
+        let mut configured = plain.clone();
+        let id = plain.top_layer_id();
+        let selection = Selection::Rect(PixelRect::new(1, 1, 7, 7)).feather(1, 9, 9);
+        let request = FillRequest {
+            mode: FillMode::Selection,
+            sample_all: false,
+            tolerance: 0,
+            gap_radius: 0,
+        };
+        let color = Rgba([220, 30, 40, 180]);
+        assert!(
+            plain
+                .fill_bucket(id, 4, 4, color, &selection, request)
+                .is_some()
+        );
+        assert!(
+            configured
+                .fill_bucket(
+                    id,
+                    4,
+                    4,
+                    color,
+                    &selection,
+                    FillRequest {
+                        sample_all: true,
+                        tolerance: 255,
+                        gap_radius: 8,
+                        ..request
+                    }
+                )
+                .is_some()
+        );
+        assert_eq!(
+            plain.layer(id).unwrap().pixels,
+            configured.layer(id).unwrap().pixels
+        );
+    }
+
     #[test]
     fn alpha_lock_preserves_coverage_for_fills_gradients_filters_and_outline_strokes() {
         let source = RgbaImage::from_fn(6, 4, |x, y| {
@@ -2321,6 +2529,7 @@ mod tests {
                             },
                             tolerance: 255,
                             sample_all: operation == 0,
+                            gap_radius: 0,
                         },
                     );
                 }
@@ -2565,7 +2774,8 @@ mod tests {
                     FillRequest {
                         mode: FillMode::Selection,
                         sample_all: false,
-                        tolerance: 0
+                        tolerance: 0,
+                        gap_radius: 0,
                     }
                 )
                 .is_some()
@@ -2688,7 +2898,8 @@ mod tests {
                         FillRequest {
                             mode: FillMode::Connected,
                             sample_all,
-                            tolerance: 0
+                            tolerance: 0,
+                            gap_radius: 0,
                         }
                     )
                     .is_some()
@@ -3443,6 +3654,7 @@ mod tests {
             mode: FillMode::Connected,
             sample_all: true,
             tolerance: 0,
+            gap_radius: 0,
         };
         content
             .fill_bucket(active, 0, 2, blue, &Selection::Unrestricted, request)
@@ -3514,6 +3726,7 @@ mod tests {
             mode: FillMode::Connected,
             sample_all: false,
             tolerance: 0,
+            gap_radius: 0,
         };
         assert_eq!(
             content.fill_bucket(top, 0, 0, ink, &open, connected),
@@ -3556,6 +3769,7 @@ mod tests {
                     mode: FillMode::Selection,
                     sample_all: true,
                     tolerance: 0,
+                    gap_radius: 0,
                 },
             ),
             Some(PixelRect::new(0, 0, 3, 1))

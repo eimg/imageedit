@@ -106,8 +106,8 @@ preserve source and layout; failed commits retain recoverable drafts.
 - [x] Wand sampling from active layer or visible composite.
 - [x] Deliberate handling of fully transparent pixels and hidden RGB.
 - [ ] Improved edge coverage around antialiased artwork.
-- [ ] Optional small-gap closure for line-art fills.
-- [ ] Revisit whether Wand/Bucket tolerance should be linked or remembered separately.
+- [x] Optional small-gap closure for line-art fills and wand selections.
+- [x] Remember Wand/Bucket tolerance and gap radius separately during the session.
 
 ## Layers and compositing
 
@@ -1090,7 +1090,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 17 — PDF backgrounds, canvas sizing, and session defaults
 
-Implemented; committed at the start of Pass 18:
+Implemented; committed as `9a8295f` at the start of Pass 18:
 
 - PDF import offers White (default) and Transparent page backgrounds. Rendering
   starts with that background and retains straight RGBA opacity; transparent
@@ -1147,3 +1147,63 @@ Manual interaction testing stays with the maintainer. Useful checks:
   import, use invalid/oversized choices, or let a target become stale, then check
   defaults stay at the last successful settings. Open as Layers must preserve
   the remembered new-document mode/canvas policy; restart resets session defaults.
+
+
+## Pass 18 — independent region settings and optional line-art gap closure
+
+Implemented; committed at the start of Pass 19:
+
+- Wand and Bucket remember independent Tolerance and Gap radius values during
+  the workspace session. Both start at zero. Typed edits and steppers share
+  0–255 tolerance and 0–8 image-pixel radius bounds. Numeric field identities are
+  pinned to their tool, including empty/Escape restoration after context changes;
+  preferences alone do not modify pixels, selections, history, or saved revision.
+- Nonzero radius closes small breaks in a temporary nonmatching-boundary mask
+  before four-connected traversal. Square max/min closing reuses a linear-time
+  separable extrema kernel with two byte buffers. Finite-source erosion ignores
+  nonexistent neighbors, including near image edges and on thin sources. Source
+  colors and original nonmatching boundaries are never modified by closure.
+  Large radii can seal narrow passages or small regions; 0 retains the previous
+  flood/fill path without allocating a boundary mask.
+- Wand closes in source-pixel space, preserves off-canvas connectivity while
+  clipping the output to the canvas, and performs creation feathering only after
+  region detection, before add/subtract/intersect. Existing selection-only undo
+  and saved-state behavior remain in the normal selection job.
+- Active-layer Bucket keeps layer-local and unrestricted off-canvas coverage.
+  Sample All Layers closes boundaries in the visible composite, respects the
+  selection's traversal domain, and writes only the active layer. Soft selection
+  coverage, grayscale, alpha locks, and transparent hidden-RGB rules remain in
+  effect. Selection mode hides/ignores connected-only match and sampling controls
+  while preserving their values; switching modes finishes any inline numeric edit.
+- Ordinary selection Grow/Shrink retain zero outside coverage despite sharing
+  the running extrema kernel. Added help/tooltips and updated README/AGENTS.
+  No new toolbox tool, dependency, project-format, package-version, publishing,
+  installer, or icon changes. Wand antialiasing and improved coverage around
+  antialiased artwork remain planned independently of this hard-boundary feature.
+
+Automatic validation: formatting, Clippy with warnings denied, all 375 tests,
+and both release benchmarks pass. Six new regression tests cover useful versus
+oversized openings, 360 deterministic comparisons with an independent binary
+closing/connectivity oracle (including thin sources, hidden RGB, tolerances,
+and clipped offsets), selection-domain limits and invalid seeds, active/merged
+fill agreement, original-ink preservation, off-canvas/soft-mask/grayscale/alpha
+lock behavior, and whole-selection independence from connected-only settings.
+The existing numeric-bounds test now includes both tools' tolerance and radius
+fields, and ordinary Grow/Shrink's reference tests remain passing.
+`dist/Lime.app` is rebuilt and its signature verified. No interactive or visual
+smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Set different Wand/Bucket tolerances and radii, switch tools repeatedly, type
+  values past the limits, clear a field, and press Escape. Verify each tool keeps
+  its own settings and preference changes do not dirty the document.
+- Select/fill line art with small and large openings at radii 0, 1, 2, and 8.
+  Try breaks near image edges and narrow passages. Confirm off retains the old
+  result, useful gaps stop leaking, and original boundary pixels are preserved.
+- Compare active-layer and Sample All Layers on offset layers with transparency,
+  soft selections, grayscale, and alpha lock. Check Wand feather/combinations,
+  one-step selection/fill undo, and the saved marker after undoing back to saved.
+- Change zoom/pan and confirm radius remains in image pixels. Switch Bucket to
+  Selection while typing a match value; matching/sampling fields should hide,
+  typing should stop, and whole-selection fill should ignore those settings.

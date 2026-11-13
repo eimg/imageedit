@@ -1654,11 +1654,11 @@ impl Workspace {
                                 },
                             )
                             .when(
-                                matches!(self.tool, Tool::MagicWand | Tool::BucketFill),
+                                self.tool == Tool::MagicWand || (self.tool == Tool::BucketFill && self.fill_mode == crate::document::FillMode::Connected),
                                 |panel| {
                                     panel
                                         .child(section_label("MATCH"))
-                                        .child(tolerance_row(self, cx))
+                                        .child(region_match_controls(self, cx))
                                 },
                             )
                             .when(self.tool == Tool::BucketFill, |panel| {
@@ -1680,13 +1680,13 @@ impl Workspace {
                                             cx,
                                         ),
                                     ]))
-                                    .child(
+                                    .when(mode == crate::document::FillMode::Connected, |panel| panel.child(
                                         toggle_button("Sample All Layers", sample_all).on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.set_sample_all(!sample_all, cx);
                                             }),
                                         ),
-                                    )
+                                    ))
                             })
                             .when(self.tool == Tool::CloneStamp, |panel| {
                                 let aligned = self.clone_aligned;
@@ -3220,7 +3220,8 @@ fn fill_mode_button(
     mode: crate::document::FillMode,
     cx: &Context<super::Workspace>,
 ) -> gpui::Stateful<Div> {
-    choice_button(label, selected).on_click(cx.listener(move |this, _, _, cx| {
+    choice_button(label, selected).on_click(cx.listener(move |this, _, window, cx| {
+        this.commit_numeric_edit(window, cx);
         this.set_fill_mode(mode, cx);
     }))
 }
@@ -3312,22 +3313,24 @@ fn resample_choice(
     }))
 }
 
-fn tolerance_row(workspace: &Workspace, cx: &Context<super::Workspace>) -> Div {
-    option_row(
-        "Tolerance",
-        workspace.numeric_stepper(
-            NumericField::Tolerance,
-            step_button("tolerance-down", "−").on_click(cx.listener(|this, _, _, cx| {
-                this.tolerance = this.tolerance.saturating_sub(1);
-                cx.notify();
-            })),
-            step_button("tolerance-up", "+").on_click(cx.listener(|this, _, _, cx| {
-                this.tolerance = this.tolerance.saturating_add(1);
-                cx.notify();
-            })),
+fn region_match_controls(workspace: &Workspace, cx: &Context<super::Workspace>) -> Div {
+    let wand = workspace.tool == Tool::MagicWand;
+    let fields = if wand {
+        (NumericField::WandTolerance, NumericField::WandGapRadius)
+    } else {
+        (NumericField::FillTolerance, NumericField::FillGapRadius)
+    };
+    div().flex().flex_col().gap_2().children([
+        ("Tolerance", fields.0, false, "tolerance-down", "tolerance-up"),
+        ("Gap radius", fields.1, true, "gap-radius-down", "gap-radius-up"),
+    ].map(|(label, field, gap, down, up)| {
+        option_row(label, workspace.numeric_stepper(
+            field,
+            step_button(down, "−").on_click(cx.listener(move |this, _, _, cx| this.nudge_region_match(wand, gap, -1, cx))),
+            step_button(up, "+").on_click(cx.listener(move |this, _, _, cx| this.nudge_region_match(wand, gap, 1, cx))),
             cx,
-        ),
-    )
+        )).id(if gap { "gap-radius-row" } else { "tolerance-row" }).when(gap, |row| row.tooltip(tooltip("Close small breaks in boundaries using this radius in image pixels. 0 turns gap closure off; larger values may also seal narrow passages.")))
+    }))
 }
 
 fn align_controls(enabled: bool, cx: &Context<super::Workspace>) -> Div {

@@ -50,11 +50,22 @@ image transforms, and history preserve curve quality; clipped curves become
 coverage masks.
 Rectangle and oval drags may start or extend outside the canvas; coverage stays
 bounded to canvas pixels and clipped curves retain their original geometry.
-Shift adds to the selection, Control subtracts, and Shift-Control intersects. The wand and
-bucket share a tolerance; zero matches a color exactly. The wand can sample the
-active layer or the visible composite, independently of Bucket Fill's setting.
-Both region tools ignore stored RGB when both compared pixels are fully
-transparent; other channel and alpha comparisons keep the shared tolerance.
+Shift adds to the selection, Control subtracts, and Shift-Control intersects.
+Wand and Bucket have independent session Tolerance and Gap radius settings,
+starting at zero. Zero tolerance matches exactly. Gap radius (0–8 image pixels)
+closes small breaks in nonmatching boundaries before four-connected region
+traversal; 0 preserves the original fast path. A temporary hard boundary mask
+uses square max/min closing with neutral finite-source borders so gaps near
+image edges can close. Original nonmatching pixels always remain excluded;
+large radii may seal narrow passages or entire small regions. Active-layer
+fills retain layer-local/off-canvas behavior, and merged sampling uses canvas
+coordinates and edits only the active layer. The wand can sample the active
+layer or visible composite, independently of Bucket Fill. Both region tools
+ignore stored RGB when both compared pixels are fully transparent; other channel
+and alpha comparisons use the tool's own tolerance. Wand feathers the incoming
+region after gap closure and before combining it. Bucket's Selection mode hides
+and ignores matching/sampling controls without resetting them; mode switches
+finish inline numeric edits before hiding those fields.
 Feather, Grow, and Shrink edit the mask; Grow/Shrink preserve soft coverage.
 Free Select has an independent, default-off antialias preference for new closed
 freehand/polygon selections. It uses 4×4 subpixel nonzero-winding coverage;
@@ -454,6 +465,11 @@ crosshair gives way to a hand or resize cursor. The outline is a dashed
 contour. Stroke polylines follow that contour, including a hole. Mask
 transforms avoid per-pixel coordinate lists; feathering uses running sums and
 Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
+- `RegionMatch` in `src/selection.rs` closes temporary boundary masks using the
+  shared separable running extrema kernel: dilation uses outside 0, erosion uses
+  neutral outside 255, while ordinary Grow/Shrink keep outside 0. Original
+  color comparisons still gate traversal. Source traversal and the optional
+  canvas-space domain remain separate from the clipped output mask.
 - `src/transform.rs` turns, mirrors, scales, and anchors layer pixels, and
   warps a layer by an angle or a perspective quad. Grayscale keeps alpha and
   is stored in the version 6 project. Smooth scaling filters exact 16-bit
@@ -589,7 +605,7 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   layer, adjustment, and filter dialogs. `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
 - `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
-  fields, shared wand/fill tolerance, brush size/spacing/hardness/opacity/flow, path
+  fields, separate wand/fill tolerance and gap radius, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
   Rotate angle, and text size/letter/line
   spacing inline with a caret and text selection. Values preview live; selection,
