@@ -43,6 +43,8 @@ pub(super) enum NumericField {
     CropRatioHeight,
     BrushFlow,
     SelectionFeatherRadius,
+    GradientStopPosition,
+    GradientStopOpacity,
 }
 
 impl NumericField {
@@ -78,6 +80,8 @@ impl NumericField {
             Self::CropRatioHeight => 27,
             Self::BrushFlow => 28,
             Self::SelectionFeatherRadius => 29,
+            Self::GradientStopPosition => 30,
+            Self::GradientStopOpacity => 31,
         }
     }
 
@@ -97,7 +101,17 @@ impl NumericField {
     }
 
     fn parse(self, text: &str) -> Option<i64> {
-        if self == Self::RotateAngle {
+        if matches!(self, Self::GradientStopPosition | Self::GradientStopOpacity) {
+            let value = text.parse::<f64>().ok()?;
+            (value.is_finite() && (0.0..=100.0).contains(&value)).then(|| {
+                let value = if self == Self::GradientStopPosition {
+                    value * 10.
+                } else {
+                    value * 255. / 100.
+                };
+                value.round() as i64
+            })
+        } else if self == Self::RotateAngle {
             let value = text.parse::<f64>().ok()?;
             (value.is_finite() && (-360.0..=360.0).contains(&value))
                 .then(|| (value * 10.).round() as i64)
@@ -111,7 +125,9 @@ impl NumericField {
     }
 
     fn format(self, value: i64) -> String {
-        if self == Self::RotateAngle {
+        if self == Self::GradientStopOpacity {
+            format!("{:.1}", value as f64 * 100. / 255.)
+        } else if matches!(self, Self::RotateAngle | Self::GradientStopPosition) {
             format!("{:.1}", value as f64 / 10.)
         } else {
             value.to_string()
@@ -133,7 +149,10 @@ impl NumericField {
         ch.is_ascii_digit()
             || ((matches!(self, Self::TextLetterSpacing | Self::RotateAngle) || self.is_move())
                 && ch == '-')
-            || (self == Self::RotateAngle && ch == '.')
+            || (matches!(
+                self,
+                Self::RotateAngle | Self::GradientStopPosition | Self::GradientStopOpacity
+            ) && ch == '.')
     }
 
     fn is_tool_option(self) -> bool {
@@ -154,6 +173,8 @@ impl NumericField {
                 | Self::CropRatioWidth
                 | Self::CropRatioHeight
                 | Self::SelectionFeatherRadius
+                | Self::GradientStopPosition
+                | Self::GradientStopOpacity
         )
     }
 
@@ -162,6 +183,8 @@ impl NumericField {
             Self::Tolerance => (0, 255),
             Self::GridSpacing => (1, 4096),
             Self::SelectionFeatherRadius => (0, 128),
+            Self::GradientStopPosition => (0, 1000),
+            Self::GradientStopOpacity => (0, 255),
             Self::SelectionRatioWidth
             | Self::SelectionRatioHeight
             | Self::CropRatioWidth
@@ -250,7 +273,7 @@ impl NumericEdit {
     }
 
     fn insert_digits(&mut self, text: &str) {
-        let decimal = self.field == NumericField::RotateAngle;
+        let decimal = self.field.accepts_character('.');
         let digits: String = text
             .chars()
             .filter(|&ch| self.field.accepts_character(ch))
@@ -379,6 +402,12 @@ impl Workspace {
             NumericField::MoveY => self.move_offset().map(|offset| i64::from(offset.1)),
             NumericField::GridSpacing => Some(i64::from(self.grid_spacing)),
             NumericField::SelectionFeatherRadius => Some(i64::from(self.selection_feather_radius)),
+            NumericField::GradientStopPosition => self
+                .selected_gradient_stop()
+                .map(|stop| i64::from(stop.position)),
+            NumericField::GradientStopOpacity => self
+                .selected_gradient_stop()
+                .map(|stop| i64::from(stop.color[3])),
         }
     }
 
@@ -890,6 +919,10 @@ impl Workspace {
             NumericField::Tolerance => self.tolerance = value as u8,
             NumericField::GridSpacing => self.grid_spacing = value as u32,
             NumericField::SelectionFeatherRadius => self.selection_feather_radius = value as u32,
+            NumericField::GradientStopPosition => self.move_gradient_stop(value as u16, window, cx),
+            NumericField::GradientStopOpacity => {
+                self.set_gradient_stop_alpha(value as u8, window, cx)
+            }
             NumericField::SelectionRatioWidth | NumericField::SelectionRatioHeight => {
                 if field == NumericField::SelectionRatioWidth {
                     self.selection_ratio_value.width = value as u32;
@@ -1044,6 +1077,34 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_fields_keep_tenths_of_percent_and_exact_alpha_through_cancel_restore() {
+        let position = NumericField::GradientStopPosition;
+        let opacity = NumericField::GradientStopOpacity;
+        assert_eq!(position.parse("37.5"), Some(375));
+        assert_eq!(position.format(375), "37.5");
+        assert_eq!(opacity.parse("50"), Some(128));
+        for alpha in 0..=255 {
+            assert_eq!(opacity.parse(&opacity.format(alpha)), Some(alpha));
+        }
+        for field in [position, opacity] {
+            for invalid in ["", ".", "NaN", "inf", "-1", "100.1"] {
+                assert_eq!(field.parse(invalid), None);
+            }
+            assert!(field.accepts_character('.'));
+            assert!(field.is_tool_option());
+            assert!(!field.is_selection());
+        }
+        let mut edit = NumericEdit::new(opacity, 192, None);
+        edit.insert_digits("12.5");
+        assert_eq!(edit.original, 192);
+        assert_eq!(opacity.parse(&edit.text), Some(32));
+        edit.selected = true;
+        edit.backspace();
+        assert_eq!(opacity.parse(&edit.text), None);
+        assert_eq!(edit.original, 192);
+    }
 
     #[test]
     fn creation_feather_radius_is_a_bounded_setting_and_empty_text_keeps_its_original() {

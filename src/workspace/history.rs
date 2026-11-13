@@ -753,6 +753,8 @@ mod tests {
             end: (2.5, 0.5),
             foreground: Rgba([255, 0, 0, 255]),
             background: Rgba([0, 0, 255, 255]),
+            ramp: None,
+            reverse: false,
         };
         session.edit(
             |content| content.apply_gradient(layer, gradient, &selection) != Dirty::None,

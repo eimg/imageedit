@@ -1725,20 +1725,26 @@ impl Workspace {
                                     .child(segmented([
                                         gradient_blend_button(
                                             "FG → BG",
-                                            blend
+                                            !self.gradient_use_custom && blend
                                                 == crate::paint::GradientBlend::ForegroundToBackground,
                                             crate::paint::GradientBlend::ForegroundToBackground,
                                             cx,
                                         ),
                                         gradient_blend_button(
                                             "FG → Clear",
-                                            blend
+                                            !self.gradient_use_custom && blend
                                                 == crate::paint::GradientBlend::ForegroundToTransparent,
                                             crate::paint::GradientBlend::ForegroundToTransparent,
                                             cx,
                                         )
                                         .tooltip(tooltip("Foreground to Transparent")),
+                                        choice_button("Custom", self.gradient_use_custom).on_click(cx.listener(|this, _, window, cx| {
+                                            this.set_gradient_custom(window, cx);
+                                        })),
                                     ]))
+                                    .child(toggle_button("Reverse", self.gradient_reverse).on_click(cx.listener(|this, _, window, cx| {
+                                        this.reverse_gradient(window, cx);
+                                    })))
                                     .when(self.gradient.is_some(), |panel| {
                                         panel.child(action_row([
                                             option_action("Apply", true)
@@ -1764,6 +1770,7 @@ impl Workspace {
                                         ]))
                                     })
                             })
+                            .when(self.tool == Tool::Gradient, |panel| panel.child(self.gradient_palette_options(cx)))
                             .when(self.tool == Tool::Crop, |panel| panel.child(self.aspect_options(true, cx)))
                             .when_some(self.crop, |panel, _| {
                                 panel
@@ -1959,6 +1966,127 @@ impl Workspace {
                     ),
             )
             .child(self.inspector_tabs(cx))
+    }
+
+    fn gradient_palette_options(&self, cx: &Context<Self>) -> Div {
+        let mut panel = div().flex().flex_col().gap_2();
+        if self.gradient_use_custom
+            && let Some(ramp) = self.gradient_custom
+        {
+            let selected = self.gradient_selected_stop;
+            let interior = selected > 0 && selected + 1 < ramp.stops().len();
+            panel = panel
+                .child(section_label("COLOR STOPS"))
+                .child(div().flex().flex_wrap().gap_1().children(
+                    ramp.stops().iter().enumerate().map(|(index, stop)| {
+                        div()
+                            .id(("gradient-stop", index))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .h(px(26.))
+                            .px_2()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(if index == selected { ACCENT } else { BORDER }))
+                            .bg(rgb(CANVAS))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_gradient_stop(index, window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .size(px(12.))
+                                    .bg(rgba(u32::from_be_bytes(stop.color.0))),
+                            )
+                            .child(format!("{:.1}%", f32::from(stop.position) / 10.))
+                    }),
+                ))
+                .when(interior, |panel| {
+                    panel.child(self.numeric_chip(
+                        NumericField::GradientStopPosition,
+                        Some("Position %"),
+                        cx,
+                    ))
+                })
+                .child(self.numeric_chip(NumericField::GradientStopOpacity, Some("Opacity %"), cx))
+                .child(option_action("Color…", false).on_click(
+                    cx.listener(|this, _, window, cx| this.gradient_stop_color_form(window, cx)),
+                ))
+                .child(action_row([
+                    option_action("Add Stop", false)
+                        .when(ramp.stops().len() < crate::gradient::MAX_STOPS, |button| {
+                            button.on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.add_gradient_stop(window, cx)
+                                }),
+                            )
+                        })
+                        .when(ramp.stops().len() >= crate::gradient::MAX_STOPS, |button| {
+                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                        }),
+                    option_action("Remove", false)
+                        .when(interior, |button| {
+                            button.on_click(cx.listener(|this, _, window, cx| {
+                                this.remove_gradient_stop(window, cx)
+                            }))
+                        })
+                        .when(!interior, |button| {
+                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                        }),
+                ]));
+        }
+        let can_save = self.gradient_presets.len() < super::gradient_ui::MAX_PRESETS;
+        panel
+            .child(section_label("SESSION PRESETS"))
+            .when(!self.gradient_presets.is_empty(), |panel| {
+                panel.child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .children((0..self.gradient_presets.len()).map(|index| {
+                            div()
+                                .id(("gradient-preset", index))
+                                .flex_1()
+                                .h(px(26.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .bg(rgb(if self.gradient_selected_preset == Some(index) {
+                                    SELECTED
+                                } else {
+                                    CANVAS
+                                }))
+                                .cursor_pointer()
+                                .child((index + 1).to_string())
+                                .tooltip(tooltip(
+                                    "Load saved gradient colors, shape, and direction",
+                                ))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.load_gradient_preset(index, window, cx)
+                                }))
+                        })),
+                )
+            })
+            .child(action_row([
+                option_action("Save Preset", false)
+                    .when(can_save, |button| {
+                        button.on_click(cx.listener(|this, _, _, cx| this.save_gradient_preset(cx)))
+                    })
+                    .when(!can_save, |button| {
+                        button.opacity(0.45).cursor(CursorStyle::Arrow)
+                    }),
+                option_action("Delete Preset", false)
+                    .when(self.gradient_selected_preset.is_some(), |button| {
+                        button
+                            .on_click(cx.listener(|this, _, _, cx| this.delete_gradient_preset(cx)))
+                    })
+                    .when(self.gradient_selected_preset.is_none(), |button| {
+                        button.opacity(0.45).cursor(CursorStyle::Arrow)
+                    }),
+            ]))
     }
 
     fn move_snapping_options(&self, cx: &Context<Self>) -> Div {

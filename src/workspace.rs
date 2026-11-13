@@ -308,6 +308,13 @@ pub struct Workspace {
     wand_sample_all: bool,
     gradient_shape: crate::paint::GradientShape,
     gradient_blend: crate::paint::GradientBlend,
+    gradient_custom: Option<crate::gradient::ColorRamp>,
+    gradient_use_custom: bool,
+    gradient_reverse: bool,
+    gradient_selected_stop: usize,
+    gradient_revision: u64,
+    gradient_presets: Vec<gradient_ui::GradientPreset>,
+    gradient_selected_preset: Option<usize>,
     clone_source: Option<paint_ui::CloneSource>,
     clone_aligned: bool,
     clone_sample_all: bool,
@@ -571,6 +578,13 @@ impl Workspace {
             wand_sample_all: false,
             gradient_shape: crate::paint::GradientShape::Linear,
             gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
+            gradient_custom: None,
+            gradient_use_custom: false,
+            gradient_reverse: false,
+            gradient_selected_stop: 0,
+            gradient_revision: 0,
+            gradient_presets: Vec::new(),
+            gradient_selected_preset: None,
             clone_source: None,
             clone_aligned: true,
             clone_sample_all: false,
@@ -644,6 +658,10 @@ impl Workspace {
 
     fn set_color(&mut self, swatch: usize, color: u32) {
         self.colors[swatch] = color;
+        self.remember_color(color);
+    }
+
+    fn remember_color(&mut self, color: u32) {
         self.recent_colors.retain(|&recent| recent != color);
         self.recent_colors.insert(0, color);
         self.recent_colors.truncate(RECENT_COLOR_LIMIT);

@@ -183,6 +183,28 @@ stroke applies another filter pass. Each paint and retouch tool remembers its
 own flow and buildup setting during the session. Path and selection outline
 strokes also limit overlapping dabs to their stroke opacity.
 
+**Gradient** supports Linear and Radial fills. Drag its line, adjust the endpoints,
+then Apply/Return or Cancel/Escape. **Reverse** reverses the colors without moving
+the line or changing a radial gradient's center. FG → BG and FG → Clear follow
+the foreground/background swatches.
+
+Choose **Custom** to edit up to eight color stops. Select a stop's colored chip,
+use **Color…** for the color picker, and type **Opacity %**. Intermediate stops
+also offer **Position %** in tenths of a percent. Positions stay between their
+neighbors; the two endpoints stay at 0% and 100% and cannot be removed. **Add
+Stop** splits the largest gap using its current interpolated color. Switching
+back to a swatch mode keeps the custom palette available for later.
+Transparent stops blend without letting hidden RGB tint visible edges.
+
+**Save Preset** stores the current colors, shape, and Reverse setting in one of
+six session slots. Click a numbered slot to reuse it; its colors stay fixed even
+if the swatches change. Loading leaves the current canvas endpoints in place.
+Select a saved slot to delete it. Presets survive tool/tab changes within the
+workspace session, and are cleared when that workspace closes.
+Stop and preset edits update the gradient preview but do not edit image history;
+Apply commits the selected area in one undo step and honors alpha lock and the
+image's color mode. Cancel leaves pixels unchanged.
+
 Adjustment and filter dialogs preview the whole canvas composition, including
 layer order, offsets, opacity, and the selection's soft coverage. A checker
 shows transparency. **Before** shows the original composition; **After** shows

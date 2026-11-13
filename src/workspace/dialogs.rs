@@ -33,6 +33,12 @@ pub(super) struct Form {
     pub(super) error: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ColorTarget {
+    Swatch(usize),
+    GradientStop { revision: u64, index: usize },
+}
+
 enum FormKind {
     New {
         fields: [Field; 2],
@@ -40,7 +46,7 @@ enum FormKind {
         transparent: bool,
     },
     Color {
-        swatch: usize,
+        target: ColorTarget,
         hex: Field,
         hsv: Hsv,
         drag: Option<ColorControl>,
@@ -508,7 +514,27 @@ impl Workspace {
         };
         self.show_form(
             FormKind::Color {
-                swatch,
+                target: ColorTarget::Swatch(swatch),
+                hex: Field::new(format!("{initial:06X}")),
+                hsv: Hsv::from_rgb(initial),
+                drag: None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn gradient_stop_color_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(stop) = self.selected_gradient_stop() else {
+            return;
+        };
+        let initial = u32::from_be_bytes([0, stop.color[0], stop.color[1], stop.color[2]]);
+        self.show_form(
+            FormKind::Color {
+                target: ColorTarget::GradientStop {
+                    revision: self.gradient_revision,
+                    index: self.gradient_selected_stop,
+                },
                 hex: Field::new(format!("{initial:06X}")),
                 hsv: Hsv::from_rgb(initial),
                 drag: None,
@@ -944,19 +970,25 @@ impl Workspace {
                 self.dismiss_form(window, cx);
                 self.create_image(width, height, background, window, cx);
             }
-            FormKind::Color { swatch, hex, .. } => {
+            FormKind::Color { target, hex, .. } => {
                 let Some(color) = hex.color() else {
                     form.error = Some("Enter six hexadecimal digits, such as 76B7FF.".into());
                     cx.notify();
                     return;
                 };
-                let swatch = *swatch;
+                let target = *target;
                 self.dismiss_form(window, cx);
-                if swatch == super::text_ui::TEXT_SWATCH {
-                    self.recolor_text(color, window, cx);
-                } else {
-                    self.set_color(swatch, color);
-                    self.refresh_gradient(window, cx);
+                match target {
+                    ColorTarget::Swatch(swatch) if swatch == super::text_ui::TEXT_SWATCH => {
+                        self.recolor_text(color, window, cx)
+                    }
+                    ColorTarget::Swatch(swatch) => {
+                        self.set_color(swatch, color);
+                        self.refresh_gradient(window, cx);
+                    }
+                    ColorTarget::GradientStop { revision, index } => {
+                        self.set_gradient_stop_rgb(revision, index, color, window, cx)
+                    }
                 }
             }
             FormKind::JpegQuality { quality } => {
@@ -2050,7 +2082,7 @@ impl Workspace {
                     ("Import PDF", "Import", body)
                 }
                 FormKind::Color {
-                    swatch, hex, hsv, ..
+                    target, hex, hsv, ..
                 } => {
                     let color = hsv.rgb();
                     let recent = div()
@@ -2128,10 +2160,11 @@ impl Workspace {
                                 .border_color(rgb(BORDER))
                                 .bg(rgb(color)),
                         );
-                    let title = match *swatch {
-                        0 => "Foreground Color",
-                        super::text_ui::TEXT_SWATCH => "Text Color",
-                        _ => "Background Color",
+                    let title = match *target {
+                        ColorTarget::Swatch(0) => "Foreground Color",
+                        ColorTarget::Swatch(super::text_ui::TEXT_SWATCH) => "Text Color",
+                        ColorTarget::Swatch(_) => "Background Color",
+                        ColorTarget::GradientStop { .. } => "Gradient Stop Color",
                     };
                     (
                         title,

@@ -10,6 +10,7 @@ mod document;
 mod effect_preview;
 mod filters;
 mod geometry;
+mod gradient;
 mod guides;
 mod icons;
 #[cfg(target_os = "macos")]

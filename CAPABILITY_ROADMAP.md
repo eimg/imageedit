@@ -163,7 +163,9 @@ overwritten by Save.
 
 - [ ] Explicit corner/smooth anchors and linked/independent handles.
 - [ ] Insert anchors on segments and select/move multiple anchors.
-- [ ] Editable intermediate gradient stops, Reverse, and reusable gradients.
+- [x] Editable intermediate gradient stops and Reverse.
+- [x] Reusable session gradient presets.
+- [ ] Persist a named gradient library across app launches.
 
 ## Document foundations
 
@@ -797,7 +799,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 12 — Clone Stamp merged sampling and source indicator
 
-Implemented; committed at the start of Pass 13:
+Implemented; committed as `88d2478` at the start of Pass 13:
 
 - Clone Stamp exposes Sample All Layers, independently of Wand/Bucket settings.
   Default active-layer sampling is unchanged. Merged sampling reads the current
@@ -850,3 +852,62 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Change sampling, tabs/layers, or layer/canvas geometry and confirm a fresh source
   is required. Cancel a first stroke, retry it, and verify alignment is established
   only by a successfully committed change.
+
+## Pass 13 — gradient stops, direction, and session presets
+
+Implemented; committed at the start of Pass 14:
+
+- Gradient retains dynamic FG → BG / FG → Clear and adds Custom palettes with
+  up to eight RGBA stops. Select a colored stop chip, use the existing RGB picker,
+  edit opacity, and type interior positions to tenths of a percent. Endpoints
+  stay at 0%/100%; interior positions stay ordered between distinct neighbors.
+  Add Stop splits the largest gap using the current color there; Remove protects
+  endpoints. Dynamic modes and the remembered Custom palette remain independent.
+- Reverse changes the sampled color direction for Linear/Radial gradients,
+  including degenerate lines, without changing canvas endpoints or radial center.
+  All stops use premultiplied-alpha interpolation; hidden colors at transparent
+  stops cannot tint visible edges, and faint alpha retains its color.
+- Six deduplicated session preset slots capture literal colors/stops, shape, and
+  Reverse. Loading selects Custom mode without moving the current canvas line.
+  Presets survive tool/tab changes and are independent copies; deleting a saved
+  slot leaves the current palette in place. Persistent named libraries remain a
+  separate follow-up. No preset or stop settings are stored in image projects.
+- Stop/preset/shape/direction edits refresh the existing coalesced background
+  preview. Preview and Apply use one gradient specification and sampler, including
+  every stop's grayscale conversion, destination alpha lock, layer offsets, and
+  soft selection coverage. Only Apply changes pixels/history; Cancel leaves them
+  unchanged. Apply/Cancel sit above the longer palette/preset editor.
+- The shared color dialog now uses typed targets. Gradient stop targets carry a
+  palette revision/index and preserve alpha while editing RGB, without changing
+  foreground/background swatches. New stop colors join Recent Colors. Stale
+  targets cannot recolor another palette. Opacity numeric editing retains the
+  exact alpha byte so restoring a rounded percentage cannot shift transparency.
+  Decimal numeric input is shared with the existing angle editor.
+- Updated help, README, and AGENTS. No toolbox tool, dependency, project-format,
+  package-version, or publishing change. Concurrent app-icon edits are retained.
+
+Automatic validation: formatting, Clippy with warnings denied, all 337 tests,
+and both release benchmarks pass. Seven new regression tests cover bounded stop
+editing, independent integer interpolation, transparent/faint colors, immutable
+palette color mapping, reversed geometry, decimal position/alpha restoration,
+and real preview/Apply agreement across grayscale, masks, offsets, and alpha lock.
+Existing gradient history, selection, and project tests remain passing. The macOS
+app is rebuilt and its signature verified. No interactive or visual smoke tests
+are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Try dynamic and Custom gradients, edit every stop color/opacity, add up to eight,
+  move interior stops toward either neighbor, and remove them. Confirm endpoints
+  cannot move/remove and Custom survives a round trip through the dynamic modes.
+- Type decimal positions and opacity, clear fields or press Escape, and check
+  restored values, cursor/clipboard editing, and the preview. Cancel a color pick;
+  confirm foreground/background colors remain unchanged and stop alpha survives.
+- Reverse Linear/Radial gradients and zero-length lines; compare preview/Apply
+  with transparency, soft selections, layer offsets, grayscale, and alpha lock.
+  Undo/Redo the result as one edit and verify Cancel keeps pixels/saved revision.
+- Save six presets, load them after changing tools/tabs/swatches, and check literal
+  colors, shape, and direction. Confirm loading preserves endpoint positions,
+  duplicate saves do not fill another slot, and deletion leaves the preview intact.
+- Check Apply/Cancel access and independent Layers scrolling with eight stops in
+  the options panel. Presets deliberately reset with a new workspace session.

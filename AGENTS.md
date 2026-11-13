@@ -146,7 +146,21 @@ a fixed local filtered result; a new stroke applies another pass. Outline stroke
 use the same coverage cap. Zero opacity, buildup with zero flow, and unchanged targets publish no
 pixel changes; sub-byte buildup accumulates without changing hidden RGB until
 alpha becomes visible. The bracket keys adjust
-the brush size for the paint tools. Gradient fills the active layer between two colors, and
+the brush size for the paint tools. Gradient fills the active layer using dynamic
+foreground/background colors or up to eight custom RGBA stops. Reverse changes
+the color direction without moving linear/radial geometry. Custom positions use
+0–1000 units, with fixed endpoints and ordered, distinct interior stops. The
+editor exposes RGB picking, alpha and position percentages, and Add/Remove Stop;
+adding splits the largest gap with its current interpolated color. Colors
+interpolate in premultiplied alpha so transparent hidden RGB cannot tint edges.
+Six bounded, deduplicated session presets capture literal colors, shape, and
+Reverse; loading preserves canvas endpoints and initializes Custom mode. They
+are not project data or a persistent gradient library. Settings/preset edits
+refresh the coalesced preview without image history. Apply uses the same sampler,
+selection coverage, color-mode conversion, and alpha-lock policy. Color picker
+targets carry a palette revision and stop index; stale targets cannot recolor
+another palette, and RGB changes preserve stop alpha. Percentage editing stores
+the exact alpha byte for restoration and accepts decimal input.
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer's
 effect in the canvas composition inside a dialog, and apply inside the selection.
@@ -295,7 +309,10 @@ document is a single plain layer without paths, guides, or editable text.
   preview and owns the per-tool brush settings. Release commits dirty regions
   in one undo step. Its scoped CloneSource validates tab/layer geometry and
   establishes alignment only after the stroke result publishes successfully.
-  `src/workspace/gradient_ui.rs` previews a gradient until Apply.
+  `src/gradient.rs` owns bounded color ramps, ordered stop edits, and premultiplied
+  interpolation. `src/workspace/gradient_ui.rs` shares one specification between
+  the coalesced preview and Apply, owns session palettes/presets, and preserves
+  geometry when loading presets. Apply/Cancel remain above the stop editor.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
   the live GPU-scaled preview, and the commit that resamples the layer. It prepares
   the preview in the background and rejects results after release or cancellation.

@@ -640,23 +640,33 @@ pub struct Gradient {
     pub end: (f64, f64),
     pub foreground: Rgba<u8>,
     pub background: Rgba<u8>,
+    pub ramp: Option<crate::gradient::ColorRamp>,
+    pub reverse: bool,
+}
+
+impl Gradient {
+    pub fn color_at(&self, t: f64) -> Rgba<u8> {
+        let t = if self.reverse { 1. - t } else { t };
+        if let Some(ramp) = self.ramp.as_ref() {
+            return ramp.sample(t);
+        }
+        let (start, end) = gradient_stops(self);
+        crate::gradient::interpolate(start, end, t)
+    }
+
+    pub fn constrain(mut self, mode: crate::transform::ColorMode) -> Self {
+        self.foreground = mode.constrain(self.foreground);
+        self.background = mode.constrain(self.background);
+        self.ramp = self
+            .ramp
+            .map(|ramp| ramp.map_colors(|color| mode.constrain(color)));
+        self
+    }
 }
 
 pub fn gradient_color(gradient: &Gradient, x: f64, y: f64) -> Rgba<u8> {
     let t = gradient_t(gradient, x, y);
-    let (start, end) = gradient_stops(gradient);
-    if t <= 0.0 {
-        return start;
-    }
-    if t >= 1.0 {
-        return clear_if_empty(end);
-    }
-    clear_if_empty(Rgba([
-        lerp_channel(start.0[0], end.0[0], t),
-        lerp_channel(start.0[1], end.0[1], t),
-        lerp_channel(start.0[2], end.0[2], t),
-        lerp_channel(start.0[3], end.0[3], t),
-    ]))
+    gradient.color_at(t)
 }
 
 fn gradient_stops(gradient: &Gradient) -> (Rgba<u8>, Rgba<u8>) {
@@ -695,20 +705,6 @@ fn gradient_t(gradient: &Gradient, x: f64, y: f64) -> f64 {
                 ((x - gradient.start.0).hypot(y - gradient.start.1) / radius).clamp(0.0, 1.0)
             }
         }
-    }
-}
-
-fn lerp_channel(start: u8, end: u8, t: f64) -> u8 {
-    (f64::from(start) + (f64::from(end) - f64::from(start)) * t)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
-fn clear_if_empty(color: Rgba<u8>) -> Rgba<u8> {
-    if color.0[3] == 0 {
-        Rgba([0, 0, 0, 0])
-    } else {
-        color
     }
 }
 
@@ -1472,6 +1468,8 @@ mod tests {
             end: (4.0, 0.0),
             foreground: Rgba([255, 0, 0, 255]),
             background: Rgba([0, 0, 255, 255]),
+            ramp: None,
+            reverse: false,
         }
     }
 
@@ -1509,6 +1507,41 @@ mod tests {
         assert_eq!(gradient_color(&gradient, 0.0, 0.0).0, [255, 0, 0, 255]);
         assert_eq!(gradient_color(&gradient, 2.0, 0.0).0, [255, 0, 0, 128]);
         assert_eq!(gradient_color(&gradient, 4.0, 0.0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn reverse_keeps_linear_and_radial_geometry_and_reverses_all_custom_stops() {
+        let mut colors =
+            crate::gradient::ColorRamp::new(Rgba([240, 20, 10, 255]), Rgba([0, 0, 255, 0]));
+        let middle = colors.add_stop().unwrap();
+        colors.move_stop(middle, 350);
+        colors.set_color(middle, Rgba([20, 200, 80, 160]));
+        for shape in [GradientShape::Linear, GradientShape::Radial] {
+            for custom in [None, Some(colors)] {
+                let original = Gradient {
+                    ramp: custom,
+                    ..ramp(shape, GradientBlend::ForegroundToTransparent)
+                };
+                let reversed = Gradient {
+                    reverse: true,
+                    ..original
+                };
+                for tick in 0..=16 {
+                    let t = f64::from(tick) / 16.;
+                    assert_eq!(
+                        gradient_color(&reversed, t * 4., 0.),
+                        original.color_at(1. - t)
+                    );
+                }
+                assert_eq!(reversed.start, original.start);
+                assert_eq!(reversed.end, original.end);
+                let zero = Gradient {
+                    end: original.start,
+                    ..reversed
+                };
+                assert_eq!(gradient_color(&zero, 2., 2.), original.color_at(1.));
+            }
+        }
     }
 
     fn render_trace(points: &[(f64, f64)], brush: Brush) -> RgbaImage {

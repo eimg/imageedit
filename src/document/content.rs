@@ -1114,8 +1114,7 @@ impl DocumentContent {
         if self.layers[index].text.is_some() {
             return Dirty::None;
         }
-        gradient.foreground = self.mode.constrain(gradient.foreground);
-        gradient.background = self.mode.constrain(gradient.background);
+        gradient = gradient.constrain(self.mode);
         let offset = self.layers[index].offset;
         let Some((pixels, left, top, right, bottom)) = render_gradient(
             &self.layers[index].pixels,
@@ -2302,6 +2301,8 @@ mod tests {
             end: (6., 0.),
             foreground: Rgba([240, 10, 30, 200]),
             background: Rgba([0; 4]),
+            ramp: None,
+            reverse: false,
         };
         for operation in 0..7 {
             let mut content = original.clone();
@@ -3294,6 +3295,82 @@ mod tests {
             end: (3.5, 0.5),
             foreground: Rgba([255, 0, 0, 255]),
             background: Rgba([0, 0, 255, 255]),
+            ramp: None,
+            reverse: false,
+        }
+    }
+
+    #[test]
+    fn custom_gradient_preview_matches_apply_with_soft_masks_offsets_grayscale_and_alpha_lock() {
+        let mut ramp =
+            crate::gradient::ColorRamp::new(Rgba([240, 30, 20, 255]), Rgba([0, 0, 255, 0]));
+        let index = ramp.add_stop().unwrap();
+        ramp.move_stop(index, 370);
+        ramp.set_color(index, Rgba([20, 220, 80, 170]));
+        for mode in [
+            crate::transform::ColorMode::Rgb,
+            crate::transform::ColorMode::Grayscale,
+        ] {
+            for alpha_locked in [false, true] {
+                for shape in [
+                    crate::paint::GradientShape::Linear,
+                    crate::paint::GradientShape::Radial,
+                ] {
+                    let mut content = DocumentContent::single_layer(
+                        "source".into(),
+                        RgbaImage::from_fn(7, 5, |x, y| {
+                            Rgba([
+                                30 + x as u8 * 20,
+                                50 + y as u8 * 20,
+                                130,
+                                if x == 0 { 0 } else { 100 },
+                            ])
+                        }),
+                    );
+                    let layer = content.top_layer_id();
+                    content.layers[0].offset = (2, -1);
+                    content.set_color_mode(mode);
+                    content.set_layer_locks(
+                        layer,
+                        LayerLocks {
+                            alpha: alpha_locked,
+                            position: false,
+                        },
+                    );
+                    let original = content.layers[0].pixels.clone();
+                    let selection = Selection::Rect(PixelRect::new(2, 0, 4, 4)).feather(1, 7, 5);
+                    let gradient = crate::paint::Gradient {
+                        shape,
+                        start: (2.5, 0.5),
+                        end: (6.5, 3.5),
+                        ramp: Some(ramp),
+                        reverse: true,
+                        ..red_blue_gradient(shape)
+                    };
+                    let preview = gradient_preview(
+                        &original,
+                        (2, -1),
+                        gradient.constrain(mode),
+                        &selection,
+                        (7, 5),
+                        alpha_locked,
+                        256,
+                    );
+                    assert_ne!(
+                        content.apply_gradient(layer, gradient, &selection),
+                        Dirty::None
+                    );
+                    assert_eq!(preview, *content.layers[0].pixels);
+                    for (x, y, pixel) in content.layers[0].pixels.enumerate_pixels() {
+                        if alpha_locked {
+                            assert_eq!(pixel[3], original.get_pixel(x, y)[3]);
+                        }
+                        if selection.coverage(i64::from(x) + 2, i64::from(y) - 1, 7, 5) == 0 {
+                            assert_eq!(pixel, original.get_pixel(x, y));
+                        }
+                    }
+                }
+            }
         }
     }
 
