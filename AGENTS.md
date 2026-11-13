@@ -114,10 +114,22 @@ the field; empty text and Escape restore the original size. Aspect locking start
 on and applies to numeric edits and handles; Shift reverses it during a drag.
 Nearest, Bilinear, and Bicubic choose the commit resampling. Escape or a
 layer/tab change cancels the pointer drag. Clone Stamp uses Shift+C,
-sets its source with Alt-click inside the visible raster layer. Aligned starts
+sets its source with Alt-click inside the visible raster layer, or anywhere on
+the canvas with Sample All Layers. Merged sampling uses an immutable reference
+to the current full-resolution composite at stroke start; default sampling uses
+the destination layer's original pixels. The visible composite includes layer
+opacity and rendered text, while only the active visible raster layer is painted.
+Source coordinates are mapped through the destination layer offset, independently
+of destination selection coverage and alpha lock. Sampling changes clear the
+source/alignment; source scope includes tab/layer, layer offset/dimensions, canvas
+dimensions, and sampling mode. Show Source starts on and draws the sampled pixel
+center and brush footprint using the existing cursor mouse/refresh path; it
+tracks live/pending/settled aligned offsets and resets between unaligned strokes.
+The marker follows zoom/pan, clips to the canvas, and hides if its sample center
+is unavailable. Alt retains its source-picking cursor. Aligned starts
 on and preserves the source offset across strokes; off restarts each stroke at
 the chosen source. Changing alignment resets its offset. Tab/layer changes clear
-the source; changed layer geometry requires a fresh source. The first successful
+the source; changed layer/canvas geometry requires a fresh source. The first successful
 stroke establishes alignment; canceled/failed strokes leave it unchanged. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
 stroke commits when the pointer is released. Their pointer is a size-scaled

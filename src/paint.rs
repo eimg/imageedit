@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use image::{Rgba, RgbaImage};
 
@@ -178,6 +181,7 @@ pub struct Stroke {
     pending: BTreeSet<TileKey>,
     changed: bool,
     alpha_locked: bool,
+    clone_source: Option<(Arc<RgbaImage>, (i32, i32))>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -222,6 +226,7 @@ impl Stroke {
             pending: BTreeSet::new(),
             changed: false,
             alpha_locked: false,
+            clone_source: None,
         }
     }
 
@@ -232,6 +237,15 @@ impl Stroke {
 
     pub fn alpha_locked(&self) -> bool {
         self.alpha_locked
+    }
+
+    // The immutable sample image can differ from the destination layer. `offset`
+    // maps destination-local coordinates into this image before the clone delta.
+    pub fn with_clone_source(mut self, pixels: Arc<RgbaImage>, offset: (i32, i32)) -> Self {
+        if matches!(self.kind, StrokeKind::Clone { .. }) {
+            self.clone_source = Some((pixels, offset));
+        }
+        self
     }
 
     pub fn changed(&self) -> bool {
@@ -406,16 +420,22 @@ impl Stroke {
                     StrokeKind::Blur => blur_pixel(source, px, py),
                     StrokeKind::Sharpen => sharpen_pixel(source, px, py),
                     StrokeKind::Clone { dx, dy } => {
-                        let sx = i64::from(px) + dx;
-                        let sy = i64::from(py) + dy;
+                        let (sample, offset) = self
+                            .clone_source
+                            .as_ref()
+                            .map_or((source, (0, 0)), |(pixels, offset)| {
+                                (pixels.as_ref(), *offset)
+                            });
+                        let sx = i64::from(px) + dx + i64::from(offset.0);
+                        let sy = i64::from(py) + dy + i64::from(offset.1);
                         if sx < 0
                             || sy < 0
-                            || sx >= i64::from(source.width())
-                            || sy >= i64::from(source.height())
+                            || sx >= i64::from(sample.width())
+                            || sy >= i64::from(sample.height())
                         {
                             continue;
                         }
-                        *source.get_pixel(sx as u32, sy as u32)
+                        *sample.get_pixel(sx as u32, sy as u32)
                     }
                 };
                 let after = match self.kind {
@@ -979,6 +999,85 @@ mod tests {
         stroke.sample(0.5, 0.5, &source, |_, _| 255);
         let cloned = apply_stroke(&source, &stroke).unwrap().0;
         assert_eq!(cloned.get_pixel(0, 0).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn merged_clone_maps_canvas_samples_to_offset_layer_pixels_and_honors_soft_alpha_lock() {
+        let base = Rgba([30, 50, 70, 100]);
+        let target = RgbaImage::from_pixel(3, 2, base);
+        let sample = Arc::new(RgbaImage::from_fn(8, 4, |x, y| {
+            Rgba([x as u8 * 20, y as u8 * 30, 180, 255])
+        }));
+        let mut stroke = Stroke::new(
+            StrokeKind::Clone { dx: 3, dy: 1 },
+            Rgba([0; 4]),
+            Brush {
+                diameter: 1,
+                ..Default::default()
+            },
+        )
+        .with_alpha_lock(true)
+        .with_clone_source(sample.clone(), (2, -1));
+        stroke.sample(0.5, 1.5, &target, |_, _| 128);
+        let painted = apply_stroke(&target, &stroke).unwrap().0;
+        assert_eq!(
+            *painted.get_pixel(0, 1),
+            source_atop(base, *sample.get_pixel(5, 1), 128. / 255.)
+        );
+        assert_eq!(painted.get_pixel(0, 1)[3], 100);
+        assert_eq!(*painted.get_pixel(1, 1), base);
+        assert_eq!(*painted.get_pixel(0, 0), base);
+        assert_eq!(*sample.get_pixel(5, 1), Rgba([100, 30, 180, 255]));
+    }
+
+    #[test]
+    fn merged_clone_freezes_its_snapshot_without_feedback_or_mutating_the_destination_source() {
+        let original = RgbaImage::from_fn(4, 1, |x, _| Rgba([20 + x as u8 * 40, 60, 90, 255]));
+        let mut snapshot = Arc::new(original.clone());
+        let mut stroke = Stroke::new(
+            StrokeKind::Clone { dx: -1, dy: 0 },
+            Rgba([0; 4]),
+            Brush {
+                diameter: 1,
+                spacing: 100,
+                ..Default::default()
+            },
+        )
+        .with_clone_source(snapshot.clone(), (0, 0));
+        Arc::make_mut(&mut snapshot).put_pixel(0, 0, Rgba([255; 4]));
+        stroke.sample(1.5, 0.5, &original, |_, _| 255);
+        stroke.sample(2.5, 0.5, &original, |_, _| 255);
+        stroke.finish(&original, |_, _| 255);
+        let painted = apply_stroke(&original, &stroke).unwrap().0;
+        assert_eq!(painted.get_pixel(1, 0), original.get_pixel(0, 0));
+        assert_eq!(painted.get_pixel(2, 0), original.get_pixel(1, 0));
+        assert_ne!(painted.get_pixel(2, 0), painted.get_pixel(1, 0));
+        assert_eq!(*original.get_pixel(0, 0), Rgba([20, 60, 90, 255]));
+    }
+
+    #[test]
+    fn merged_clone_skips_unavailable_and_transparent_samples_without_history_work() {
+        let target = RgbaImage::from_pixel(2, 1, Rgba([30, 50, 70, 100]));
+        for (pixel, offset) in [
+            (Rgba([255, 0, 0, 255]), (4, 0)),
+            (Rgba([255, 0, 0, 255]), (-4, 0)),
+            (Rgba([255, 0, 0, 0]), (0, 0)),
+        ] {
+            let mut stroke = Stroke::new(
+                StrokeKind::Clone { dx: 0, dy: 0 },
+                Rgba([0; 4]),
+                Brush {
+                    diameter: 1,
+                    ..Default::default()
+                },
+            )
+            .with_clone_source(Arc::new(RgbaImage::from_pixel(1, 1, pixel)), offset);
+            stroke.sample(0.5, 0.5, &target, |_, _| 255);
+            stroke.finish(&target, |_, _| 255);
+            assert!(!stroke.changed());
+            assert!(stroke.take_pending_tiles().is_empty());
+            assert!(apply_stroke(&target, &stroke).is_none());
+        }
     }
 
     #[test]

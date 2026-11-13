@@ -487,6 +487,11 @@ impl Workspace {
             diameter: diameter as f32 * scale,
             hardness,
             soft: self.tool != Tool::Pencil,
+            clone_source: self.clone_preview().map(|preview| CloneCursor {
+                preview,
+                bounds: geometry.bounds,
+                canvas: tab.document.content.size(),
+            }),
         })
     }
 
@@ -1678,7 +1683,15 @@ impl Workspace {
                             })
                             .when(self.tool == Tool::CloneStamp, |panel| {
                                 let aligned = self.clone_aligned;
-                                panel.child(toggle_button("Aligned", aligned).on_click(cx.listener(move |this, _, _, cx| {
+                                panel.child(section_label("SOURCE"))
+                                .child(toggle_button("Sample All Layers", self.clone_sample_all).on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_clone_sampling(!this.clone_sample_all, cx);
+                                })))
+                                .child(toggle_button("Show Source", self.clone_show_source).on_click(cx.listener(|this, _, _, cx| {
+                                    this.clone_show_source = !this.clone_show_source;
+                                    cx.notify();
+                                })))
+                                .child(toggle_button("Aligned", aligned).on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_clone_aligned(!aligned, cx);
                                 })))
                             })
@@ -2548,6 +2561,33 @@ struct BrushCursor {
     diameter: f32,
     hardness: u8,
     soft: bool,
+    clone_source: Option<CloneCursor>,
+}
+
+#[derive(Clone, Copy)]
+struct CloneCursor {
+    preview: super::paint_ui::ClonePreview,
+    bounds: Bounds<Pixels>,
+    canvas: (u32, u32),
+}
+
+impl CloneCursor {
+    fn source_at(self, position: Point<Pixels>) -> Option<Point<Pixels>> {
+        let here = (
+            f64::from((position.x - self.bounds.left()) / self.bounds.size.width)
+                * f64::from(self.canvas.0),
+            f64::from((position.y - self.bounds.top()) / self.bounds.size.height)
+                * f64::from(self.canvas.1),
+        );
+        let source = self.preview.source_at(here)?;
+        Some(
+            self.bounds.origin
+                + point(
+                    self.bounds.size.width * (source.0 / f64::from(self.canvas.0)) as f32,
+                    self.bounds.size.height * (source.1 / f64::from(self.canvas.1)) as f32,
+                ),
+        )
+    }
 }
 
 fn tool_cursor(
@@ -2575,6 +2615,23 @@ fn tool_cursor(
                 return;
             };
             if let Some(brush) = brush {
+                if !window.modifiers().alt
+                    && let Some(source) = brush.clone_source
+                    && let Some(center) = source.source_at(hotspot)
+                {
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: source.bounds.intersect(&bounds),
+                        }),
+                        |window| {
+                            paint_clone_source_marker(
+                                window,
+                                center,
+                                (brush.diameter / 2.).max(1.5),
+                            );
+                        },
+                    );
+                }
                 paint_brush_cursor(window, hotspot, brush);
                 return;
             }
@@ -2644,18 +2701,7 @@ fn paint_brush_cursor(window: &mut Window, center: Point<Pixels>, brush: BrushCu
         }
     };
     if brush.tool == Tool::CloneStamp && window.modifiers().alt {
-        ring(window, radius, 2., rgb(0x12151c), true);
-        ring(window, radius, 1., rgba(0xacc6ffff), true);
-        for (length, weight, color) in [(7., 2., rgb(0x12151c)), (5., 1., rgba(0xacc6ffff))] {
-            window.paint_quad(fill(
-                Bounds::centered_at(center, size(px(length), px(weight))),
-                color,
-            ));
-            window.paint_quad(fill(
-                Bounds::centered_at(center, size(px(weight), px(length))),
-                color,
-            ));
-        }
+        paint_clone_source_marker(window, center, radius);
         return;
     }
     ring(window, radius, 2., rgb(0x12151c), false);
@@ -2666,6 +2712,33 @@ fn paint_brush_cursor(window: &mut Window, center: Point<Pixels>, brush: BrushCu
             ring(window, core, 2., rgba(0x12151caa), true);
             ring(window, core, 1., rgba(0xffffffaa), true);
         }
+    }
+}
+
+fn paint_clone_source_marker(window: &mut Window, center: Point<Pixels>, radius: f32) {
+    let segments = (radius * 3.).clamp(24., 160.) as usize;
+    for (weight, color) in [(2., rgb(0x12151c)), (1., rgba(0xacc6ffff))] {
+        let mut path = PathBuilder::stroke(px(weight)).dash_array(&[px(2.), px(2.)]);
+        let points: Vec<_> = (0..segments)
+            .map(|index| {
+                let angle = index as f32 / segments as f32 * std::f32::consts::TAU;
+                center + point(px(angle.cos() * radius), px(angle.sin() * radius))
+            })
+            .collect();
+        path.add_polygon(&points, true);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    }
+    for (length, weight, color) in [(7., 2., rgb(0x12151c)), (5., 1., rgba(0xacc6ffff))] {
+        window.paint_quad(fill(
+            Bounds::centered_at(center, size(px(length), px(weight))),
+            color,
+        ));
+        window.paint_quad(fill(
+            Bounds::centered_at(center, size(px(weight), px(length))),
+            color,
+        ));
     }
 }
 

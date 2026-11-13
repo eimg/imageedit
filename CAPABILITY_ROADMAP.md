@@ -85,7 +85,7 @@ Implementation considerations for that pass:
 - [ ] Optional stroke smoothing with bounded latency.
 - [x] Predictable strength and repeat-pass behavior for Blur/Sharpen.
 - [x] Clone aligned/unaligned behavior and scoped source validation.
-- [ ] Clone merged sampling and source preview.
+- [x] Clone merged sampling and source-position/footprint preview.
 
 Acceptance: Pencil remains hard and pixel-accurate; paint/erase honor soft
 selections; pointer sampling density does not change the intended effect;
@@ -735,7 +735,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 11 — polygon edge quality and selection creation feathering
 
-Implemented; committed at the start of Pass 12:
+Implemented; committed as `71451b5` at the start of Pass 12:
 
 - Free Select has an independent Antialias edges preference for new closed
   freehand/polygon selections, default off. Four vertical scans and four
@@ -794,3 +794,59 @@ Manual interaction testing stays with the maintainer. Useful checks:
   filters. Compare alpha/coverage, including around the canvas border and after
   Select All → Feather. Check that radius zero and disabled feather preserve
   existing hard selection behavior and numeric geometry controls.
+
+## Pass 12 — Clone Stamp merged sampling and source indicator
+
+Implemented; committed at the start of Pass 13:
+
+- Clone Stamp exposes Sample All Layers, independently of Wand/Bucket settings.
+  Default active-layer sampling is unchanged. Merged sampling reads the current
+  visible full-resolution composite, including other layer opacity and cached
+  text, and can choose source pixels outside the destination layer's bounds.
+  Painting still changes only the active visible raster layer within its existing
+  bounds, selection, and alpha-lock policy.
+- A stroke retains its immutable sampling image, separate from the destination's
+  starting pixels. Layer-local destinations map into canvas-space samples through
+  the layer offset and clone delta. Source pixels cannot pick up live changes from
+  that same stroke, including with overlap/flow. Unavailable/transparent samples
+  remain no-ops. The composite is shared rather than recomputed/copied per dab.
+- Source validity includes tab/layer identity, destination layer geometry, canvas
+  dimensions, and sampling mode. Changing sampling clears the source and prompts
+  for Alt-click again; sampling/alignment changes are refused during a stroke.
+  Existing successful-publication alignment semantics remain in place, including
+  cancellation and failed commits. Unaligned strokes restart at the chosen source.
+- Show Source, default on, displays a blue dashed source brush footprint and
+  crosshair while hovering/painting. It marks actual sampled pixel centers,
+  follows live/pending/committed aligned offsets, and follows then resets for
+  unaligned strokes. The indicator respects image coordinates, zoom/pan, canvas
+  clipping, sample bounds, and mouse exit. Alt retains its source-picking cursor.
+  This is a position/footprint preview. Its drawing shares the current cursor
+  refresh path, without polling or per-pointer sample-image generation.
+- Help, README, and AGENTS document sampling, scoping, and preview behavior.
+  No toolbox tool, dependency, project-format, version, or publishing changes.
+
+Automatic validation: formatting, Clippy with warnings denied, all 330 tests,
+and both release benchmarks pass. Six new regression tests cover merged clone
+coordinate mapping with negative layer offsets, soft selection/alpha lock,
+immutable snapshots without feedback, unavailable/transparent no-ops, source
+context validation, source-marker coordinates, and real composite stroke-preview/
+commit agreement with visible/hidden/partially opaque layers. Existing aligned/
+unaligned tests use the stricter source context. The macOS app is rebuilt and its
+signature verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- On a small/offset raster layer, enable Sample All Layers and Alt-click a visible
+  source outside that layer. Include partially opaque layers, hidden layers, and
+  editable text elsewhere. Paint and compare sampling with the merged canvas;
+  ensure only the destination pixels and selected coverage change.
+- Clone an overlapping region in a long stroke, with Buildup/Flow and alpha lock.
+  Compare live tiles and release, then Undo/Redo. Try a transparent source and a
+  source that leaves the canvas; neither should create unexpected paint/history.
+- Check Show Source while hovering, painting, holding Alt, changing brush size,
+  zooming, fitting, panning, and entering/leaving the canvas. Compare aligned
+  continuation with unaligned reset. Hide the indicator and confirm painting stays
+  unchanged. Check markers on light/dark backgrounds and near image edges.
+- Change sampling, tabs/layers, or layer/canvas geometry and confirm a fresh source
+  is required. Cancel a first stroke, retry it, and verify alignment is established
+  only by a successfully committed change.

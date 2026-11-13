@@ -39,19 +39,47 @@ pub(super) enum BrushField {
     Flow,
 }
 
-pub(super) struct CloneSource {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloneTarget {
     tab: usize,
     layer: LayerId,
-    point: (u32, u32),
     offset: (i32, i32),
     size: (u32, u32),
+    canvas: (u32, u32),
+    sample_all: bool,
+}
+
+impl CloneTarget {
+    fn sample_bounds(self) -> PixelRect {
+        if self.sample_all {
+            PixelRect::new(0, 0, self.canvas.0, self.canvas.1)
+        } else {
+            PixelRect::new(
+                i64::from(self.offset.0),
+                i64::from(self.offset.1),
+                self.size.0,
+                self.size.1,
+            )
+        }
+    }
+
+    fn contains_source(self, point: (u32, u32)) -> bool {
+        let bounds = self.sample_bounds();
+        (bounds.x..bounds.right()).contains(&i64::from(point.0))
+            && (bounds.y..bounds.bottom()).contains(&i64::from(point.1))
+    }
+}
+
+pub(super) struct CloneSource {
+    target: CloneTarget,
+    point: (u32, u32),
     delta: Option<(i64, i64)>,
     pending: Option<(u64, (i64, i64))>,
 }
 
 impl CloneSource {
     fn settle(&mut self, tab: usize, generation: u64, published: bool) {
-        if tab != self.tab || self.pending.is_none_or(|pending| pending.0 != generation) {
+        if tab != self.target.tab || self.pending.is_none_or(|pending| pending.0 != generation) {
             return;
         }
         let (_, delta) = self.pending.take().unwrap();
@@ -60,22 +88,41 @@ impl CloneSource {
         }
     }
 
-    fn kind(
-        &self,
-        tab: usize,
-        layer: LayerId,
-        offset: (i32, i32),
-        size: (u32, u32),
-        here: (f64, f64),
-        aligned: bool,
-    ) -> Option<StrokeKind> {
-        if (self.tab, self.layer, self.offset, self.size) != (tab, layer, offset, size) {
+    fn kind(&self, target: CloneTarget, here: (f64, f64), aligned: bool) -> Option<StrokeKind> {
+        if self.target != target || !target.contains_source(self.point) {
             return None;
         }
         if aligned && let Some((dx, dy)) = self.delta {
             return Some(StrokeKind::Clone { dx, dy });
         }
-        Some(clone_kind(self.point, offset, here))
+        Some(clone_kind(self.point, target.offset, here))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ClonePreview {
+    point: (u32, u32),
+    delta: Option<(i64, i64)>,
+    bounds: PixelRect,
+}
+
+impl ClonePreview {
+    pub(super) fn source_at(self, destination: (f64, f64)) -> Option<(f64, f64)> {
+        if !destination.0.is_finite() || !destination.1.is_finite() {
+            return None;
+        }
+        let (x, y) = self.delta.map_or(
+            (i64::from(self.point.0), i64::from(self.point.1)),
+            |(dx, dy)| {
+                (
+                    destination.0.floor() as i64 + dx,
+                    destination.1.floor() as i64 + dy,
+                )
+            },
+        );
+        ((self.bounds.x..self.bounds.right()).contains(&x)
+            && (self.bounds.y..self.bounds.bottom()).contains(&y))
+        .then_some((x as f64 + 0.5, y as f64 + 0.5))
     }
 }
 
@@ -133,6 +180,57 @@ impl BrushSettings {
 }
 
 impl Workspace {
+    fn clone_target(&self) -> Option<CloneTarget> {
+        let tab = self.active_tab()?;
+        let layer = tab.document.content.layer(tab.active_layer)?;
+        (layer.visible && layer.text.is_none()).then_some(CloneTarget {
+            tab: tab.id,
+            layer: layer.id,
+            offset: layer.offset,
+            size: layer.pixels.dimensions(),
+            canvas: tab.document.content.size(),
+            sample_all: self.clone_sample_all,
+        })
+    }
+
+    pub(super) fn clone_preview(&self) -> Option<ClonePreview> {
+        if self.tool != Tool::CloneStamp || !self.clone_show_source {
+            return None;
+        }
+        let source = self.clone_source.as_ref()?;
+        let target = self.clone_target()?;
+        if source.target != target || !target.contains_source(source.point) {
+            return None;
+        }
+        let delta = self
+            .stroke
+            .as_ref()
+            .and_then(|stroke| stroke.clone_delta)
+            .or_else(|| {
+                self.clone_aligned
+                    .then(|| source.pending.map(|(_, delta)| delta).or(source.delta))
+                    .flatten()
+            });
+        Some(ClonePreview {
+            point: source.point,
+            delta,
+            bounds: target.sample_bounds(),
+        })
+    }
+
+    pub(super) fn set_clone_sampling(&mut self, sample_all: bool, cx: &mut Context<Self>) {
+        if self.stroke.is_some() || self.clone_sample_all == sample_all {
+            return;
+        }
+        self.clone_sample_all = sample_all;
+        self.clone_source = None;
+        self.notice(
+            "Clone sampling changed. Alt-click to choose a new source.",
+            cx,
+        );
+        cx.notify();
+    }
+
     pub(super) fn brush_value(&self, field: BrushField) -> u32 {
         let brush = self.active_brush();
         match field {
@@ -198,32 +296,23 @@ impl Workspace {
         let Some((x, y)) = self.canvas_pixel(position, scale, false) else {
             return;
         };
-        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+        if self.active_tab().is_none_or(|tab| tab.busy()) {
+            return;
+        }
+        let Some(target) = self.clone_target() else {
+            self.notice(
+                "Choose a visible raster layer as the clone destination.",
+                cx,
+            );
             return;
         };
-        let Some(layer) = tab.document.content.layer(tab.active_layer) else {
-            return;
-        };
-        let local = (
-            i64::from(x) - i64::from(layer.offset.0),
-            i64::from(y) - i64::from(layer.offset.1),
-        );
-        if !layer.visible
-            || layer.text.is_some()
-            || local.0 < 0
-            || local.1 < 0
-            || local.0 >= i64::from(layer.pixels.width())
-            || local.1 >= i64::from(layer.pixels.height())
-        {
+        if !target.contains_source((x, y)) {
             self.notice("Choose a source pixel inside the visible raster layer.", cx);
             return;
         }
         self.clone_source = Some(CloneSource {
-            tab: tab.id,
-            layer: layer.id,
+            target,
             point: (x, y),
-            offset: layer.offset,
-            size: layer.pixels.dimensions(),
             delta: None,
             pending: None,
         });
@@ -291,16 +380,14 @@ impl Workspace {
             .constrain(solid_color(self.colors[0]));
         let here = local_point(point, offset);
         let kind = if matches!(kind, StrokeKind::Clone { .. }) {
-            let Some(kind) = self.clone_source.as_ref().and_then(|source| {
-                source.kind(
-                    tab.id,
-                    id,
-                    offset,
-                    layer.pixels.dimensions(),
-                    here,
-                    self.clone_aligned,
-                )
-            }) else {
+            let Some(target) = self.clone_target() else {
+                return;
+            };
+            let Some(kind) = self
+                .clone_source
+                .as_ref()
+                .and_then(|source| source.kind(target, here, self.clone_aligned))
+            else {
                 self.notice("Alt-click to set the clone source.", cx);
                 return;
             };
@@ -308,17 +395,21 @@ impl Workspace {
         } else {
             kind
         };
+        let mut stroke =
+            Stroke::new(kind, color, *self.active_brush()).with_alpha_lock(layer.locks.alpha);
+        if matches!(kind, StrokeKind::Clone { .. }) && self.clone_sample_all {
+            stroke = stroke.with_clone_source(tab.document.canvas.pixels.clone(), offset);
+        }
         let mut session = StrokeSession {
             layer: id,
             offset,
             source,
             selection,
             canvas,
-            stroke: Stroke::new(kind, color, *self.active_brush())
-                .with_alpha_lock(layer.locks.alpha),
+            stroke,
             last_point: here,
             clone_delta: match kind {
-                StrokeKind::Clone { dx, dy } if self.clone_aligned => Some((dx, dy)),
+                StrokeKind::Clone { dx, dy } => Some((dx, dy)),
                 _ => None,
             },
             patches: BTreeMap::new(),
@@ -333,6 +424,10 @@ impl Workspace {
         session.last_point = here;
         self.stroke = Some(session);
         self.refresh_stroke_patch(window, cx);
+        if self.tool == Tool::CloneStamp {
+            // Establish the source cursor delta even if the first dab is a no-op.
+            cx.notify();
+        }
     }
 
     pub(super) fn finish_clone_alignment(&mut self, tab: usize, generation: u64, published: bool) {
@@ -398,7 +493,8 @@ impl Workspace {
         self.refresh_stroke_patch(window, cx);
         let session = self.stroke.take().unwrap();
         let generation = self.active_tab().unwrap().history.generation();
-        if let Some(delta) = session.clone_delta
+        if self.clone_aligned
+            && let Some(delta) = session.clone_delta
             && let Some(source) = self.clone_source.as_mut()
         {
             source.pending = Some((generation, delta));
@@ -576,20 +672,167 @@ mod tests {
     use super::*;
 
     #[test]
-    fn aligned_cloning_keeps_the_offset_and_unaligned_cloning_restarts_at_the_source() {
-        let pixels = RgbaImage::from_fn(10, 1, |x, _| image::Rgba([x as u8 * 20, 0, 0, 255]));
-        let mut source = CloneSource {
+    fn merged_clone_source_accepts_canvas_pixels_beyond_the_target_and_invalidates_changed_context()
+    {
+        let target = CloneTarget {
             tab: 7,
             layer: LayerId(3),
-            point: (6, 0),
-            offset: (0, 0),
-            size: (10, 1),
+            offset: (3, 2),
+            size: (2, 2),
+            canvas: (10, 8),
+            sample_all: true,
+        };
+        assert!(target.contains_source((0, 0)));
+        assert!(
+            !CloneTarget {
+                sample_all: false,
+                ..target
+            }
+            .contains_source((0, 0))
+        );
+        assert!(!target.contains_source((10, 0)));
+        let source = CloneSource {
+            target,
+            point: (0, 0),
             delta: None,
             pending: None,
         };
-        let first = source
-            .kind(7, LayerId(3), (0, 0), (10, 1), (0.5, 0.5), true)
+        assert_eq!(
+            source.kind(target, (0.5, 0.5), false),
+            Some(StrokeKind::Clone { dx: -3, dy: -2 })
+        );
+        for changed in [
+            CloneTarget {
+                canvas: (9, 8),
+                ..target
+            },
+            CloneTarget {
+                canvas: (10, 7),
+                ..target
+            },
+            CloneTarget {
+                sample_all: false,
+                ..target
+            },
+            CloneTarget {
+                size: (3, 2),
+                ..target
+            },
+            CloneTarget {
+                offset: (2, 2),
+                ..target
+            },
+            CloneTarget {
+                layer: LayerId(4),
+                ..target
+            },
+            CloneTarget { tab: 8, ..target },
+        ] {
+            assert!(source.kind(changed, (0.5, 0.5), true).is_none());
+        }
+    }
+
+    #[test]
+    fn source_marker_matches_aligned_sampling_and_unaligned_pixel_centers() {
+        let fixed = ClonePreview {
+            point: (4, 2),
+            delta: None,
+            bounds: PixelRect::new(0, 0, 10, 8),
+        };
+        assert_eq!(fixed.source_at((1.9, 1.1)), Some((4.5, 2.5)));
+        assert_eq!(fixed.source_at((2.9, 2.8)), Some((4.5, 2.5)));
+        let aligned = ClonePreview {
+            delta: Some((3, 1)),
+            ..fixed
+        };
+        assert_eq!(aligned.source_at((1.9, 1.1)), Some((4.5, 2.5)));
+        assert_eq!(aligned.source_at((2.9, 2.8)), Some((5.5, 3.5)));
+        assert_eq!(aligned.source_at((9., 2.)), None);
+        assert_eq!(aligned.source_at((f64::NAN, 2.)), None);
+        let offset = ClonePreview {
+            point: (0, 3),
+            delta: Some((-3, 1)),
+            bounds: PixelRect::new(-2, 1, 8, 5),
+        };
+        assert_eq!(offset.source_at((1.2, 2.2)), Some((-1.5, 3.5)));
+        assert_eq!(offset.source_at((0.2, 2.2)), None);
+    }
+
+    #[test]
+    fn merged_clone_preview_and_commit_use_visible_layers_and_only_write_the_destination() {
+        use crate::document::DocumentContent;
+        use image::Rgba;
+        let mut content = DocumentContent::single_layer(
+            "base".into(),
+            RgbaImage::from_pixel(4, 1, Rgba([180, 20, 40, 255])),
+        );
+        let base = content.top_layer_id();
+        let target = content
+            .add_layer(base, "target".into(), Rgba([0; 4]))
             .unwrap();
+        content.place_layer(target, RgbaImage::new(1, 1), (2, 0));
+        let overlay = content
+            .add_layer(target, "overlay".into(), Rgba([10, 40, 220, 255]))
+            .unwrap();
+        content.set_opacity(overlay, 128);
+        let hidden = content
+            .add_layer(overlay, "hidden".into(), Rgba([0, 255, 0, 255]))
+            .unwrap();
+        content.set_visible(hidden, false);
+        let originals: Vec<_> = [base, overlay, hidden]
+            .map(|id| (id, content.layer(id).unwrap().pixels.clone()))
+            .into();
+        let snapshot = content.composite();
+        let expected = *snapshot.get_pixel(0, 0);
+        let pixels = content.layer(target).unwrap().pixels.clone();
+        let mut stroke = Stroke::new(
+            StrokeKind::Clone { dx: -2, dy: 0 },
+            Rgba([0; 4]),
+            crate::paint::Brush {
+                diameter: 1,
+                ..Default::default()
+            },
+        )
+        .with_clone_source(snapshot.clone(), (2, 0));
+        stroke.sample(0.5, 0.5, &pixels, |_, _| 255);
+        let preview = content.composite_stroke_tile(target, &stroke, PixelRect::new(2, 0, 1, 1));
+        assert_ne!(
+            content.apply_stroke(target, &stroke),
+            crate::preview::Dirty::None
+        );
+        assert_eq!(
+            *content.layer(target).unwrap().pixels.get_pixel(0, 0),
+            expected
+        );
+        assert_eq!(
+            *preview.get_pixel(0, 0),
+            *content.composite().get_pixel(2, 0)
+        );
+        assert_eq!(content.layer(target).unwrap().offset, (2, 0));
+        for (id, original) in originals {
+            assert!(Arc::ptr_eq(&content.layer(id).unwrap().pixels, &original));
+        }
+        assert_eq!(*snapshot.get_pixel(0, 0), expected);
+    }
+
+    #[test]
+    fn aligned_cloning_keeps_the_offset_and_unaligned_cloning_restarts_at_the_source() {
+        let pixels = RgbaImage::from_fn(10, 1, |x, _| image::Rgba([x as u8 * 20, 0, 0, 255]));
+        let target = CloneTarget {
+            tab: 7,
+            layer: LayerId(3),
+            offset: (0, 0),
+            size: (10, 1),
+            canvas: (10, 1),
+            sample_all: false,
+        };
+        let mut source = CloneSource {
+            target,
+            point: (6, 0),
+            delta: None,
+            pending: None,
+        };
+        let first = source.kind(target, (0.5, 0.5), true).unwrap();
         assert_eq!(first, StrokeKind::Clone { dx: 6, dy: 0 });
         // The first accepted stroke establishes the alignment. Resolving a
         // canceled stroke alone does not change it.
@@ -604,9 +847,7 @@ mod tests {
         source.settle(7, 9, true);
         assert_eq!(source.delta, Some((6, 0)));
         for (aligned, expected) in [(true, 8), (false, 6)] {
-            let kind = source
-                .kind(7, LayerId(3), (0, 0), (10, 1), (2.5, 0.5), aligned)
-                .unwrap();
+            let kind = source.kind(target, (2.5, 0.5), aligned).unwrap();
             let mut stroke = Stroke::new(
                 kind,
                 image::Rgba([0; 4]),
@@ -621,22 +862,43 @@ mod tests {
         }
         assert!(
             source
-                .kind(8, LayerId(3), (0, 0), (10, 1), (0.5, 0.5), true)
+                .kind(CloneTarget { tab: 8, ..target }, (0.5, 0.5), true)
                 .is_none()
         );
         assert!(
             source
-                .kind(7, LayerId(4), (0, 0), (10, 1), (0.5, 0.5), true)
+                .kind(
+                    CloneTarget {
+                        layer: LayerId(4),
+                        ..target
+                    },
+                    (0.5, 0.5),
+                    true
+                )
                 .is_none()
         );
         assert!(
             source
-                .kind(7, LayerId(3), (1, 0), (10, 1), (0.5, 0.5), true)
+                .kind(
+                    CloneTarget {
+                        offset: (1, 0),
+                        ..target
+                    },
+                    (0.5, 0.5),
+                    true
+                )
                 .is_none()
         );
         assert!(
             source
-                .kind(7, LayerId(3), (0, 0), (8, 1), (0.5, 0.5), true)
+                .kind(
+                    CloneTarget {
+                        size: (8, 1),
+                        ..target
+                    },
+                    (0.5, 0.5),
+                    true
+                )
                 .is_none()
         );
     }

@@ -146,9 +146,24 @@ version 8 and require this build or newer. Export still makes flattened raster
 copies; ordinary raster Save cannot discard the lock settings.
 
 **Clone Stamp** starts with Aligned enabled, preserving the source offset across
-strokes. Turn it off to start each stroke at the chosen source. Alt-click to set
-a source again after changing tabs/layers or moving/resizing the layer. Wand and
-connected Fill treat fully transparent pixels as the same color even when their
+strokes. Turn it off to start each stroke at the chosen source. **Sample All
+Layers** reads the visible canvas, including other layers' opacity and rendered
+text; otherwise the active raster layer supplies the samples. With merged
+sampling you can Alt-click a source outside the destination layer's bounds.
+The destination is still the active visible raster layer, inside its existing
+bounds and the current selection. Each stroke samples the pixels as they looked
+when it started, so its own paint cannot feed back into its source.
+
+**Show Source** starts on and displays a blue dashed brush ring and crosshair at
+the sampled source position. It follows aligned movement, follows the source
+during an unaligned stroke, and resets to the chosen point between unaligned
+strokes. The indicator tracks zoom/pan and hides outside the sampled image.
+Alt still shows the source-picking cursor. Alt-click to set a source again after
+changing sampling, tabs/layers, or layer/canvas geometry. Sampling and alignment
+cannot change during an active stroke. These settings are independent of the
+Wand and Bucket Fill sample settings.
+
+Wand and connected Fill treat fully transparent pixels as the same color even when their
 stored RGB differs; other alpha and tolerance comparisons stay in effect.
 
 For **Pencil**, **Brush**, **Eraser**, and **Clone Stamp**, **Opacity** limits the
