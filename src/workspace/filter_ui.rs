@@ -27,6 +27,7 @@ impl FilterKind {
 }
 
 pub(super) struct FilterSession {
+    reediting: bool,
     tab: usize,
     generation: u64,
     layer: LayerId,
@@ -80,15 +81,25 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before filtering.", cx);
             return false;
         }
+        let reediting = self.effect_reediting;
+        let (content, selection) = if reediting {
+            tab.document
+                .content
+                .retained_effect_input(layer.id)
+                .unwrap_or_else(|| (tab.document.content.clone(), tab.selection.clone()))
+        } else {
+            (tab.document.content.clone(), tab.selection.clone())
+        };
         self.filter = Some(FilterSession {
+            reediting,
             tab: tab.id,
             generation: tab.history.generation(),
             layer: layer.id,
-            selection: tab.selection.clone(),
+            selection: selection.clone(),
             preview: Arc::new(crate::effect_preview::EffectPreview::new(
-                tab.document.content.clone(),
+                content,
                 layer.id,
-                tab.selection.clone(),
+                selection,
                 PREVIEW_EDGE,
             )),
             spec,
@@ -130,6 +141,7 @@ impl Workspace {
             return true;
         }
         let selection = session.selection.clone();
+        let reediting = session.reediting;
         let layer = session.layer;
         let spec = session.spec;
         let target = (session.tab, session.generation);
@@ -154,7 +166,7 @@ impl Workspace {
             return false;
         }
         self.clear_filter(window, cx);
-        if spec.is_identity() {
+        if spec.is_identity() && !reediting {
             return true;
         }
         self.edit_effect(
@@ -162,6 +174,7 @@ impl Workspace {
             target,
             layer,
             selection,
+            reediting,
             window,
             cx,
         );

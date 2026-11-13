@@ -67,6 +67,9 @@ impl Workspace {
             .as_ref()
             .or_else(|| self.active_tab().map(|tab| &tab.selection))
         {
+            Some(selection) if selection.feather_geometry().is_some() => {
+                selection.feather_geometry().unwrap().radius
+            }
             Some(Selection::RoundedRect(shape)) => shape.radius(),
             Some(Selection::Rect(_)) => 0,
             _ => self.selection_radius,
@@ -84,10 +87,11 @@ impl Workspace {
     pub(super) fn active_selection_antialias(&self) -> bool {
         self.active_tab()
             .filter(|tab| {
-                matches!(
-                    tab.selection,
-                    Selection::Ellipse(_) | Selection::RoundedRect(_)
-                )
+                tab.selection.feather_geometry().is_some()
+                    || matches!(
+                        tab.selection,
+                        Selection::Ellipse(_) | Selection::RoundedRect(_)
+                    )
             })
             .map_or(self.selection_antialias, |tab| {
                 tab.selection.is_antialiased()
@@ -105,14 +109,12 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let selection = tab.selection.clone().with_antialias(
-            antialias,
-            tab.document.width(),
-            tab.document.height(),
+        let _ = tab;
+        self.update_selection(
+            move |selection, size| selection.with_antialias(antialias, size.0, size.1),
+            window,
+            cx,
         );
-        if selection != tab.selection {
-            self.commit_selection(selection, window, cx);
-        }
         cx.notify();
     }
 
@@ -314,7 +316,7 @@ impl Workspace {
             ) => {
                 self.select_none(window, cx);
             }
-            (Some(_), Some(selection)) => self.commit_selection(selection, window, cx),
+            (Some(_), Some(selection)) => self.commit_placed_selection(selection, window, cx),
             (Some(_), None) => cx.notify(),
             (None, _) => {}
         }
@@ -540,6 +542,25 @@ impl Workspace {
         let tab = self.active_tab()?;
         let (width, height) = tab.document.content.size();
         tab.selection.crop_bounds(width, height)
+    }
+
+    pub(super) fn commit_placed_selection(
+        &mut self,
+        selection: Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_selection(
+            move |current, size| {
+                if let Some(geometry) = current.feather_geometry() {
+                    selection.feather(geometry.feather, size.0, size.1)
+                } else {
+                    selection
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     pub(super) fn commit_selection(
@@ -864,7 +885,7 @@ impl Workspace {
                     .filter(|selection| matches!(selection, Selection::RoundedRect(_)))
                     .map_or(self.selection_antialias, Selection::is_antialiased),
             );
-            self.commit_selection(shape, window, cx);
+            self.commit_placed_selection(shape, window, cx);
         }
         cx.notify();
     }
@@ -874,6 +895,9 @@ impl Workspace {
             .selection_preview
             .as_ref()
             .or_else(|| self.active_tab().map(|tab| &tab.selection))?;
+        if let Some(geometry) = selection.feather_geometry() {
+            return Some(geometry.rect);
+        }
         match selection {
             Selection::Rect(rect) => Some(*rect),
             Selection::Ellipse(ellipse) => Some(ellipse.rect()),
@@ -936,6 +960,12 @@ fn wand_source(
 }
 
 fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
+    if let Some(geometry) = selection
+        .feather_geometry()
+        .filter(|geometry| !geometry.ellipse)
+    {
+        return Some(geometry.rect);
+    }
     match selection {
         Selection::Rect(rect) => Some(*rect),
         Selection::RoundedRect(shape) => Some(shape.rect()),
@@ -995,6 +1025,9 @@ pub(super) fn near_polygon_start(origin: Point<Pixels>, pointer: Point<Pixels>) 
 }
 
 pub(super) fn adjustable_rect(selection: Selection) -> Option<PixelRect> {
+    if let Some(geometry) = selection.feather_geometry() {
+        return Some(geometry.rect);
+    }
     match selection {
         Selection::Rect(rect) | Selection::Inverse(rect) if rect.width > 0 && rect.height > 0 => {
             Some(rect)
@@ -1015,6 +1048,9 @@ pub(super) fn placed_selection(
     width: u32,
     height: u32,
 ) -> Selection {
+    if let Some(geometry) = previous.feather_geometry() {
+        return geometry.shape(rect, width, height);
+    }
     let covers = width > 0
         && height > 0
         && rect.x <= 0
@@ -1066,8 +1102,8 @@ fn move_rect(
         .saturating_sub(i64::from(rect.height))
         .max(0);
     PixelRect::new(
-        (pointer.0 - grab.0).clamp(0, max_x),
-        (pointer.1 - grab.1).clamp(0, max_y),
+        (pointer.0 - grab.0).clamp(rect.x.min(0), max_x.max(rect.x)),
+        (pointer.1 - grab.1).clamp(rect.y.min(0), max_y.max(rect.y)),
         rect.width,
         rect.height,
     )

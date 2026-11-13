@@ -1318,7 +1318,6 @@ mod tests {
                 opacity: 100,
                 flow: 50,
                 buildup: true,
-                ..Default::default()
             },
         );
         stroke.trace(
@@ -1338,7 +1337,6 @@ mod tests {
                 opacity: 100,
                 flow: 50,
                 buildup: true,
-                ..Default::default()
             },
         );
         repeated.trace(
@@ -1564,7 +1562,6 @@ mod tests {
             opacity: 100,
             flow: 50,
             buildup: true,
-            ..Default::default()
         };
         let plain = render_trace(&[(2.0, 3.0), (12.0, 3.0)], brush);
         let repeated = render_trace(&[(2.0, 3.0), (2.0, 3.0), (12.0, 3.0), (12.0, 3.0)], brush);

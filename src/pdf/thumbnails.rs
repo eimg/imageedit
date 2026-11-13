@@ -58,11 +58,20 @@ pub fn render_thumbnails(
         "Too many page previews requested."
     );
     validate_page_numbers(pages, source.info.pages)?;
-    let _guard = source
-        .render_lock
-        .lock()
-        .map_err(|_| anyhow!("The PDF renderer is unavailable."))?;
+    let _guard = source.acquire(control)?;
+    if super::worker::enabled() {
+        return super::worker::thumbnails(source, pages, background, control);
+    }
     control.check()?;
+    render_local(source, pages, background, control)
+}
+
+pub(super) fn render_local(
+    source: &PdfSource,
+    pages: &[usize],
+    background: PdfBackground,
+    control: &PdfControl,
+) -> Result<Vec<PdfThumbnail>> {
     catch_unwind(AssertUnwindSafe(|| {
         let pdf = load_pdf(source.data.clone())?;
         control.check()?;

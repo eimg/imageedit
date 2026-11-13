@@ -98,3 +98,40 @@ pub fn set_menu_icons() {
         }
     }
 }
+
+/// Label the Metal backing surface as sRGB so Core Animation can convert it
+/// to the display's profile, including when the window moves between screens.
+/// GPUI supplies straight BGRA bytes in the editor's sRGB working coordinates.
+pub fn set_srgb_surface(window: &gpui::Window) {
+    use objc2::{msg_send, runtime::AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        static kCGColorSpaceSRGB: *const c_void;
+        fn CGColorSpaceCreateWithName(name: *const c_void) -> *mut c_void;
+        fn CGColorSpaceRelease(space: *mut c_void);
+    }
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: GPUI owns this live NSView, and window creation runs on the main
+    // thread. Its makeBackingLayer returns a CAMetalLayer. The colorspace
+    // property retains the Core Graphics object before our reference is released.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        if space.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setColorspace: space];
+        CGColorSpaceRelease(space);
+    }
+}

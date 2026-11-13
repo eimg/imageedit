@@ -11,8 +11,8 @@ use super::dialogs::{Field, FieldMode};
 use super::layers::MovePaint;
 use super::numeric::NumericField;
 use super::view::{
-    ACCENT, BORDER, CANVAS, HOVER, MUTED, SELECTED, TEXT, info_note, option_action, option_row,
-    section_label, step_button, toggle_button,
+    ACCENT, BORDER, CANVAS, HOVER, MUTED, SELECTED, TEXT, choice_button, info_note, option_action,
+    option_row, section_label, segmented, step_button, toggle_button,
 };
 use crate::commands::{
     CopyImage, CutImage, FinishText, PasteImage, RasterizeText, Redo, SelectAll, TextCopy, TextCut,
@@ -22,7 +22,8 @@ use crate::document::{self, LayerId};
 use crate::preview::Dirty;
 use crate::text::{
     self, CaretMap, FontFace, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE, MAX_TEXT_CHARS,
-    MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextError, TextSpec,
+    MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextAlign, TextError,
+    TextLayout, TextSpec,
 };
 
 fn text_command_key(key: &Keystroke, windows: bool) -> bool {
@@ -125,6 +126,7 @@ pub(super) struct TextDefaults {
     face: FontFace,
     size: f32,
     spacing: Spacing,
+    layout: TextLayout,
 }
 
 impl Default for TextDefaults {
@@ -134,6 +136,7 @@ impl Default for TextDefaults {
             face: FontFace::default(),
             size: 32.0,
             spacing: Spacing::default(),
+            layout: TextLayout::default(),
         }
     }
 }
@@ -170,6 +173,7 @@ pub(super) struct TextDraft {
     size: f32,
     color: image::Rgba<u8>,
     spacing: Spacing,
+    layout: TextLayout,
     rendered: Arc<text::RenderedText>,
     carets: Arc<CaretMap>,
     // A click that opened this draft places the caret once the layout is known.
@@ -193,6 +197,7 @@ struct TextEdit {
     size: f32,
     color: image::Rgba<u8>,
     spacing: Spacing,
+    layout: TextLayout,
     anchor: (i32, i32),
 }
 
@@ -207,6 +212,27 @@ struct TextPreviewInput {
 }
 
 impl TextDraft {
+    pub(super) fn recovery_tab(&self) -> usize {
+        self.tab
+    }
+
+    pub(super) fn recovery_content(
+        &self,
+        content: &mut document::DocumentContent,
+        active: &mut LayerId,
+    ) -> Option<serde_json::Value> {
+        let dirty = self.apply(content, active);
+        if dirty != Dirty::None || !self.changed() {
+            return None;
+        }
+        Some(
+            serde_json::json!({"source": self.source, "family": self.family, "size": self.size,
+            "bold": self.face.bold, "italic": self.face.italic, "color": self.color.0,
+            "letter_spacing": self.spacing.letter, "line_spacing": self.spacing.line,
+            "layout": self.layout, "anchor": self.anchor, "layer": self.layer.map(|id| id.0), "above": self.above.0}),
+        )
+    }
+
     fn selected_range(&self) -> Option<std::ops::Range<usize>> {
         let anchor = self.selection_anchor?;
         (anchor != self.cursor).then(|| anchor.min(self.cursor)..anchor.max(self.cursor))
@@ -295,6 +321,7 @@ impl TextDraft {
             size: self.size,
             color: self.color,
             spacing: self.spacing,
+            layout: self.layout,
         }
     }
 
@@ -320,6 +347,7 @@ impl TextDraft {
             size: self.size,
             color: self.color,
             spacing: self.spacing,
+            layout: self.layout,
             anchor: self.anchor,
         }
     }
@@ -333,6 +361,7 @@ impl TextDraft {
         self.size = state.size;
         self.color = state.color;
         self.spacing = state.spacing;
+        self.layout = state.layout;
         self.anchor = state.anchor;
         self.stop_pointer();
     }
@@ -394,6 +423,9 @@ impl TextDraft {
     /// Empty text still gets a box one line tall so its frame is visible.
     fn bounds(&self) -> (f32, f32, f32, f32) {
         let (ax, ay) = (self.anchor.0 as f32, self.anchor.1 as f32);
+        if let (Some(width), Some(height)) = (self.layout.width, self.layout.height) {
+            return (ax, ay, ax + width as f32, ay + height as f32);
+        }
         let offset = self.rendered.style.offset_for(self.anchor);
         let (width, height) = self.rendered.image.dimensions();
         let mut left = (offset.0 as f32).min(ax);
@@ -520,6 +552,7 @@ impl Workspace {
             },
         );
         let substituted = draft.and_then(|draft| draft.substitution.clone());
+        let layout = self.text_layout();
         let can_rasterize = self
             .active_tab()
             .is_some_and(|tab| !tab.busy() && tab.document.content.layer_is_text(tab.active_layer));
@@ -598,6 +631,66 @@ impl Workspace {
                         |this, _, window, cx| this.step_text_spacing(0.0, 0.1, window, cx),
                     ))),
             ))
+            .child(section_label("LAYOUT"))
+            .child(
+                toggle_button("Fixed box", layout.width.is_some()).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        let mut layout = this.text_layout();
+                        if layout.width.is_some() {
+                            layout.width = None;
+                            layout.height = None;
+                        } else {
+                            layout.width = Some(256);
+                            layout.height = Some(128);
+                        }
+                        this.set_text_layout(layout, window, cx);
+                    },
+                )),
+            )
+            .when(layout.width.is_some(), |panel| {
+                panel
+                    .child(option_row(
+                        "Width",
+                        self.numeric_chip(NumericField::TextBoxWidth, None, cx),
+                    ))
+                    .child(option_row(
+                        "Height",
+                        self.numeric_chip(NumericField::TextBoxHeight, None, cx),
+                    ))
+                    .child(segmented(
+                        [
+                            (TextAlign::Left, "Left"),
+                            (TextAlign::Center, "Center"),
+                            (TextAlign::Right, "Right"),
+                        ]
+                        .into_iter()
+                        .map(|(align, label)| {
+                            choice_button(label, layout.align == align).on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    let mut layout = this.text_layout();
+                                    layout.align = align;
+                                    this.set_text_layout(layout, window, cx);
+                                },
+                            ))
+                        }),
+                    ))
+            })
+            .when(
+                draft.is_some_and(|draft| {
+                    draft.layout.height.is_some_and(|height| {
+                        draft
+                            .carets
+                            .stops
+                            .last()
+                            .is_some_and(|stop| stop.top + draft.carets.line_height > height as f32)
+                    })
+                }),
+                |panel| {
+                    panel.child(info_note(
+                        "Text extends below the box. Increase its height to show more.",
+                    ))
+                },
+            )
             .child(section_label("COLOR"))
             .child(
                 div()
@@ -1036,6 +1129,166 @@ impl Workspace {
         .detach();
     }
 
+    pub(super) fn restore_text_recovery(&mut self, id: usize, value: serde_json::Value) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Draft {
+            source: String,
+            family: String,
+            size: f32,
+            bold: bool,
+            italic: bool,
+            color: [u8; 4],
+            letter_spacing: f32,
+            line_spacing: f32,
+            layout: TextLayout,
+            anchor: (i32, i32),
+            layer: Option<u64>,
+            #[serde(default)]
+            above: u64,
+        }
+        let Ok(saved) = serde_json::from_value::<Draft>(value) else {
+            return false;
+        };
+        let spacing = Spacing {
+            letter: saved.letter_spacing,
+            line: saved.line_spacing,
+        };
+        if saved.source.chars().count() > MAX_TEXT_CHARS
+            || saved.family.chars().count() > text::MAX_FAMILY_CHARS
+            || !saved.size.is_finite()
+            || !(MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&saved.size)
+            || !spacing.allowed()
+            || !saved.layout.allowed()
+        {
+            return false;
+        }
+        let Some(index) = self.tab_index(id) else {
+            return false;
+        };
+        let tab = &self.tabs[index];
+        let layer = saved.layer.map(LayerId);
+        let (baseline, opacity, baseline_anchor) = if let Some(layer) = layer {
+            let Some(layer) = tab.document.content.layer(layer) else {
+                return false;
+            };
+            let Some(style) = layer.text.clone() else {
+                return false;
+            };
+            let anchor = style.anchor(layer.offset);
+            (
+                text::RenderedText {
+                    image: layer.pixels.clone(),
+                    style,
+                },
+                layer.opacity,
+                anchor,
+            )
+        } else {
+            (
+                text::RenderedText {
+                    image: Arc::new(image::RgbaImage::new(1, 1)),
+                    style: text::TextStyle {
+                        source: String::new(),
+                        family: saved.family.clone(),
+                        face: FontFace {
+                            bold: saved.bold,
+                            italic: saved.italic,
+                        },
+                        size: saved.size,
+                        color: image::Rgba(saved.color),
+                        spacing,
+                        layout: saved.layout,
+                        resolved_family: saved.family.clone(),
+                        origin: (0, 0),
+                    },
+                },
+                255,
+                saved.anchor,
+            )
+        };
+        let baseline = Arc::new(baseline);
+        self.tabs[index].pending_text = Some(TextDraft {
+            tab: id,
+            generation: tab.history.generation(),
+            above: tab
+                .document
+                .content
+                .layer(LayerId(saved.above))
+                .map_or(tab.active_layer, |layer| layer.id),
+            opacity,
+            substitution: None,
+            layer,
+            anchor: saved.anchor,
+            cursor: saved.source.len(),
+            source: saved.source,
+            selection_anchor: None,
+            family: saved.family,
+            face: FontFace {
+                bold: saved.bold,
+                italic: saved.italic,
+            },
+            size: saved.size,
+            color: image::Rgba(saved.color),
+            spacing,
+            layout: saved.layout,
+            rendered: baseline.clone(),
+            baseline,
+            baseline_anchor,
+            carets: Arc::new(CaretMap::default()),
+            pending_hit: None,
+            pending_extend: false,
+            pending_drag_hit: None,
+            dragging: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        });
+        true
+    }
+
+    pub(super) fn text_preview_layer(&self) -> Option<Option<LayerId>> {
+        self.text_draft.as_ref().map(|draft| draft.layer)
+    }
+
+    pub(super) fn text_layout(&self) -> TextLayout {
+        self.text_draft
+            .as_ref()
+            .map_or(self.text_defaults.layout, |draft| draft.layout)
+    }
+
+    fn set_text_layout(&mut self, layout: TextLayout, window: &mut Window, cx: &mut Context<Self>) {
+        if !layout.allowed() {
+            return;
+        }
+        self.text_defaults.layout = layout;
+        self.change_text(window, cx, |draft| {
+            if draft.layout == layout {
+                return false;
+            }
+            draft.layout = layout;
+            true
+        });
+        cx.notify();
+    }
+
+    pub(super) fn set_text_box_edge(
+        &mut self,
+        width: bool,
+        value: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut layout = self.text_layout();
+        if layout.width.is_none() || !(1..=document::MAX_NEW_EDGE).contains(&value) {
+            return;
+        }
+        if width {
+            layout.width = Some(value);
+        } else {
+            layout.height = Some(value);
+        }
+        self.set_text_layout(layout, window, cx);
+    }
+
     pub(super) fn text_size(&self) -> f32 {
         self.text_draft
             .as_ref()
@@ -1203,7 +1456,23 @@ impl Workspace {
                         .carets
                         .selection_rects(range)
                         .into_iter()
-                        .map(|(x, y, w, h)| (ax + x, ay + y, w, h))
+                        .filter_map(|(x, y, w, h)| {
+                            let (left, top) = (x.max(0.), y.max(0.));
+                            let right = draft
+                                .layout
+                                .width
+                                .map_or(x + w, |width| (x + w).min(width as f32));
+                            let bottom = draft
+                                .layout
+                                .height
+                                .map_or(y + h, |height| (y + h).min(height as f32));
+                            (right > left && bottom > top).then_some((
+                                ax + left,
+                                ay + top,
+                                right - left,
+                                bottom - top,
+                            ))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -1214,10 +1483,16 @@ impl Workspace {
         Some(TextCaret {
             x: ax + x,
             top: ay + top,
-            height: line_height,
+            height: draft.layout.height.map_or(line_height, |height| {
+                line_height.min((height as f32 - top).max(0.))
+            }),
             selection,
             frame: draft.bounds(),
-            visible: phase.is_multiple_of(2),
+            visible: phase.is_multiple_of(2)
+                && x >= 0.
+                && top >= 0.
+                && draft.layout.width.is_none_or(|width| x <= width as f32)
+                && draft.layout.height.is_none_or(|height| top < height as f32),
         })
     }
 
@@ -1333,6 +1608,7 @@ impl Workspace {
                     size: defaults.size,
                     color,
                     spacing: defaults.spacing,
+                    layout: defaults.layout,
                     resolved_family: defaults.family,
                     origin: (0, 0),
                 },
@@ -1443,11 +1719,23 @@ impl Workspace {
                         return draft.source.len();
                     }
                     if key_name == "home" || (command_navigation && key_name == "left") {
+                        if draft.layout.width.is_some() && draft.carets.matches(&draft.spec()) {
+                            return draft
+                                .carets
+                                .line_edge(draft.cursor, false)
+                                .unwrap_or(draft.cursor);
+                        }
                         return draft.source[..draft.cursor]
                             .rfind('\n')
                             .map_or(0, |at| at + 1);
                     }
                     if key_name == "end" || (command_navigation && key_name == "right") {
+                        if draft.layout.width.is_some() && draft.carets.matches(&draft.spec()) {
+                            return draft
+                                .carets
+                                .line_edge(draft.cursor, true)
+                                .unwrap_or(draft.cursor);
+                        }
                         return draft.source[draft.cursor..]
                             .find('\n')
                             .map_or(draft.source.len(), |at| draft.cursor + at);
@@ -1504,6 +1792,7 @@ impl Workspace {
             face: draft.face,
             size: draft.size,
             spacing: draft.spacing,
+            layout: draft.layout,
         };
         let Some(tab) = self.active_tab() else {
             self.cancel_text(window, cx);
@@ -1713,6 +2002,7 @@ impl Workspace {
             size: rendered.style.size,
             color: rendered.style.color,
             spacing: rendered.style.spacing,
+            layout: rendered.style.layout,
             baseline: rendered.clone(),
             baseline_anchor: anchor,
             rendered,
@@ -1892,9 +2182,9 @@ impl Workspace {
                 .as_ref()
                 .map(|content| {
                     if let Some(layer) = draft.layer {
-                        content.composite_around(layer)
+                        content.preview_around(layer)
                     } else {
-                        content.composite_at_insertion(draft.above)
+                        content.preview_at_insertion(draft.above)
                     }
                 })
                 .unwrap_or((None, None));
@@ -2067,6 +2357,7 @@ mod tests {
                 size: 24.0,
                 color: image::Rgba([0, 0, 0, 255]),
                 spacing: Spacing::default(),
+                layout: TextLayout::default(),
                 resolved_family: "sans-serif".into(),
                 origin: (0, 0),
             },
@@ -2087,6 +2378,7 @@ mod tests {
             size: 24.0,
             color: rendered.style.color,
             spacing: Spacing::default(),
+            layout: TextLayout::default(),
             baseline: rendered.clone(),
             baseline_anchor: (2, 3),
             rendered,

@@ -141,17 +141,19 @@ impl History {
         let live: HashSet<*const RgbaImage> = current
             .layers()
             .iter()
-            .map(|layer| Arc::as_ptr(&layer.pixels))
+            .flat_map(|layer| layer.storage())
+            .map(Arc::as_ptr)
             .collect();
         let mut seen = HashSet::new();
         let entries = || self.undo.iter().chain(&self.redo);
         let layer_bytes: u64 = entries()
             .flat_map(|entry| entry.state.content.layers())
-            .filter(|layer| {
-                let pixels = Arc::as_ptr(&layer.pixels);
+            .flat_map(|layer| layer.storage())
+            .filter(|buffer| {
+                let pixels = Arc::as_ptr(buffer);
                 !live.contains(&pixels) && seen.insert(pixels)
             })
-            .map(|layer| layer.pixels.as_raw().len() as u64)
+            .map(|buffer| buffer.as_raw().len() as u64)
             .sum();
         let mut seen_masks = HashSet::new();
         if let Some((pixels, _)) = selection.mask_storage() {
@@ -178,7 +180,24 @@ impl History {
                         (text.source.len() + text.family.len() + text.resolved_family.len()) as u64
                     })
                     .sum();
-                paths_bytes + text_bytes + std::mem::size_of_val(content.guides()) as u64
+                let retained_metadata = content
+                    .layers()
+                    .iter()
+                    .map(|layer| {
+                        layer
+                            .effect
+                            .as_ref()
+                            .map_or(0, |effect| std::mem::size_of_val(effect) as u64)
+                            + layer
+                                .mask
+                                .as_ref()
+                                .map_or(0, |mask| std::mem::size_of_val(mask) as u64)
+                    })
+                    .sum::<u64>();
+                paths_bytes
+                    + text_bytes
+                    + retained_metadata
+                    + std::mem::size_of_val(content.guides()) as u64
             })
             .sum();
         layer_bytes + mask_bytes + metadata_bytes
@@ -318,6 +337,58 @@ mod tests {
         fn pixel(&self) -> [u8; 4] {
             self.current.content.composite().get_pixel(0, 0).0
         }
+    }
+
+    #[test]
+    fn masks_and_retained_effects_undo_to_saved_state_and_share_backing_buffers() {
+        let mut session = Session::new(true, 2);
+        session.fill(100, &LIMITS);
+        session.history.mark_saved(session.history.revision());
+        let id = session.current.active_layer;
+        session.edit(
+            |content| {
+                content.mask_from_selection(
+                    id,
+                    &Selection::Rect(crate::preview::PixelRect::new(0, 0, 1, 2)),
+                ) != crate::preview::Dirty::None
+            },
+            &LIMITS,
+        );
+        session.edit(
+            |content| {
+                content.apply_retained_effect(
+                    id,
+                    crate::document::layer_effect::EffectSpec::Adjustment(
+                        crate::adjustments::Adjustment::Invert,
+                    ),
+                    &Selection::Unrestricted,
+                    false,
+                ) != crate::preview::Dirty::None
+            },
+            &LIMITS,
+        );
+        assert!(session.current.content.layer(id).unwrap().effect.is_some());
+        assert!(session.undo());
+        assert!(session.current.content.layer(id).unwrap().mask.is_some());
+        assert!(session.current.content.layer(id).unwrap().effect.is_none());
+        assert!(session.undo());
+        assert!(!session.history.is_dirty());
+        assert!(session.current.content.layer(id).unwrap().mask.is_none());
+        assert!(session.redo());
+        assert!(session.redo());
+        let retained = session
+            .history
+            .retained_bytes(&session.current.content, &session.current.selection);
+        session.edit(
+            |content| content.remove_retained_effect(id, true) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        assert!(
+            session
+                .history
+                .retained_bytes(&session.current.content, &session.current.selection)
+                >= retained + 16
+        );
     }
 
     #[test]

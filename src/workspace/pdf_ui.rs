@@ -13,7 +13,6 @@ use crate::{
     pdf::{
         self, PdfBackground, PdfCanvas, PdfControl, PdfMode, PdfOptions, PdfProgress, PdfSource,
     },
-    preview::Dirty,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,9 +96,6 @@ impl Drop for PdfJob {
 
 struct LayerDestination {
     state: super::history::State,
-    pixels: Arc<image::RgbaImage>,
-    has_transparency: bool,
-    levels: Vec<crate::preview::TileCache>,
     above: LayerId,
 }
 
@@ -107,9 +103,6 @@ impl LayerDestination {
     fn new(tab: &super::Tab, above: LayerId) -> Self {
         Self {
             state: tab.state(),
-            pixels: tab.document.canvas.pixels.clone(),
-            has_transparency: tab.document.canvas.preview.has_transparency,
-            levels: tab.document.canvas.level_caches(),
             above,
         }
     }
@@ -162,14 +155,8 @@ impl LayerDestination {
             });
             control.check()?;
         }
-        let patch = document::RenderedCanvas::prepare_patch(
-            &self.pixels,
-            self.has_transparency,
-            self.levels,
-            &self.state.content,
-            Dirty::Canvas,
-        )
-        .ok_or_else(|| anyhow::anyhow!("The PDF layers could not be prepared."))?;
+        let patch =
+            document::RenderedCanvas::prepare_checked(&self.state.content, &|| control.check())?;
         control.check()?;
         progress(PdfProgress::Preparing { done: total, total });
         control.check()?;
@@ -439,6 +426,7 @@ impl Workspace {
                 let _ = updates.unbounded_send(progress);
             };
             let pages = pdf::render_pages(&source, &job_options, &control, progress)?;
+            drop(source);
             control.check()?;
             Ok::<_, anyhow::Error>(if matches!(target, PdfTarget::NewDocument) {
                 PdfResult::Documents(prepare_documents(&job_options, pages, &control, progress)?)
@@ -553,10 +541,11 @@ fn prepare_documents(
             } else {
                 format!("{stem} ({})", options.pages[index])
             };
-            let document = Document::from_content(
+            let document = Document::from_content_checked(
                 title,
                 DocumentContent::single_layer(format!("Page {}", options.pages[index]), pixels),
-            );
+                &|| control.check(),
+            )?;
             control.check()?;
             documents.push(document);
             progress(PdfProgress::Preparing {
@@ -566,7 +555,10 @@ fn prepare_documents(
         }
         documents
     } else {
-        let document = Document::from_content(name, document_from_layers(pages, options)?);
+        let document =
+            Document::from_content_checked(name, document_from_layers(pages, options)?, &|| {
+                control.check()
+            })?;
         control.check()?;
         progress(PdfProgress::Preparing { done: 1, total });
         vec![document]

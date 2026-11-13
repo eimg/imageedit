@@ -2,6 +2,7 @@ mod adjust_ui;
 mod canvas_tools;
 mod clipboard;
 mod color;
+mod composite_preview;
 mod cursor;
 mod dialogs;
 mod effects;
@@ -16,6 +17,7 @@ mod paint_ui;
 mod path_ui;
 mod pdf_preview;
 mod pdf_ui;
+mod recovery_ui;
 mod scale_ui;
 mod selection;
 mod stroke_ui;
@@ -251,6 +253,7 @@ pub struct Workspace {
     numeric_followup: Option<numeric::PendingNumeric>,
     tab_scroll: ScrollHandle,
     tabs: Vec<Tab>,
+    recovery: recovery_ui::Recovery,
     active: Option<usize>,
     next_id: usize,
     tool: Tool,
@@ -290,6 +293,7 @@ pub struct Workspace {
     free_dragging: bool,
     move_drag: Option<layers::MoveDrag>,
     move_overlay: Option<layers::MovePaint>,
+    composite_preview: composite_preview::CompositePreview,
     scale_drag: Option<scale_ui::ScaleDrag>,
     scale_overlay: Option<layers::MovePaint>,
     scale_token: u64,
@@ -341,6 +345,7 @@ pub struct Workspace {
     filter: Option<filter_ui::FilterSession>,
     filter_preview: Option<EffectImages>,
     effect_before: bool,
+    effect_reediting: bool,
     effect_memory: effects::EffectMemory,
     filter_generation: crate::adjustments::PreviewGeneration,
     filter_busy: bool,
@@ -530,6 +535,7 @@ impl Workspace {
             numeric_followup: None,
             tab_scroll: ScrollHandle::new(),
             tabs: Vec::new(),
+            recovery: Default::default(),
             active: None,
             next_id: 0,
             tool: Tool::Move,
@@ -569,6 +575,7 @@ impl Workspace {
             free_dragging: false,
             move_drag: None,
             move_overlay: None,
+            composite_preview: Default::default(),
             scale_drag: None,
             scale_overlay: None,
             scale_token: 0,
@@ -620,6 +627,7 @@ impl Workspace {
             filter: None,
             filter_preview: None,
             effect_before: false,
+            effect_reediting: false,
             effect_memory: effects::EffectMemory::default(),
             filter_generation: crate::adjustments::PreviewGeneration::default(),
             filter_busy: false,
@@ -813,6 +821,7 @@ impl Workspace {
             self.text_continuation = None;
         }
         let removed = self.tabs.remove(index);
+        self.remove_recovery_tab(removed.id, cx);
         drop_canvas(removed.document.canvas, window, cx);
 
         self.active = match self.active {

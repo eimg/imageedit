@@ -51,6 +51,35 @@ pub struct FontFace {
     pub italic: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TextLayout {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub align: TextAlign,
+}
+impl TextLayout {
+    pub fn is_auto(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn allowed(self) -> bool {
+        [self.width, self.height]
+            .into_iter()
+            .flatten()
+            .all(|edge| (1..=MAX_NEW_EDGE).contains(&edge))
+            && (self.height.is_none() || self.width.is_some())
+    }
+}
+
 /// Everything that decides how a text layer rasterizes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextSpec {
@@ -60,6 +89,7 @@ pub struct TextSpec {
     pub size: f32,
     pub color: Rgba<u8>,
     pub spacing: Spacing,
+    pub layout: TextLayout,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +100,7 @@ pub struct TextStyle {
     pub size: f32,
     pub color: Rgba<u8>,
     pub spacing: Spacing,
+    pub layout: TextLayout,
     pub resolved_family: String,
     // Layout origin inside the bitmap. The canvas anchor is layer offset plus this.
     pub origin: (i32, i32),
@@ -109,6 +140,7 @@ impl RenderedText {
             && self.style.size == spec.size
             && self.style.color == spec.color
             && self.style.spacing == spec.spacing
+            && self.style.layout == spec.layout
     }
 }
 
@@ -177,6 +209,7 @@ pub fn render(
     color: Rgba<u8>,
 ) -> Result<RenderedText, TextError> {
     render_spec(&TextSpec {
+        layout: Default::default(),
         source: source.to_owned(),
         family: family.to_owned(),
         face: FontFace::default(),
@@ -189,7 +222,7 @@ pub fn render(
 pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
     let (source, pixel_size, color, spacing) =
         (spec.source.as_str(), spec.size, spec.color, spec.spacing);
-    if !spacing.allowed() {
+    if !spacing.allowed() || !spec.layout.allowed() {
         return Err(TextError::Spacing);
     }
     if !pixel_size.is_finite() || !(MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&pixel_size) {
@@ -207,9 +240,9 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
         return Err(TextError::Family);
     }
     with_fonts(|font_system, cache| {
-        if source.is_empty() {
+        if source.is_empty() && spec.layout.width.is_none() {
             let (resolved, _) = resolve_family(font_system, &family, None);
-            return Ok(rendered(
+            let mut result = rendered(
                 RgbaImage::new(1, 1),
                 source,
                 family,
@@ -219,9 +252,19 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
                 spec.face,
                 resolved,
                 (0, 0),
-            ));
+            );
+            result.style.layout = spec.layout;
+            return Ok(result);
         }
-        let mut buffer = layout(font_system, source, &family, pixel_size, spacing, spec.face);
+        let mut buffer = layout(
+            font_system,
+            source,
+            &family,
+            pixel_size,
+            spacing,
+            spec.face,
+            spec.layout,
+        );
 
         let mut line_right = 0i32;
         let mut line_bottom = 0i32;
@@ -231,7 +274,8 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
                 || !run.line_top.is_finite()
                 || !run.line_height.is_finite()
                 || run.line_w > MAX_NEW_EDGE as f32
-                || run.line_top + run.line_height > MAX_NEW_EDGE as f32
+                || (spec.layout.height.is_none()
+                    && run.line_top + run.line_height > MAX_NEW_EDGE as f32)
             {
                 return Err(TextError::TooLarge);
             }
@@ -246,6 +290,14 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
             }
         }
 
+        // Bound glyph rasterization to visible box lines. Caret layout remains
+        // complete in caret_map, so overflowing source stays editable.
+        if spec.layout.height.is_some() {
+            buffer.set_size(
+                spec.layout.width.map(|width| width as f32),
+                spec.layout.height.map(|height| height as f32),
+            );
+        }
         let mut left = 0i32;
         let mut top = 0i32;
         let mut right = line_right;
@@ -268,8 +320,16 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
                 too_big = true;
             }
         });
-        if too_big {
+        if too_big && spec.layout.width.is_none() {
             return Err(TextError::TooLarge);
+        }
+        if let Some(width) = spec.layout.width {
+            left = 0;
+            top = 0;
+            right = width as i32 - 1;
+            if let Some(height) = spec.layout.height {
+                bottom = height as i32 - 1;
+            }
         }
         let width = u32::try_from(right - left + 1).unwrap_or(u32::MAX).max(1);
         let height = u32::try_from(bottom - top + 1).unwrap_or(u32::MAX).max(1);
@@ -306,7 +366,7 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
         if resolved.chars().count() > MAX_FAMILY_CHARS {
             return Err(TextError::Family);
         }
-        Ok(rendered(
+        let mut result = rendered(
             image,
             source,
             family,
@@ -316,7 +376,9 @@ pub fn render_spec(spec: &TextSpec) -> Result<RenderedText, TextError> {
             spec.face,
             resolved,
             (-left, -top),
-        ))
+        );
+        result.style.layout = spec.layout;
+        Ok(result)
     })
 }
 
@@ -327,11 +389,16 @@ fn layout(
     pixel_size: f32,
     spacing: Spacing,
     face: FontFace,
+    text_layout: TextLayout,
 ) -> cosmic_text::Buffer {
     let metrics = cosmic_text::Metrics::new(pixel_size, line_height(pixel_size, spacing));
     let mut buffer = cosmic_text::Buffer::new(font_system, metrics);
-    buffer.set_wrap(cosmic_text::Wrap::None);
-    buffer.set_size(None, None);
+    buffer.set_wrap(if text_layout.width.is_some() {
+        cosmic_text::Wrap::WordOrGlyph
+    } else {
+        cosmic_text::Wrap::None
+    });
+    buffer.set_size(text_layout.width.map(|value| value as f32), None);
     let attrs = cosmic_text::Attrs::new()
         .family(family_attr(family))
         .weight(if face.bold {
@@ -346,6 +413,13 @@ fn layout(
         })
         .letter_spacing(spacing.letter / pixel_size);
     buffer.set_text(source, &attrs, cosmic_text::Shaping::Advanced, None);
+    for line in &mut buffer.lines {
+        line.set_align(Some(match text_layout.align {
+            TextAlign::Left => cosmic_text::Align::Left,
+            TextAlign::Center => cosmic_text::Align::Center,
+            TextAlign::Right => cosmic_text::Align::Right,
+        }));
+    }
     buffer.shape_until_scroll(font_system, false);
     buffer
 }
@@ -376,7 +450,7 @@ impl CaretMap {
         let mut rectangles = Vec::new();
         for pair in self.stops.windows(2) {
             let (start, end) = (pair[0], pair[1]);
-            if start.byte < range.start || start.byte >= range.end {
+            if start.byte == end.byte || start.byte < range.start || start.byte >= range.end {
                 continue;
             }
             let width = if start.line == end.line {
@@ -419,6 +493,7 @@ impl CaretMap {
                 && own.face == spec.face
                 && own.size == spec.size
                 && own.spacing == spec.spacing
+                && own.layout == spec.layout
         })
     }
 
@@ -443,6 +518,17 @@ impl CaretMap {
             .map(|stop| stop.byte)
     }
 
+    pub fn line_edge(&self, byte: usize, end: bool) -> Option<usize> {
+        let current = self.at(byte)?;
+        let stops = self.stops.iter().filter(|stop| stop.line == current.line);
+        if end {
+            stops.max_by(|a, b| a.x.total_cmp(&b.x))
+        } else {
+            stops.min_by(|a, b| a.x.total_cmp(&b.x))
+        }
+        .map(|stop| stop.byte)
+    }
+
     /// The byte offset on the line above or below at the same x.
     pub fn vertical(&self, byte: usize, down: bool) -> Option<usize> {
         let current = self.at(byte)?;
@@ -463,7 +549,7 @@ pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
     if !spec.size.is_finite() || !(MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&spec.size) {
         return Err(TextError::Size);
     }
-    if !spec.spacing.allowed() {
+    if !spec.spacing.allowed() || !spec.layout.allowed() {
         return Err(TextError::Spacing);
     }
     let family = normalize_family(&spec.family);
@@ -477,28 +563,50 @@ pub fn caret_map(spec: &TextSpec) -> Result<CaretMap, TextError> {
             spec.size,
             spec.spacing,
             spec.face,
+            spec.layout,
         );
         let mut start = 0;
         for (line, text) in spec.source.split('\n').enumerate() {
-            let run = buffer.layout_runs().find(|run| run.line_i == line);
-            let top = run
-                .as_ref()
-                .map_or(line as f32 * line_height, |run| run.line_top);
             for (index, _) in
                 unicode_segmentation::UnicodeSegmentation::grapheme_indices(text, true)
                     .chain(std::iter::once((text.len(), "")))
             {
                 let cursor = cosmic_text::Cursor::new(line, index);
-                let x = run
-                    .as_ref()
-                    .and_then(|run| run.cursor_position(&cursor))
-                    .unwrap_or(0.0);
-                stops.push(CaretStop {
-                    byte: start + index,
-                    line,
-                    x: if x.is_finite() { x } else { 0.0 },
-                    top: if top.is_finite() { top } else { 0.0 },
-                });
+                let mut positioned = false;
+                for (visual, run) in buffer
+                    .layout_runs()
+                    .enumerate()
+                    .filter(|(_, run)| run.line_i == line)
+                {
+                    if let Some(mut x) = run.cursor_position(&cursor) {
+                        if run.glyphs.is_empty() {
+                            x = match spec.layout.align {
+                                TextAlign::Left => 0.,
+                                TextAlign::Center => spec.layout.width.unwrap_or(0) as f32 / 2.,
+                                TextAlign::Right => spec.layout.width.unwrap_or(0) as f32,
+                            };
+                        }
+                        stops.push(CaretStop {
+                            byte: start + index,
+                            line: visual,
+                            x: if x.is_finite() { x } else { 0. },
+                            top: if run.line_top.is_finite() {
+                                run.line_top
+                            } else {
+                                0.
+                            },
+                        });
+                        positioned = true;
+                    }
+                }
+                if !positioned {
+                    stops.push(CaretStop {
+                        byte: start + index,
+                        line,
+                        x: 0.,
+                        top: line as f32 * line_height,
+                    });
+                }
             }
             start += text.len() + 1;
         }
@@ -562,6 +670,7 @@ fn rendered(
     RenderedText {
         image: Arc::new(image),
         style: TextStyle {
+            layout: Default::default(),
             source: source.to_owned(),
             family,
             face,
@@ -710,6 +819,61 @@ mod tests {
     }
 
     #[test]
+    fn fixed_box_wraps_aligns_clips_and_keeps_source_and_carets() {
+        let mut spec = spec(
+            "one two three four five six seven eight nine",
+            Spacing::default(),
+        );
+        spec.layout = TextLayout {
+            width: Some(150),
+            height: Some(75),
+            align: TextAlign::Left,
+        };
+        let rendered = render_spec(&spec).unwrap();
+        assert_eq!(rendered.image.dimensions(), (150, 75));
+        assert!(rendered.matches(&spec));
+        let carets = caret_map(&spec).unwrap();
+        assert!(carets.stops.last().unwrap().line > 1);
+        assert!(carets.stops.last().unwrap().top > 75.);
+        assert!(
+            carets
+                .stops
+                .iter()
+                .all(|stop| spec.source.is_char_boundary(stop.byte))
+        );
+        assert!(carets.vertical(0, true).is_some());
+        let mut aligned = spec.clone();
+        aligned.source = "Hi".into();
+        aligned.layout.align = TextAlign::Right;
+        let right = caret_map(&aligned).unwrap();
+        aligned.layout.align = TextAlign::Left;
+        let left = caret_map(&aligned).unwrap();
+        assert!(right.stops[0].x > left.stops[0].x + 50.);
+        assert!(!right.matches(&aligned));
+        aligned.layout.align = TextAlign::Center;
+        let center = caret_map(&aligned).unwrap();
+        assert!(center.stops[0].x > left.stops[0].x);
+        assert!(center.stops[0].x < right.stops[0].x);
+    }
+
+    #[test]
+    fn fixed_box_validation_and_empty_render_are_bounded() {
+        let mut spec = spec("", Spacing::default());
+        spec.layout = TextLayout {
+            width: Some(80),
+            height: Some(50),
+            align: TextAlign::Center,
+        };
+        let rendered = render_spec(&spec).unwrap();
+        assert_eq!(rendered.image.dimensions(), (80, 50));
+        assert!(rendered.matches(&spec));
+        spec.layout.width = Some(0);
+        assert!(render_spec(&spec).is_err());
+        spec.layout.width = None;
+        assert!(render_spec(&spec).is_err());
+    }
+
+    #[test]
     fn a_larger_size_rasterizes_more_pixels() {
         let color = Rgba([0, 0, 0, 255]);
         let small = render("Ag", "sans-serif", 16.0, color).unwrap();
@@ -723,6 +887,7 @@ mod tests {
 
     fn spec(source: &str, spacing: Spacing) -> TextSpec {
         TextSpec {
+            layout: Default::default(),
             source: source.into(),
             family: "sans-serif".into(),
             face: FontFace::default(),
@@ -786,6 +951,7 @@ mod tests {
             },
         ] {
             let styled_spec = TextSpec {
+                layout: Default::default(),
                 face,
                 ..plain_spec.clone()
             };

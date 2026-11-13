@@ -439,6 +439,7 @@ impl Workspace {
             })
             .count();
         if unsaved == 0 {
+            self.clean_recovery_exit();
             return true;
         }
 
@@ -447,7 +448,8 @@ impl Workspace {
         } else {
             format!("Discard changes to {unsaved} unsaved images?")
         };
-        self.confirm_discard(&message, window, cx, move |_, window, cx| {
+        self.confirm_discard(&message, window, cx, move |workspace, window, cx| {
+            workspace.clean_recovery_exit();
             if quit {
                 cx.quit();
             } else {

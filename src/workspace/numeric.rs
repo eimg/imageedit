@@ -21,6 +21,8 @@ pub(super) enum NumericField {
     CropWidth,
     CropHeight,
     TextSize,
+    TextBoxWidth,
+    TextBoxHeight,
     TextLineSpacing,
     TextLetterSpacing,
     WandTolerance,
@@ -65,6 +67,8 @@ impl NumericField {
             Self::CropWidth => 5,
             Self::CropHeight => 6,
             Self::TextSize => 7,
+            Self::TextBoxWidth => 45,
+            Self::TextBoxHeight => 46,
             Self::TextLineSpacing => 8,
             Self::TextLetterSpacing => 9,
             Self::WandTolerance => 10,
@@ -200,7 +204,9 @@ impl NumericField {
     fn is_tool_option(self) -> bool {
         matches!(
             self,
-            Self::TextLetterSpacing
+            Self::TextBoxWidth
+                | Self::TextBoxHeight
+                | Self::TextLetterSpacing
                 | Self::WandTolerance
                 | Self::FillTolerance
                 | Self::WandGapRadius
@@ -232,6 +238,9 @@ impl NumericField {
             Self::WandTolerance | Self::FillTolerance => (0, 255),
             Self::WandGapRadius | Self::FillGapRadius => {
                 (0, i64::from(crate::selection::MAX_GAP_RADIUS))
+            }
+            Self::TextBoxWidth | Self::TextBoxHeight => {
+                (1, i64::from(crate::document::MAX_NEW_EDGE))
             }
             Self::GridSpacing => (1, 4096),
             Self::SelectionFeatherRadius => (0, 128),
@@ -447,6 +456,8 @@ impl Workspace {
             NumericField::CropWidth => crop.map(|crop| i64::from(crop.width)),
             NumericField::CropHeight => crop.map(|crop| i64::from(crop.height)),
             NumericField::TextSize => Some(self.text_size().round() as i64),
+            NumericField::TextBoxWidth => self.text_layout().width.map(i64::from),
+            NumericField::TextBoxHeight => self.text_layout().height.map(i64::from),
             NumericField::TextLineSpacing => {
                 Some((self.text_line_spacing() * 100.0).round() as i64)
             }
@@ -822,7 +833,7 @@ impl Workspace {
         } else if edit.field.is_selection()
             && let Some(selection) = self.selection_preview.take()
         {
-            self.commit_selection(selection, window, cx);
+            self.commit_placed_selection(selection, window, cx);
         }
         cx.notify();
     }
@@ -1070,6 +1081,14 @@ impl Workspace {
                     }
                     self.set_perspective_point(index, point, window, cx);
                 }
+            }
+            NumericField::TextBoxWidth | NumericField::TextBoxHeight => {
+                self.set_text_box_edge(
+                    field == NumericField::TextBoxWidth,
+                    value as u32,
+                    window,
+                    cx,
+                );
             }
             NumericField::TextLetterSpacing => {
                 self.set_text_letter_spacing(value as f32, window, cx)

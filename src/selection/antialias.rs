@@ -79,6 +79,80 @@ pub(super) fn apply(
     }
 }
 
+/// Recover a fractional edge only when the pixel lies on the color segment
+/// between an admitted neighbor and the next rejected pixel. This extends the
+/// contour by at most one pixel; it never expands flood connectivity. Comparing
+/// premultiplied RGBA prevents hidden RGB in transparent pixels affecting it.
+pub(super) fn color_edges(
+    pixels: &mut [u8],
+    visited: &[u8],
+    image: &image::RgbaImage,
+    bounds: PixelRect,
+    included: impl Fn(u32, u32) -> bool,
+) {
+    let (width, height) = image.dimensions();
+    let vector = |pixel: image::Rgba<u8>| {
+        let a = f64::from(pixel[3]) / 255.;
+        [
+            f64::from(pixel[0]) * a,
+            f64::from(pixel[1]) * a,
+            f64::from(pixel[2]) * a,
+            f64::from(pixel[3]),
+        ]
+    };
+    for row in 0..bounds.height {
+        for column in 0..bounds.width {
+            let (x, y) = (bounds.x + i64::from(column), bounds.y + i64::from(row));
+            if visited[(y as u32 * width + x as u32) as usize] == ACCEPTED
+                || !included(x as u32, y as u32)
+            {
+                continue;
+            }
+            let middle = vector(*image.get_pixel(x as u32, y as u32));
+            let mut best = 0;
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (ix, iy, ox, oy) = (x - dx, y - dy, x + dx, y + dy);
+                if ix < 0
+                    || iy < 0
+                    || ox < 0
+                    || oy < 0
+                    || ix >= i64::from(width)
+                    || ox >= i64::from(width)
+                    || iy >= i64::from(height)
+                    || oy >= i64::from(height)
+                {
+                    continue;
+                }
+                if visited[(iy as u32 * width + ix as u32) as usize] != ACCEPTED
+                    || visited[(oy as u32 * width + ox as u32) as usize] == ACCEPTED
+                {
+                    continue;
+                }
+                let inside = vector(*image.get_pixel(ix as u32, iy as u32));
+                let outside = vector(*image.get_pixel(ox as u32, oy as u32));
+                let delta: [f64; 4] = std::array::from_fn(|c| outside[c] - inside[c]);
+                let length = delta.iter().map(|v| v * v).sum::<f64>();
+                if length < 32. * 32. {
+                    continue;
+                }
+                let position = (0..4)
+                    .map(|c| (middle[c] - inside[c]) * delta[c])
+                    .sum::<f64>()
+                    / length;
+                if !(0.01..0.99).contains(&position) {
+                    continue;
+                }
+                if (0..4).any(|c| (middle[c] - (inside[c] + position * delta[c])).abs() > 2.) {
+                    continue;
+                }
+                best = best.max(((1. - position) * 255.).round() as u8);
+            }
+            let index = (row * bounds.width + column) as usize;
+            pixels[index] = pixels[index].max(best);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

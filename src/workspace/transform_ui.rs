@@ -322,6 +322,7 @@ enum WarpDrag {
 pub(super) struct WarpSession {
     layer: LayerId,
     source: Arc<RgbaImage>,
+    mask: Option<document::LayerMask>,
     offset: (i32, i32),
     opacity: u8,
     kind: WarpKind,
@@ -399,6 +400,7 @@ impl Workspace {
         self.warp = Some(WarpSession {
             layer: layer.id,
             source: layer.pixels.clone(),
+            mask: layer.mask.clone(),
             offset,
             opacity: layer.opacity,
             kind,
@@ -452,6 +454,7 @@ impl Workspace {
         };
         let warp = session.spec();
         let source = session.source.clone();
+        let mask = session.mask.clone();
         let offset = session.offset;
         let layer = session.layer;
         let resample = self.warp_resample;
@@ -460,9 +463,20 @@ impl Workspace {
         cx.notify();
         self.warp_token = self.warp_token.wrapping_add(1);
         let token = self.warp_token;
-        let job = cx
-            .background_executor()
-            .spawn(async move { transform::warp_layer(&source, offset, warp, resample, None) });
+        let job = cx.background_executor().spawn(async move {
+            let placed = transform::warp_layer(&source, offset, warp, resample, None)?;
+            let mask = mask
+                .map(|mask| {
+                    transform::warp_layer(&mask.pixels, offset, warp, resample, None).map(
+                        |placed| document::LayerMask {
+                            pixels: Arc::new(placed.pixels),
+                            enabled: mask.enabled,
+                        },
+                    )
+                })
+                .transpose()?;
+            Ok::<_, WarpError>((placed, mask))
+        });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = job.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -475,7 +489,7 @@ impl Workspace {
                         workspace.warp_error = Some(error.message());
                         cx.notify();
                     }
-                    Ok(placed) => workspace.commit_warp(layer, placed, window, cx),
+                    Ok((placed, mask)) => workspace.commit_warp(layer, placed, mask, window, cx),
                 }
             });
         })
@@ -945,6 +959,7 @@ impl Workspace {
         &mut self,
         layer: LayerId,
         placed: transform::Placed,
+        mask: Option<document::LayerMask>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -958,7 +973,7 @@ impl Workspace {
         let pixels = placed.pixels;
         let offset = placed.offset;
         self.edit_content(
-            move |content, _, _| content.place_layer(layer, pixels, offset),
+            move |content, _, _| content.place_layer_with_mask(layer, pixels, offset, mask),
             window,
             cx,
         );
@@ -1005,6 +1020,7 @@ impl Workspace {
         let token = self.warp_token;
         let warp = session.spec();
         let source = session.source.clone();
+        let mask = session.mask.clone().filter(|mask| mask.enabled);
         let offset = session.offset;
         let opacity = session.opacity;
         let layer = session.layer;
@@ -1013,7 +1029,32 @@ impl Workspace {
             let placed = transform::warp_layer(&source, offset, warp, resample, Some(PREVIEW_EDGE));
             let (below, above, sprite) = match placed {
                 Ok(placed) => {
-                    let shown = layers::with_layer_opacity(&placed.pixels, opacity);
+                    let mut shown = layers::with_layer_opacity(&placed.pixels, opacity);
+                    if let Some(mask) = &mask {
+                        match transform::warp_layer(
+                            &mask.pixels,
+                            offset,
+                            warp,
+                            resample,
+                            Some(PREVIEW_EDGE),
+                        ) {
+                            Ok(transformed) => {
+                                for (pixel, mask) in
+                                    shown.pixels_mut().zip(transformed.pixels.pixels())
+                                {
+                                    pixel[3] = ((u16::from(pixel[3]) * u16::from(mask[3]) + 127)
+                                        / 255) as u8;
+                                }
+                            }
+                            Err(error) => {
+                                return WarpPreview {
+                                    below: None,
+                                    above: None,
+                                    sprite: Err(error),
+                                };
+                            }
+                        }
+                    }
                     let sprite = Ok(DrawnSprite {
                         image: document::preview_render(&shown),
                         offset: placed.offset,
@@ -1021,7 +1062,7 @@ impl Workspace {
                     });
                     let (below, above) = base
                         .as_ref()
-                        .map(|content| content.composite_around(layer))
+                        .map(|content| content.preview_around(layer))
                         .unwrap_or((None, None));
                     (
                         below.as_ref().map(document::preview_render),
@@ -1303,6 +1344,7 @@ mod tests {
     fn perspective_corners_share_exact_tenths_and_recover_invalid_geometry() {
         let mut session = WarpSession {
             layer: LayerId(7),
+            mask: None,
             source: Arc::new(RgbaImage::new(5, 2)),
             offset: (-3, 4),
             opacity: 180,
@@ -1351,6 +1393,7 @@ mod tests {
     fn pivot_anchors_precision_and_default_center_leave_source_and_pending_state_intact() {
         let mut session = WarpSession {
             layer: LayerId(7),
+            mask: None,
             source: Arc::new(RgbaImage::new(5, 2)),
             offset: (-3, 4),
             opacity: 180,
@@ -1560,6 +1603,7 @@ mod tests {
     fn untouched_rotate_and_perspective_are_not_pending_but_a_flip_is() {
         let mut session = WarpSession {
             layer: LayerId(0),
+            mask: None,
             source: Arc::new(RgbaImage::new(3, 2)),
             offset: (1, 2),
             opacity: 255,

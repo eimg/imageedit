@@ -20,6 +20,9 @@ pub struct LayerId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendMode {
     Normal,
+    Multiply,
+    Screen,
+    Overlay,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -35,8 +38,24 @@ impl LayerLocks {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskEdit {
+    Toggle,
+    Invert,
+    Apply,
+    Remove,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct LayerMask {
+    pub pixels: Arc<RgbaImage>,
+    pub enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct RasterLayer {
+    pub effect: Option<crate::document::layer_effect::EditableEffect>,
+    pub mask: Option<LayerMask>,
     pub id: LayerId,
     pub name: String,
     pub pixels: Arc<RgbaImage>,
@@ -49,6 +68,56 @@ pub struct RasterLayer {
 }
 
 impl RasterLayer {
+    pub fn masked(&self, mut pixel: Rgba<u8>, x: u32, y: u32) -> Rgba<u8> {
+        if let Some(mask) = &self.mask
+            && mask.enabled
+        {
+            let coverage = mask.pixels.get_pixel(x, y)[3];
+            pixel[3] = ((u16::from(pixel[3]) * u16::from(coverage) + 127) / 255) as u8;
+        }
+        pixel
+    }
+
+    pub fn content_crop(&self) -> crate::geometry::ContentCrop {
+        if self.mask.as_ref().is_none_or(|mask| !mask.enabled) {
+            return crate::geometry::layer_content_crop(&self.pixels);
+        }
+        let (width, height) = self.pixels.dimensions();
+        let (mut left, mut top, mut right, mut bottom) = (width, height, 0, 0);
+        for (x, y, pixel) in self.pixels.enumerate_pixels() {
+            if self.masked(*pixel, x, y)[3] != 0 {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x + 1);
+                bottom = bottom.max(y + 1);
+            }
+        }
+        if left >= right || top >= bottom {
+            crate::geometry::ContentCrop::Empty
+        } else if left == 0 && top == 0 && right == width && bottom == height {
+            crate::geometry::ContentCrop::Unchanged
+        } else {
+            crate::geometry::ContentCrop::Crop(crate::geometry::PixelBox {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            })
+        }
+    }
+
+    pub fn storage(&self) -> impl Iterator<Item = &Arc<RgbaImage>> {
+        std::iter::once(&self.pixels)
+            .chain(self.mask.iter().map(|mask| &mask.pixels))
+            .chain(self.effect.iter().flat_map(|effect| effect.storage()))
+    }
+
+    fn map_mask(&mut self, map: impl FnOnce(&RgbaImage) -> RgbaImage) {
+        if let Some(mask) = &mut self.mask {
+            mask.pixels = Arc::new(map(&mask.pixels));
+        }
+    }
+
     pub(super) fn bounds(&self) -> PixelBounds {
         let (x, y) = self.offset;
         let (left, top) = (i64::from(x), i64::from(y));
@@ -79,6 +148,160 @@ struct ScaledLayer {
 }
 
 impl DocumentContent {
+    pub fn change_blend_mode(&mut self, id: LayerId, mode: BlendMode) -> Dirty {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return Dirty::None;
+        };
+        if layer.blend_mode == mode {
+            return Dirty::None;
+        }
+        layer.blend_mode = mode;
+        Dirty::Canvas
+    }
+
+    pub fn needs_composite_preview(&self) -> bool {
+        self.layers.iter().any(|layer| {
+            layer.visible
+                && (layer.blend_mode != BlendMode::Normal
+                    || layer.mask.as_ref().is_some_and(|mask| mask.enabled))
+        })
+    }
+
+    pub fn mask_from_selection(&mut self, id: LayerId, selection: &Selection) -> Dirty {
+        let Some(index) = self.layer_index(id) else {
+            return Dirty::None;
+        };
+        let layer = &self.layers[index];
+        if layer.text.is_some()
+            || (layer.mask.is_none() && !self.fits_stack(0, layer.pixels.as_raw().len() as u64))
+        {
+            return Dirty::None;
+        }
+        let (width, height) = layer.pixels.dimensions();
+        let offset = layer.offset;
+        let pixels = RgbaImage::from_fn(width, height, |x, y| {
+            Rgba([
+                255,
+                255,
+                255,
+                selection.coverage(
+                    i64::from(offset.0) + i64::from(x),
+                    i64::from(offset.1) + i64::from(y),
+                    self.width,
+                    self.height,
+                ),
+            ])
+        });
+        if layer
+            .mask
+            .as_ref()
+            .is_some_and(|mask| mask.enabled && *mask.pixels == pixels)
+        {
+            return Dirty::None;
+        }
+        self.layers[index].mask = Some(LayerMask {
+            pixels: Arc::new(pixels),
+            enabled: true,
+        });
+        self.layer_composite_dirty(id)
+    }
+
+    pub fn edit_mask(&mut self, id: LayerId, operation: MaskEdit) -> Dirty {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return Dirty::None;
+        };
+        let Some(mask) = layer.mask.as_mut() else {
+            return Dirty::None;
+        };
+        match operation {
+            MaskEdit::Toggle => mask.enabled = !mask.enabled,
+            MaskEdit::Invert => {
+                let mut pixels = (*mask.pixels).clone();
+                for pixel in pixels.pixels_mut() {
+                    pixel[3] = 255 - pixel[3];
+                }
+                mask.pixels = Arc::new(pixels);
+            }
+            MaskEdit::Apply => {
+                if !mask.enabled || layer.locks.alpha {
+                    return Dirty::None;
+                }
+                let mut pixels = (*layer.pixels).clone();
+                for (pixel, coverage) in pixels.pixels_mut().zip(mask.pixels.pixels()) {
+                    pixel[3] = ((u16::from(pixel[3]) * u16::from(coverage[3]) + 127) / 255) as u8;
+                }
+                layer.effect = None;
+                layer.pixels = Arc::new(pixels);
+                layer.mask = None;
+            }
+            MaskEdit::Remove => layer.mask = None,
+        }
+        if operation == MaskEdit::Apply {
+            self.layer_pixels_dirty(id)
+        } else {
+            self.layer_composite_dirty(id)
+        }
+    }
+
+    pub fn mask_selection(&self, id: LayerId) -> Option<Selection> {
+        let layer = self.layer(id)?;
+        let mask = layer.mask.as_ref()?;
+        Some(Selection::from_coverage(self.width, self.height, |x, y| {
+            let (x, y) = (
+                i64::from(x) - i64::from(layer.offset.0),
+                i64::from(y) - i64::from(layer.offset.1),
+            );
+            if x < 0
+                || y < 0
+                || x >= i64::from(mask.pixels.width())
+                || y >= i64::from(mask.pixels.height())
+            {
+                0
+            } else {
+                mask.pixels.get_pixel(x as u32, y as u32)[3]
+            }
+        }))
+    }
+
+    pub fn place_layer_with_mask(
+        &mut self,
+        id: LayerId,
+        pixels: RgbaImage,
+        offset: (i32, i32),
+        mask: Option<LayerMask>,
+    ) -> Dirty {
+        let Some(layer) = self.layer(id) else {
+            return Dirty::None;
+        };
+        if layer.text.is_some()
+            || layer.locks.position
+            || layer.mask.is_some() != mask.is_some()
+            || mask
+                .as_ref()
+                .is_some_and(|mask| mask.pixels.dimensions() != pixels.dimensions())
+            || !self.accepts_replacement(id, pixels.dimensions())
+        {
+            return Dirty::None;
+        }
+        let mask_changed = layer.mask != mask;
+        let unchanged = layer.offset == offset && *layer.pixels == pixels;
+        if unchanged {
+            if !mask_changed {
+                return Dirty::None;
+            }
+            let index = self.layer_index(id).unwrap();
+            self.layers[index].mask = mask;
+            return self.layer_composite_dirty(id);
+        }
+        let dirty = self.place_layer(id, pixels, offset);
+        if dirty != Dirty::None
+            && let Some(index) = self.layer_index(id)
+        {
+            self.layers[index].mask = mask;
+        }
+        dirty
+    }
+
     pub fn single_layer(name: String, pixels: RgbaImage) -> Self {
         let (width, height) = pixels.dimensions();
         Self {
@@ -86,6 +309,8 @@ impl DocumentContent {
             height,
             mode: crate::transform::ColorMode::Rgb,
             layers: vec![RasterLayer {
+                effect: None,
+                mask: None,
                 id: LayerId(0),
                 name,
                 pixels: Arc::new(pixels),
@@ -111,6 +336,30 @@ impl DocumentContent {
                 layer.pixels.width() > 0 && layer.pixels.height() > 0,
                 "Layer \"{}\" has no pixels",
                 layer.name
+            );
+            ensure!(
+                layer
+                    .mask
+                    .as_ref()
+                    .is_none_or(|mask| mask.pixels.dimensions() == layer.pixels.dimensions()),
+                "Layer mask dimensions do not match its layer"
+            );
+            ensure!(
+                layer
+                    .effect
+                    .as_ref()
+                    .is_none_or(|effect| layer.text.is_none()
+                        && effect.spec.valid()
+                        && !effect.spec.identity()
+                        && effect.source.dimensions() == layer.pixels.dimensions()
+                        && effect.coverage.as_ref().is_none_or(
+                            |coverage| coverage.dimensions() == layer.pixels.dimensions()
+                        )),
+                "Invalid retained layer effect"
+            );
+            ensure!(
+                layer.mask.is_none() || layer.text.is_none(),
+                "Editable text cannot have a raster mask"
             );
             ensure!(ids.insert(layer.id), "Layer ID {} is repeated", layer.id.0);
         }
@@ -404,6 +653,7 @@ impl DocumentContent {
         self.mode = mode;
         if mode == crate::transform::ColorMode::Grayscale {
             for layer in &mut self.layers {
+                layer.effect = None;
                 layer.pixels = Arc::new(crate::transform::grayscale((*layer.pixels).clone()));
                 if let Some(style) = layer.text.as_mut() {
                     style.color = mode.constrain(style.color);
@@ -421,6 +671,17 @@ impl DocumentContent {
 
     pub fn layers(&self) -> &[RasterLayer] {
         &self.layers
+    }
+
+    pub(super) fn layer_pixels_dirty(&self, id: LayerId) -> Dirty {
+        self.layer(id).map_or(Dirty::None, |layer| {
+            Dirty::Region(PixelRect::new(
+                i64::from(layer.offset.0),
+                i64::from(layer.offset.1),
+                layer.pixels.width(),
+                layer.pixels.height(),
+            ))
+        })
     }
 
     pub fn layer_composite_dirty(&self, id: LayerId) -> Dirty {
@@ -491,6 +752,7 @@ impl DocumentContent {
         if !self.accepts_replacement(id, pixels.dimensions()) {
             return Dirty::None;
         }
+        self.layers[index].effect = None;
         self.layers[index].pixels = pixels;
         self.layers[index].offset = offset;
         self.layers[index].text = Some(style);
@@ -541,6 +803,8 @@ impl DocumentContent {
         self.layers.insert(
             index,
             RasterLayer {
+                effect: None,
+                mask: None,
                 id,
                 name: "Text".into(),
                 pixels,
@@ -578,6 +842,8 @@ impl DocumentContent {
         };
         (layer.visible
             && layer.opacity == 255
+            && layer.effect.is_none()
+            && layer.mask.is_none()
             && layer.blend_mode == BlendMode::Normal
             && layer.offset == (0, 0)
             && layer.pixels.dimensions() == (self.width, self.height))
@@ -593,6 +859,27 @@ impl DocumentContent {
                     && layer.text.is_none()
                     && layer.locks.is_unlocked()
             })
+    }
+
+    pub fn composite_checked(
+        &self,
+        check: &impl Fn() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Arc<RgbaImage>> {
+        check()?;
+        if let Some(layer) = self.full_canvas_layer() {
+            return Ok(layer.pixels.clone());
+        }
+        Ok(Arc::new(composite::flatten_checked(
+            &self.layers,
+            PixelBounds {
+                left: 0,
+                top: 0,
+                right: i64::from(self.width),
+                bottom: i64::from(self.height),
+            },
+            |layer, x, y| *layer.pixels.get_pixel(x, y),
+            check,
+        )?))
     }
 
     pub fn composite(&self) -> Arc<RgbaImage> {
@@ -638,6 +925,8 @@ impl DocumentContent {
             if clipped != original {
                 let (x, y) = original.local_origin(clipped);
                 let (width, height) = clipped.dimensions();
+                layer.map_mask(|mask| imageops::crop_imm(mask, x, y, width, height).to_image());
+                layer.effect = None;
                 layer.pixels =
                     Arc::new(imageops::crop_imm(&*layer.pixels, x, y, width, height).to_image());
             }
@@ -648,6 +937,8 @@ impl DocumentContent {
         });
         if self.layers.is_empty() {
             fallback.offset = (0, 0);
+            fallback.mask = None;
+            fallback.effect = None;
             fallback.pixels = Arc::new(RgbaImage::new(crop.width, crop.height));
             self.layers.push(fallback);
         }
@@ -686,9 +977,15 @@ impl DocumentContent {
 
     pub fn can_duplicate_layer(&self, id: LayerId) -> bool {
         self.can_add_layer()
-            && self
-                .layer(id)
-                .is_some_and(|layer| self.fits_stack(0, layer.pixels.as_raw().len() as u64))
+            && self.layer(id).is_some_and(|layer| {
+                self.fits_stack(
+                    0,
+                    layer
+                        .storage()
+                        .map(|pixels| pixels.as_raw().len() as u64)
+                        .sum(),
+                )
+            })
     }
 
     // Inserts a canvas-sized layer above `above`, or at the top if it is missing.
@@ -704,6 +1001,8 @@ impl DocumentContent {
         self.layers.insert(
             index,
             RasterLayer {
+                effect: None,
+                mask: None,
                 id,
                 name,
                 pixels: Arc::new(RgbaImage::from_pixel(self.width, self.height, fill)),
@@ -823,6 +1122,8 @@ impl DocumentContent {
         self.layers.insert(
             index,
             RasterLayer {
+                effect: None,
+                mask: None,
                 id,
                 name: limited_name(&layer.name),
                 pixels: Arc::new(pixels),
@@ -839,7 +1140,9 @@ impl DocumentContent {
 
     fn stack_bytes(&self) -> u64 {
         self.layers.iter().fold(0, |total, layer| {
-            total.saturating_add(image_bytes(&layer.pixels).unwrap_or(u64::MAX))
+            layer.storage().fold(total, |total, pixels| {
+                total.saturating_add(image_bytes(pixels).unwrap_or(u64::MAX))
+            })
         })
     }
 
@@ -954,6 +1257,8 @@ impl DocumentContent {
             || !upper.visible
             || lower.text.is_some()
             || upper.text.is_some()
+            || (index > 0
+                && (lower.blend_mode != BlendMode::Normal || upper.blend_mode != BlendMode::Normal))
             || !lower.locks.is_unlocked()
             || !upper.locks.is_unlocked()
         {
@@ -978,12 +1283,14 @@ impl DocumentContent {
         let pixels = composite::flatten_region(&self.layers[index..=index + 1], union);
         self.layers.remove(index + 1);
         let merged = &mut self.layers[index];
+        merged.effect = None;
         merged.pixels = Arc::new(pixels);
         // Both bounds start at i32 offsets, so their minimum does too.
         merged.offset = (union.left as i32, union.top as i32);
         merged.visible = true;
         merged.opacity = 255;
         merged.blend_mode = BlendMode::Normal;
+        merged.mask = None;
         Some(merged.id)
     }
 
@@ -1121,6 +1428,7 @@ impl DocumentContent {
             }
         };
         let (pixels, left, top, right, bottom) = painted;
+        layer.effect = None;
         layer.pixels = Arc::new(pixels);
         Some(PixelRect::new(
             origin_x + i64::from(left),
@@ -1154,6 +1462,7 @@ impl DocumentContent {
         ) else {
             return Dirty::None;
         };
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(pixels);
         Dirty::Region(PixelRect::new(
             i64::from(offset.0) + i64::from(left),
@@ -1197,6 +1506,7 @@ impl DocumentContent {
         ) else {
             return Dirty::None;
         };
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(adjusted.pixels);
         Dirty::Region(PixelRect::new(
             i64::from(offset.0) + i64::from(adjusted.left),
@@ -1258,6 +1568,7 @@ impl DocumentContent {
         ) else {
             return Dirty::None;
         };
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(adjusted.pixels);
         Dirty::Region(PixelRect::new(
             i64::from(offset.0) + i64::from(adjusted.left),
@@ -1294,9 +1605,11 @@ impl DocumentContent {
             .drop_shadow_bounds(id, radius, offset)
             .ok_or(crate::filters::FilterStop::TooLarge)?;
         let color = self.mode.constrain(color);
-        let Some(shadow) =
-            crate::filters::render_shadow(&self.layers[index].pixels, radius, opacity, color)
-        else {
+        let source = &self.layers[index];
+        let pixels = RgbaImage::from_fn(source.pixels.width(), source.pixels.height(), |x, y| {
+            source.masked(*source.pixels.get_pixel(x, y), x, y)
+        });
+        let Some(shadow) = crate::filters::render_shadow(&pixels, radius, opacity, color) else {
             return Err(crate::filters::FilterStop::Unchanged);
         };
         let pixels = self.mode.constrain_image(shadow.pixels);
@@ -1313,6 +1626,8 @@ impl DocumentContent {
         self.layers.insert(
             index,
             RasterLayer {
+                effect: None,
+                mask: None,
                 id: shadow_id,
                 name: "Drop Shadow".into(),
                 pixels: Arc::new(pixels),
@@ -1392,6 +1707,7 @@ impl DocumentContent {
             return Dirty::None;
         };
         let offset = self.layers[index].offset;
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(pixels);
         for rect in &mut regions {
             rect.x += i64::from(offset.0);
@@ -1491,6 +1807,7 @@ impl DocumentContent {
                 max_y = max_y.max(canvas_y);
             }
         }
+        layer.effect = None;
         layer.pixels = Arc::new(image?);
         Some(PixelRect::new(
             min_x,
@@ -1529,14 +1846,23 @@ impl DocumentContent {
     }
 
     pub fn accepts_replacement(&self, id: LayerId, size: (u32, u32)) -> bool {
-        let Some(index) = self.layer_index(id) else {
+        let Some(layer) = self.layer(id) else {
             return false;
         };
-        let Some(added) = (u64::from(size.0) * u64::from(size.1)).checked_mul(4) else {
-            return false;
-        };
-        let removed = image_bytes(&self.layers[index].pixels).unwrap_or(0);
-        self.fits_stack(removed, added)
+        let added = u64::from(size.0) * u64::from(size.1) * 4;
+        let factor = if layer.mask.is_some() { 2 } else { 1 };
+        let removed = layer
+            .storage()
+            .map(|pixels| pixels.as_raw().len() as u64)
+            .sum::<u64>();
+        size.0 > 0
+            && size.1 > 0
+            && added <= MAX_IMAGE_BYTES
+            && self
+                .stack_bytes()
+                .saturating_sub(removed)
+                .saturating_add(added.saturating_mul(factor))
+                <= MAX_STACK_BYTES
     }
 
     // Replaces the layer's pixels and origin. The selection is left untouched.
@@ -1554,6 +1880,16 @@ impl DocumentContent {
         if !self.accepts_replacement(id, pixels.dimensions()) {
             return Dirty::None;
         }
+        let size = pixels.dimensions();
+        self.layers[index].map_mask(|mask| {
+            crate::transform::scale_pixels(
+                mask,
+                size.0,
+                size.1,
+                crate::transform::Resample::Bilinear,
+            )
+        });
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(pixels);
         self.layers[index].offset = offset;
         Dirty::Canvas
@@ -1631,6 +1967,12 @@ impl DocumentContent {
         ) else {
             return Dirty::None;
         };
+        let mask_offset = layer.offset;
+        layer.map_mask(|mask| {
+            crate::geometry::layer_to_image_size(mask_offset, mask, self.width, self.height)
+                .expect("same-size mask has matching geometry")
+        });
+        layer.effect = None;
         layer.pixels = Arc::new(pixels);
         layer.offset = (0, 0);
         Dirty::Canvas
@@ -1643,13 +1985,17 @@ impl DocumentContent {
         let Some(index) = self.layer_index(id) else {
             return LayerGeometry::Unchanged;
         };
-        let crop = match crate::geometry::layer_content_crop(&self.layers[index].pixels) {
+        let crop = match self.layers[index].content_crop() {
             crate::geometry::ContentCrop::Empty => return LayerGeometry::Empty,
             crate::geometry::ContentCrop::Unchanged => return LayerGeometry::Unchanged,
             crate::geometry::ContentCrop::Crop(crop) => crop,
         };
         let layer = &mut self.layers[index];
         let before = layer.bounds();
+        layer.map_mask(|mask| {
+            imageops::crop_imm(mask, crop.x, crop.y, crop.width, crop.height).to_image()
+        });
+        layer.effect = None;
         layer.pixels = Arc::new(
             imageops::crop_imm(&*layer.pixels, crop.x, crop.y, crop.width, crop.height).to_image(),
         );
@@ -1662,6 +2008,9 @@ impl DocumentContent {
     }
 
     pub fn image_content_rect(&self) -> crate::geometry::ContentCrop {
+        if self.layers.iter().any(|layer| layer.mask.is_some()) {
+            return crate::geometry::layer_content_crop(&self.composite());
+        }
         let samples: Vec<_> = self
             .layers
             .iter()
@@ -1696,6 +2045,22 @@ impl DocumentContent {
     }
 
     // Flatten the layers on each side of a moving layer so it can be painted in stack order.
+    pub fn preview_around(&self, id: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
+        if self.needs_composite_preview() {
+            (None, None)
+        } else {
+            self.composite_around(id)
+        }
+    }
+
+    pub fn preview_at_insertion(&self, id: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
+        if self.needs_composite_preview() {
+            (None, None)
+        } else {
+            self.composite_at_insertion(id)
+        }
+    }
+
     pub fn composite_around(&self, id: LayerId) -> (Option<RgbaImage>, Option<RgbaImage>) {
         let index = self.layer_index(id).expect("the moving layer exists");
         self.composite_partition(index, index + 1)
@@ -1753,6 +2118,8 @@ impl DocumentContent {
             planned.push((crate::transform::turn_pixels(&layer.pixels, turn), offset));
         }
         for (layer, (pixels, offset)) in self.layers.iter_mut().zip(planned) {
+            layer.map_mask(|mask| crate::transform::turn_pixels(mask, turn));
+            layer.effect = None;
             layer.pixels = Arc::new(pixels);
             layer.offset = offset;
         }
@@ -1785,6 +2152,8 @@ impl DocumentContent {
             ));
         }
         for (layer, (pixels, offset)) in self.layers.iter_mut().zip(planned) {
+            layer.map_mask(|mask| crate::transform::mirror_pixels(mask, mirror));
+            layer.effect = None;
             layer.pixels = Arc::new(pixels);
             layer.offset = offset;
         }
@@ -1805,8 +2174,10 @@ impl DocumentContent {
         let offset = self.layers[index].offset;
         let old = self.layers[index].pixels.dimensions();
         let pixels = crate::transform::turn_pixels(&self.layers[index].pixels, turn);
+        self.layers[index].map_mask(|mask| crate::transform::turn_pixels(mask, turn));
         self.layers[index].offset =
             crate::transform::centered_offset(offset, old, pixels.dimensions());
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(pixels);
         true
     }
@@ -1818,6 +2189,8 @@ impl DocumentContent {
         let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
             return false;
         };
+        layer.map_mask(|mask| crate::transform::mirror_pixels(mask, mirror));
+        layer.effect = None;
         layer.pixels = Arc::new(crate::transform::mirror_pixels(&layer.pixels, mirror));
         true
     }
@@ -1833,6 +2206,10 @@ impl DocumentContent {
             return false;
         };
         for (layer, placement) in self.layers.iter_mut().zip(plan) {
+            layer.map_mask(|mask| {
+                crate::transform::scale_pixels(mask, placement.size.0, placement.size.1, resample)
+            });
+            layer.effect = None;
             layer.pixels = Arc::new(crate::transform::scale_pixels(
                 &layer.pixels,
                 placement.size.0,
@@ -1892,7 +2269,11 @@ impl DocumentContent {
             if bytes > MAX_IMAGE_BYTES {
                 return None;
             }
-            total = total.checked_add(bytes)?;
+            total = total.checked_add(bytes.checked_mul(if layer.mask.is_some() {
+                2
+            } else {
+                1
+            })?)?;
             if total > MAX_STACK_BYTES {
                 return None;
             }
@@ -1928,15 +2309,17 @@ impl DocumentContent {
         else {
             return false;
         };
-        let removed = image_bytes(&self.layers[index].pixels).unwrap_or(u64::MAX);
-        if !self.fits_stack(removed, bytes) {
+        if bytes > MAX_IMAGE_BYTES || !self.accepts_replacement(id, (width, height)) {
             return false;
         }
         let offset =
             crate::transform::centered_offset(self.layers[index].offset, old, (width, height));
         let pixels =
             crate::transform::scale_pixels(&self.layers[index].pixels, width, height, resample);
+        self.layers[index]
+            .map_mask(|mask| crate::transform::scale_pixels(mask, width, height, resample));
         self.layers[index].offset = offset;
+        self.layers[index].effect = None;
         self.layers[index].pixels = Arc::new(pixels);
         true
     }
@@ -2409,6 +2792,7 @@ mod tests {
             layer.locks.position = locked;
             if text {
                 layer.text = Some(crate::text::TextStyle {
+                    layout: Default::default(),
                     source: "Text".into(),
                     family: "sans-serif".into(),
                     resolved_family: "sans-serif".into(),
@@ -2825,6 +3209,7 @@ mod tests {
             DocumentContent::single_layer(IMPORTED_LAYER_NAME.into(), RgbaImage::new(3, 2));
         let id = content.top_layer_id();
         let style = crate::text::TextStyle {
+            layout: Default::default(),
             source: "A".into(),
             family: "sans-serif".into(),
             face: Default::default(),
@@ -2855,6 +3240,7 @@ mod tests {
         let rendered = crate::text::RenderedText {
             image: Arc::new(RgbaImage::from_pixel(4, 3, Rgba([20; 4]))),
             style: crate::text::TextStyle {
+                layout: Default::default(),
                 source: "AB".into(),
                 ..style
             },
@@ -3065,6 +3451,8 @@ mod tests {
             RgbaImage::from_pixel(3, 2, Rgba([0, 0, 255, 128])),
         );
         let mut top = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(1),
             name: "Top".into(),
             pixels: Arc::new(RgbaImage::from_fn(2, 2, |x, _| {
@@ -3175,6 +3563,8 @@ mod tests {
         let pixels = Arc::new(RgbaImage::new(1536, 1024));
         let layers = (0..85)
             .map(|id| RasterLayer {
+                effect: None,
+                mask: None,
                 id: LayerId(id),
                 name: "Large layer".into(),
                 pixels: pixels.clone(),
@@ -3257,6 +3647,7 @@ mod tests {
         let mut layer = content.layers[0].clone();
         layer.id = LayerId(1);
         layer.offset = (-1, 2);
+        layer.effect = None;
         layer.pixels = Arc::new(RgbaImage::from_fn(4, 2, |x, y| {
             Rgba([x as u8, y as u8, 0, 255])
         }));
@@ -3294,6 +3685,7 @@ mod tests {
         let mut layer = content.layers[0].clone();
         layer.id = LayerId(1);
         layer.offset = (1, -1);
+        layer.effect = None;
         layer.pixels = Arc::new(RgbaImage::new(2, 2));
         content.layers.push(layer);
         let before = content.clone();
@@ -3421,6 +3813,7 @@ mod tests {
         let mut layer = content.layers[0].clone();
         layer.id = LayerId(1);
         layer.offset = (2, 3);
+        layer.effect = None;
         layer.pixels = Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255])));
         content.layers.push(layer);
         let selection = Selection::Rect(PixelRect::new(3, 4, 2, 1));
@@ -4432,6 +4825,7 @@ mod tests {
         }));
         assert!(!with_path.is_plain_raster());
         content.layers[0].text = Some(crate::text::TextStyle {
+            layout: Default::default(),
             source: "Cached text".into(),
             family: "Missing Family".into(),
             resolved_family: "Fallback".into(),
@@ -4448,6 +4842,7 @@ mod tests {
             style: layer.text.clone().unwrap(),
         };
         assert!(cached.matches(&crate::text::TextSpec {
+            layout: Default::default(),
             source: "Cached text".into(),
             family: "Missing Family".into(),
             size: 24.0,
@@ -4477,6 +4872,7 @@ mod tests {
         assert_eq!(above.unwrap().get_pixel(0, 0)[2], 255);
         assert!(content.composite_at_insertion(upper).1.is_none());
         content.layers[1].text = Some(crate::text::TextStyle {
+            layout: Default::default(),
             source: "Hi".into(),
             family: "sans-serif".into(),
             resolved_family: "sans-serif".into(),

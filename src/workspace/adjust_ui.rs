@@ -56,6 +56,7 @@ impl AdjustKind {
 }
 
 pub(super) struct AdjustmentSession {
+    reediting: bool,
     tab: usize,
     generation: u64,
     layer: LayerId,
@@ -124,18 +125,29 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before adjusting.", cx);
             return false;
         }
+        let reediting = self.effect_reediting;
+        let (content, selection) = if reediting {
+            tab.document
+                .content
+                .retained_effect_input(layer.id)
+                .unwrap_or_else(|| (tab.document.content.clone(), tab.selection.clone()))
+        } else {
+            (tab.document.content.clone(), tab.selection.clone())
+        };
+        let source = content.layer(layer.id).unwrap().pixels.clone();
         self.adjustment = Some(AdjustmentSession {
+            reediting,
             tab: tab.id,
             generation: tab.history.generation(),
             layer: layer.id,
-            source: layer.pixels.clone(),
+            source,
             offset: layer.offset,
-            selection: tab.selection.clone(),
+            selection: selection.clone(),
             canvas: tab.document.content.size(),
             preview: Arc::new(crate::effect_preview::EffectPreview::new(
-                tab.document.content.clone(),
+                content,
                 layer.id,
-                tab.selection.clone(),
+                selection,
                 PREVIEW_EDGE,
             )),
             adjustment,
@@ -214,11 +226,12 @@ impl Workspace {
             return;
         }
         let selection = session.selection.clone();
+        let reediting = session.reediting;
         let layer = session.layer;
         let adjustment = session.adjustment;
         let target = (session.tab, session.generation);
         self.clear_adjustment(window, cx);
-        if adjustment.is_identity() {
+        if adjustment.is_identity() && !reediting {
             return;
         }
         self.edit_effect(
@@ -226,6 +239,7 @@ impl Workspace {
             target,
             layer,
             selection,
+            reediting,
             window,
             cx,
         );

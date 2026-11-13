@@ -107,13 +107,28 @@ impl Workspace {
             return;
         }
         let pixels = layer.pixels.clone();
+        let mask = layer.mask.clone().filter(|mask| mask.enabled);
         let offset = layer.offset;
         let selection = tab.selection.clone();
         let canvas = tab.document.content.size();
         self.copy_token = self.copy_token.wrapping_add(1);
         let token = self.copy_token;
         let job = cx.background_executor().spawn(async move {
-            let clipped = clip_layer(offset, &pixels, selection, canvas)?;
+            let masked = mask.map(|mask| {
+                image::RgbaImage::from_fn(pixels.width(), pixels.height(), |x, y| {
+                    let mut pixel = *pixels.get_pixel(x, y);
+                    pixel[3] = ((u16::from(pixel[3]) * u16::from(mask.pixels.get_pixel(x, y)[3])
+                        + 127)
+                        / 255) as u8;
+                    pixel
+                })
+            });
+            let clipped = clip_layer(
+                offset,
+                masked.as_ref().unwrap_or(&pixels),
+                selection,
+                canvas,
+            )?;
             document::encode_png(&clipped).ok()
         });
         cx.spawn_in(window, async move |workspace, cx| {

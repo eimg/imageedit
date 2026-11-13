@@ -1,5 +1,6 @@
 mod composite;
 mod content;
+pub(crate) mod layer_effect;
 
 use std::{
     fs::File,
@@ -20,12 +21,12 @@ use tempfile::NamedTempFile;
 use crate::preview::{self, Dirty, PixelRect, TileCache};
 use crate::project;
 
-pub(crate) use composite::source_over;
+pub(crate) use composite::{blend, source_over};
 pub(crate) use content::gradient_preview;
 pub use content::{
     BlendMode, CropRect, DocumentContent, FillMode, FillRequest, IMPORTED_LAYER_NAME, ImageLayer,
-    InsertStop, LayerGeometry, LayerId, LayerLocks, MAX_LAYER_NAME_CHARS, MAX_LAYERS,
-    MAX_STACK_BYTES, RasterLayer,
+    InsertStop, LayerGeometry, LayerId, LayerLocks, LayerMask, MAX_LAYER_NAME_CHARS, MAX_LAYERS,
+    MAX_STACK_BYTES, MaskEdit, RasterLayer,
 };
 
 pub const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -133,6 +134,58 @@ impl RenderedCanvas {
         };
         canvas.install_level(level_images(filled_cache(content)));
         canvas
+    }
+
+    pub fn new_checked(content: &DocumentContent, check: &impl Fn() -> Result<()>) -> Result<Self> {
+        let patch = Self::prepare_checked(content, check)?;
+        let mut canvas = Self {
+            pixels: patch.pixels,
+            preview: patch.preview.expect("a full preparation has a preview"),
+            thumbnails: patch.thumbnails,
+            levels: Vec::new(),
+        };
+        for cache in patch.levels {
+            let mut images = Vec::new();
+            for span in cache.spans() {
+                check()?;
+                images.push(cache.slot(span.index).map(render_tile));
+            }
+            canvas.install_level((cache, images));
+        }
+        check()?;
+        Ok(canvas)
+    }
+
+    pub fn prepare_checked(
+        content: &DocumentContent,
+        check: &impl Fn() -> Result<()>,
+    ) -> Result<CanvasPatch> {
+        let pixels = content.composite_checked(check)?;
+        check()?;
+        let preview = render_preview(&pixels);
+        check()?;
+        let mut thumbnails = Vec::new();
+        for layer in content.layers() {
+            check()?;
+            thumbnails.push((layer.id, render_thumbnail(&layer.pixels)));
+        }
+        check()?;
+        let mut cache = TileCache::new(
+            pixels.width(),
+            pixels.height(),
+            preview::TILE_FINE,
+            preview::FILTER_APRON,
+        );
+        cache.fill_from_composite(&pixels, check)?;
+        Ok(CanvasPatch {
+            pixels,
+            has_transparency: preview.has_transparency,
+            preview: Some(preview),
+            thumbnails,
+            levels: vec![cache],
+            replace_levels: true,
+            tiles_changed: true,
+        })
     }
 
     pub fn thumbnail(&self, id: LayerId) -> Option<&Arc<RenderImage>> {
@@ -486,7 +539,7 @@ impl Document {
             };
             let mut decoder = reader.into_decoder().context("Invalid image data")?;
             let orientation = decoder.orientation().context("Invalid image metadata")?;
-            let mut image = decode_image(decoder)?;
+            let mut image = decode_color_image(decoder)?;
             image.apply_orientation(orientation);
             let content =
                 DocumentContent::single_layer(IMPORTED_LAYER_NAME.to_owned(), image.into_rgba8());
@@ -534,6 +587,21 @@ impl Document {
             canvas: RenderedCanvas::new(&content),
             content,
         }
+    }
+
+    pub fn from_content_checked(
+        name: String,
+        content: DocumentContent,
+        check: &impl Fn() -> Result<()>,
+    ) -> Result<Self> {
+        let canvas = RenderedCanvas::new_checked(&content, check)?;
+        Ok(Self {
+            path: None,
+            name,
+            format: FileFormat::Project,
+            canvas,
+            content,
+        })
     }
 
     pub fn blank(name: String, width: u32, height: u32, background: Rgba<u8>) -> Self {
@@ -593,9 +661,24 @@ fn rgba_from_reader(reader: ImageReader<impl BufRead + Seek>) -> Result<RgbaImag
     }
     let mut decoder = reader.into_decoder().context("Invalid image data")?;
     let orientation = decoder.orientation().context("Invalid image metadata")?;
-    let mut image = decode_image(decoder)?;
+    let mut image = decode_color_image(decoder)?;
     image.apply_orientation(orientation);
     Ok(image.into_rgba8())
+}
+
+fn decode_color_image(mut decoder: impl ImageDecoder) -> Result<DynamicImage> {
+    let profile = decoder
+        .icc_profile()
+        .context("Could not read the embedded color profile")?;
+    let image = decode_image(decoder)?;
+    if let Some(profile) = profile {
+        Ok(DynamicImage::ImageRgba8(crate::color_management::to_srgb(
+            image.into_rgba8(),
+            &profile,
+        )?))
+    } else {
+        Ok(image)
+    }
 }
 
 pub fn decode_image(decoder: impl ImageDecoder) -> Result<DynamicImage> {
@@ -753,18 +836,16 @@ fn write_raster(
     let rgba = ExtendedColorType::Rgba8;
     match format {
         FileFormat::Project => unreachable!("projects are saved as layers"),
-        FileFormat::Png => codecs::png::PngEncoder::new(writer).write_image(
-            pixels.as_raw(),
-            width,
-            height,
-            rgba,
-        )?,
-        FileFormat::WebP => codecs::webp::WebPEncoder::new_lossless(writer).write_image(
-            pixels.as_raw(),
-            width,
-            height,
-            rgba,
-        )?,
+        FileFormat::Png => {
+            let mut encoder = codecs::png::PngEncoder::new(writer);
+            encoder.set_icc_profile(crate::color_management::srgb_profile()?)?;
+            encoder.write_image(pixels.as_raw(), width, height, rgba)?;
+        }
+        FileFormat::WebP => {
+            let mut encoder = codecs::webp::WebPEncoder::new_lossless(writer);
+            encoder.set_icc_profile(crate::color_management::srgb_profile()?)?;
+            encoder.write_image(pixels.as_raw(), width, height, rgba)?;
+        }
         FileFormat::Jpeg => {
             let rgb = RgbImage::from_fn(width, height, |x, y| {
                 let [r, g, b, a] = pixels.get_pixel(x, y).0;
@@ -773,12 +854,9 @@ fn write_raster(
                     ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
                 }))
             });
-            codecs::jpeg::JpegEncoder::new_with_quality(writer, jpeg_quality).write_image(
-                rgb.as_raw(),
-                width,
-                height,
-                ExtendedColorType::Rgb8,
-            )?;
+            let mut encoder = codecs::jpeg::JpegEncoder::new_with_quality(writer, jpeg_quality);
+            encoder.set_icc_profile(crate::color_management::srgb_profile()?)?;
+            encoder.write_image(rgb.as_raw(), width, height, ExtendedColorType::Rgb8)?;
         }
     }
     Ok(())
@@ -1301,9 +1379,14 @@ mod tests {
         assert!(preview.has_transparency);
         for image in [preview.image, render_thumbnail(&source)] {
             let pixels = image.as_bytes(0).unwrap();
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
             // RenderImage stores BGRA; transparent blue may not tint visible red.
-            for pixel in pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0) {
+            for pixel in pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] > 0)
+            {
                 assert_eq!(&pixel[..3], &[0, 0, 255]);
             }
         }

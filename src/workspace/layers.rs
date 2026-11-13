@@ -11,7 +11,7 @@ use super::Workspace;
 use super::tooltip::{label_view, tooltip};
 use super::view::{
     ACCENT, BORDER, CANVAS, CHECKER_DARK, CHECKER_LIGHT, CHROME, DISABLED, HOVER, MUTED, SELECTED,
-    TEXT, icon, section_label,
+    TEXT, choice_button, icon, section_label, segmented,
 };
 use crate::commands::{
     AlignLayer, CropImageToContent, CropLayerToContent, DeleteLayer, DuplicateLayer,
@@ -19,7 +19,7 @@ use crate::commands::{
     RenameLayer, ToggleAlphaLock, ToggleLayerVisibility, TogglePositionLock,
 };
 use crate::document::{self, LayerGeometry, LayerId};
-use crate::geometry::{self, Alignment, ContentCrop};
+use crate::geometry::{Alignment, ContentCrop};
 use crate::preview::Dirty;
 
 pub(super) struct MoveDrag {
@@ -159,6 +159,12 @@ pub(super) enum LayerCommand {
     Lower,
     AlphaLock,
     PositionLock,
+    EditEffect,
+    RemoveEffect,
+    BakeEffect,
+    MaskFromSelection,
+    MaskToSelection,
+    Mask(document::MaskEdit),
 }
 
 #[derive(Clone)]
@@ -254,6 +260,22 @@ impl Workspace {
             LayerCommand::AlphaLock => content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.text.is_none()),
+            LayerCommand::EditEffect | LayerCommand::RemoveEffect | LayerCommand::BakeEffect => {
+                content
+                    .layer(tab.active_layer)
+                    .is_some_and(|layer| layer.effect.is_some())
+            }
+            LayerCommand::MaskFromSelection => content
+                .layer(tab.active_layer)
+                .is_some_and(|layer| layer.text.is_none()),
+            LayerCommand::MaskToSelection => content
+                .layer(tab.active_layer)
+                .is_some_and(|layer| layer.mask.is_some()),
+            LayerCommand::Mask(operation) => content.layer(tab.active_layer).is_some_and(|layer| {
+                layer.mask.as_ref().is_some_and(|mask| {
+                    operation != document::MaskEdit::Apply || (mask.enabled && !layer.locks.alpha)
+                })
+            }),
             LayerCommand::PositionLock => true,
             LayerCommand::New => content.can_create_layer(),
             LayerCommand::Duplicate => content.can_duplicate_layer(tab.active_layer),
@@ -265,7 +287,57 @@ impl Workspace {
         }
     }
 
+    fn set_layer_blend(
+        &mut self,
+        mode: document::BlendMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.finish_text(window, cx) {
+            self.defer_after_text(move |this, window, cx| this.set_layer_blend(mode, window, cx));
+            return;
+        }
+        self.edit_content(
+            move |content, active, _| content.change_blend_mode(*active, mode),
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn bind_layer_actions(&self, root: Div, cx: &Context<Self>) -> Div {
+        let root =
+            self.bind::<crate::commands::EditLayerEffect>(root, LayerCommand::EditEffect, cx);
+        let root =
+            self.bind::<crate::commands::RemoveLayerEffect>(root, LayerCommand::RemoveEffect, cx);
+        let root =
+            self.bind::<crate::commands::BakeLayerEffect>(root, LayerCommand::BakeEffect, cx);
+        let root = self.bind::<crate::commands::MaskFromSelection>(
+            root,
+            LayerCommand::MaskFromSelection,
+            cx,
+        );
+        let root =
+            self.bind::<crate::commands::MaskToSelection>(root, LayerCommand::MaskToSelection, cx);
+        let root = self.bind::<crate::commands::ToggleLayerMask>(
+            root,
+            LayerCommand::Mask(document::MaskEdit::Toggle),
+            cx,
+        );
+        let root = self.bind::<crate::commands::InvertLayerMask>(
+            root,
+            LayerCommand::Mask(document::MaskEdit::Invert),
+            cx,
+        );
+        let root = self.bind::<crate::commands::ApplyLayerMask>(
+            root,
+            LayerCommand::Mask(document::MaskEdit::Apply),
+            cx,
+        );
+        let root = self.bind::<crate::commands::RemoveLayerMask>(
+            root,
+            LayerCommand::Mask(document::MaskEdit::Remove),
+            cx,
+        );
         let root = self.bind::<NewLayer>(root, LayerCommand::New, cx);
         let root = self.bind::<DuplicateLayer>(root, LayerCommand::Duplicate, cx);
         let root = self.bind::<RenameLayer>(root, LayerCommand::Rename, cx);
@@ -313,6 +385,39 @@ impl Workspace {
         let index = content.layer_index(id).unwrap_or_default();
         let visible = content.layer(id).is_some_and(|layer| layer.visible);
         match command {
+            LayerCommand::EditEffect => self.edit_retained_layer_effect(window, cx),
+            LayerCommand::RemoveEffect | LayerCommand::BakeEffect => self.edit_content(
+                move |content, _, _| {
+                    content.remove_retained_effect(id, command == LayerCommand::BakeEffect)
+                },
+                window,
+                cx,
+            ),
+            LayerCommand::MaskFromSelection => self.edit_content(
+                move |content, _, selection| content.mask_from_selection(id, selection),
+                window,
+                cx,
+            ),
+            LayerCommand::Mask(operation) => self.edit_content(
+                move |content, _, _| content.edit_mask(id, operation),
+                window,
+                cx,
+            ),
+            LayerCommand::MaskToSelection => self.start_change(
+                super::Change::Selection,
+                move |content, _, selection| {
+                    let Some(mask) = content.mask_selection(id) else {
+                        return Dirty::None;
+                    };
+                    if *selection == mask {
+                        return Dirty::None;
+                    }
+                    *selection = mask;
+                    Dirty::Unpainted
+                },
+                window,
+                cx,
+            ),
             LayerCommand::AlphaLock | LayerCommand::PositionLock => {
                 self.toggle_layer_lock(tab_id, id, command, window, cx);
             }
@@ -862,6 +967,71 @@ impl Workspace {
                     )
                     .child(self.opacity_slider(opacity, cx)),
             )
+            .child(segmented(
+                [
+                    (document::BlendMode::Normal, "Normal"),
+                    (document::BlendMode::Multiply, "Multiply"),
+                    (document::BlendMode::Screen, "Screen"),
+                    (document::BlendMode::Overlay, "Overlay"),
+                ]
+                .into_iter()
+                .map(|(mode, label)| {
+                    choice_button(
+                        label,
+                        tab.document
+                            .content
+                            .layer(tab.active_layer)
+                            .is_some_and(|layer| layer.blend_mode == mode),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_layer_blend(mode, window, cx);
+                    }))
+                }),
+            ))
+            .when_some(
+                tab.document
+                    .content
+                    .layer(tab.active_layer)
+                    .and_then(|layer| layer.mask.as_ref()),
+                |panel, mask| {
+                    panel.child(
+                        super::view::toggle_button("Layer mask", mask.enabled).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.run_layer_command(
+                                    LayerCommand::Mask(document::MaskEdit::Toggle),
+                                    window,
+                                    cx,
+                                )
+                            }),
+                        ),
+                    )
+                },
+            )
+            .when(
+                tab.document
+                    .content
+                    .layer(tab.active_layer)
+                    .is_some_and(|layer| layer.effect.is_some()),
+                |panel| {
+                    panel.child(
+                        div().flex().gap_1().children(
+                            [
+                                ("Edit effect", LayerCommand::EditEffect),
+                                ("Remove", LayerCommand::RemoveEffect),
+                                ("Bake", LayerCommand::BakeEffect),
+                            ]
+                            .into_iter()
+                            .map(|(label, command)| {
+                                super::view::option_action(label, false).flex_1().on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.run_layer_command(command, window, cx)
+                                    }),
+                                )
+                            }),
+                        ),
+                    )
+                },
+            )
             .child(div().flex().gap_1().children(buttons))
     }
 
@@ -1031,7 +1201,7 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(id) else {
             return;
         };
-        if geometry::layer_content_crop(&layer.pixels) == ContentCrop::Empty {
+        if layer.content_crop() == ContentCrop::Empty {
             self.notice("The layer has no pixels to crop.", cx);
             return;
         }
@@ -1317,7 +1487,7 @@ impl Workspace {
             input,
         });
         let job = cx.background_executor().spawn(async move {
-            let (below, above) = content.composite_around(id);
+            let (below, above) = content.preview_around(id);
             MovePaint {
                 below: below.map(|image| document::preview_render(&image)),
                 sprite: document::preview_render(&with_layer_opacity(&pixels, opacity)),
@@ -1488,7 +1658,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn move_paint(&self) -> Option<MovePaint> {
+    pub(super) fn raw_move_paint(&self) -> Option<MovePaint> {
         self.move_overlay
             .clone()
             .or_else(|| self.warp_overlay.clone())

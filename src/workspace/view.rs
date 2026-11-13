@@ -57,6 +57,8 @@ impl Render for Workspace {
         crate::windows_menu::request_sync(cx);
         self.schedule_pending_open(window, cx);
         self.request_preview_level(window, cx);
+        self.refresh_composite_preview(window, cx);
+        self.refresh_recovery(window, cx);
         let interactive = self.form.is_none() && !self.dialog_open && self.pdf_job.is_none();
         let active = self.active_tab();
         div()

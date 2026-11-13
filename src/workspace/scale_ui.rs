@@ -207,7 +207,7 @@ impl Workspace {
         let token = self.scale_token;
         self.scale_drag = Some(drag);
         let job = cx.background_executor().spawn(async move {
-            let (below, above) = content.composite_around(id);
+            let (below, above) = content.preview_around(id);
             MovePaint {
                 below: below.as_ref().map(document::preview_render),
                 above: above.as_ref().map(document::preview_render),

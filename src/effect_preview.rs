@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use image::{Rgba, RgbaImage};
 
 use crate::adjustments::{self, Adjustment};
-use crate::document::{self, BlendMode, DocumentContent, LayerId};
+use crate::document::{self, DocumentContent, LayerId};
 use crate::filters::{self, FilterSpec};
 use crate::selection::Selection;
 
@@ -81,9 +81,27 @@ impl EffectPreview {
             color,
         } = spec
         {
-            let Some(region) = self.region(radius, offset) else {
+            let Some(mut region) = self.region(radius, offset) else {
                 return self.original().clone();
             };
+            if let Some(layer) = self.content.layer(self.layer)
+                && let Some(mask) = &layer.mask
+                && mask.enabled
+            {
+                for (x, y, pixel) in region.pixels.enumerate_pixels_mut() {
+                    let sx = (region.origin.0 - i64::from(layer.offset.0) - i64::from(offset.0)
+                        + (f64::from(x) / region.scale).floor() as i64)
+                        .clamp(0, i64::from(mask.pixels.width()) - 1)
+                        as u32;
+                    let sy = (region.origin.1 - i64::from(layer.offset.1) - i64::from(offset.1)
+                        + (f64::from(y) / region.scale).floor() as i64)
+                        .clamp(0, i64::from(mask.pixels.height()) - 1)
+                        as u32;
+                    pixel[3] = ((u16::from(pixel[3]) * u16::from(mask.pixels.get_pixel(sx, sy)[3])
+                        + 127)
+                        / 255) as u8;
+                }
+            }
             let shadow = filters::render_shadow(
                 &region.pixels,
                 (f64::from(radius) * region.scale).round() as u32,
@@ -243,11 +261,8 @@ impl EffectPreview {
                         pixel = map(pixel, cx, cy);
                     }
                     let destination = image.get_pixel_mut(x, y);
-                    *destination = match layer.blend_mode {
-                        BlendMode::Normal => {
-                            document::source_over(*destination, pixel, layer.opacity)
-                        }
-                    };
+                    *destination =
+                        document::blend(*destination, pixel, layer.opacity, layer.blend_mode);
                 }
             }
         }
@@ -276,6 +291,8 @@ mod tests {
 
     fn scene() -> DocumentContent {
         let layer = |id, pixels, offset, opacity, visible| RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(id),
             name: format!("Layer {id}"),
             pixels: Arc::new(pixels),
@@ -467,6 +484,8 @@ mod tests {
     #[test]
     fn small_canvas_filters_keep_detail_and_off_canvas_sampling_from_a_large_layer() {
         let layer = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(0),
             name: "Large".into(),
             pixels: Arc::new(RgbaImage::from_fn(1024, 30, |x, y| {

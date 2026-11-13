@@ -758,7 +758,7 @@ fn preview_gradient(prepared: PreparedGradient) -> GradientPreview {
     let shown = with_layer_opacity(&rendered, opacity);
     let (below, above) = base
         .as_ref()
-        .map(|content| content.composite_around(layer))
+        .map(|content| content.preview_around(layer))
         .unwrap_or((None, None));
     GradientPreview {
         below: below.as_ref().map(document::preview_render),

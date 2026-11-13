@@ -25,6 +25,8 @@ use image::RgbaImage;
 use crate::document::{Document, MAX_STACK_BYTES};
 
 mod pages;
+mod worker;
+pub use worker::run_if_requested;
 mod thumbnails;
 pub use pages::{
     MAX_PAGE_SELECTION_CHARS, parse_page_selection, toggle_page_selection, validate_page_numbers,
@@ -37,27 +39,27 @@ pub const DEFAULT_DPI: u32 = 150;
 pub const MIN_DPI: u32 = 1;
 pub const MAX_DPI: u32 = 1200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PdfMode {
     Layers,
     Separate,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PdfBackground {
     #[default]
     White,
     Transparent,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PdfCanvas {
     #[default]
     FirstPage,
     FitAllPages,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PdfInfo {
     pub pages: usize,
     pub sizes: Vec<(f32, f32)>,
@@ -99,7 +101,7 @@ impl PdfControl {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PdfProgress {
     Reading,
     Inspecting,
@@ -114,7 +116,7 @@ pub enum PdfProgress {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PdfOptions {
     pub path: PathBuf,
     pub pages: Vec<usize>,
@@ -158,8 +160,12 @@ pub fn read_source(
     progress(PdfProgress::Inspecting);
     control.check()?;
     catch_unwind(AssertUnwindSafe(|| {
-        let pdf = load_pdf(data.clone())?;
-        let info = info_from_pdf(&pdf, control)?;
+        let info = if worker::enabled() {
+            worker::inspect(&data, control)?
+        } else {
+            let pdf = load_pdf(data.clone())?;
+            info_from_pdf(&pdf, control)?
+        };
         control.check()?;
         Ok(PdfSource {
             data,
@@ -170,6 +176,23 @@ pub fn read_source(
     .map_err(|_| anyhow!("The PDF could not be read."))?
 }
 
+impl PdfSource {
+    fn acquire(&self, control: &PdfControl) -> Result<std::sync::MutexGuard<'_, ()>> {
+        loop {
+            control.check()?;
+            match self.render_lock.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(anyhow!("The PDF renderer is unavailable."));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+            }
+        }
+    }
+}
+
 pub fn render_pages(
     source: &PdfSource,
     options: &PdfOptions,
@@ -177,13 +200,14 @@ pub fn render_pages(
     progress: impl Fn(PdfProgress),
 ) -> Result<Vec<RgbaImage>> {
     control.check()?;
-    let _guard = source
-        .render_lock
-        .lock()
-        .map_err(|_| anyhow!("The PDF renderer is unavailable."))?;
+    let _guard = source.acquire(control)?;
     control.check()?;
     catch_unwind(AssertUnwindSafe(|| {
-        render_data(source.data.clone(), options, control, &progress)
+        if worker::enabled() {
+            worker::pages(source, options, control, &progress)
+        } else {
+            render_data(source.data.clone(), options, control, &progress)
+        }
     }))
     .map_err(|_| anyhow!("The PDF could not be rendered."))?
 }
@@ -324,6 +348,21 @@ fn render_data(
     control: &PdfControl,
     progress: &impl Fn(PdfProgress),
 ) -> Result<Vec<RgbaImage>> {
+    let mut pages = Vec::new();
+    render_each(data, options, control, progress, |_, image| {
+        pages.push(image);
+        Ok(())
+    })?;
+    Ok(pages)
+}
+
+fn render_each(
+    data: PdfData,
+    options: &PdfOptions,
+    control: &PdfControl,
+    progress: &impl Fn(PdfProgress),
+    mut emit: impl FnMut(usize, RgbaImage) -> Result<()>,
+) -> Result<()> {
     control.check()?;
     progress(PdfProgress::Inspecting);
     control.check()?;
@@ -335,7 +374,6 @@ fn render_data(
     let render_settings = RenderSettings::default();
     let interpreter_settings = InterpreterSettings::default();
     let scale = options.dpi as f32 / 72.0;
-    let mut rendered = Vec::with_capacity(expected.len());
     let mut total_bytes = 0u64;
 
     for (index, &page_number) in options.pages.iter().enumerate() {
@@ -380,7 +418,7 @@ fn render_data(
             total_bytes <= MAX_STACK_BYTES,
             "The selected pages need too much memory. Use a lower resolution or fewer pages."
         );
-        rendered.push(image);
+        emit(page_number, image)?;
         progress(PdfProgress::Rendering {
             page: page_number,
             done: index + 1,
@@ -388,7 +426,7 @@ fn render_data(
         });
     }
     control.check()?;
-    Ok(rendered)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -832,6 +870,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pages[0].dimensions(), (72, 73));
+    }
+
+    #[test]
+    fn representative_pdf_fixtures_cover_geometry_fonts_alpha_images_and_rejections() {
+        let data = include_bytes!("../fixtures/pdf/geometry-fonts-transparency-images.pdf");
+        let pdf = load_pdf(data.to_vec()).unwrap();
+        let info = info_from_pdf(&pdf, &PdfControl::default()).unwrap();
+        assert_eq!(info.sizes, vec![(60., 80.), (100., 100.)]);
+        let source = PdfSource {
+            data: data.to_vec().into(),
+            info,
+            render_lock: Default::default(),
+        };
+        let options = PdfOptions {
+            path: PathBuf::from("fixture.pdf"),
+            pages: vec![1, 2],
+            dpi: 72,
+            mode: PdfMode::Layers,
+            background: PdfBackground::Transparent,
+            canvas: PdfCanvas::FitAllPages,
+        };
+        let pages = render_pages(&source, &options, &PdfControl::default(), |_| {}).unwrap();
+        assert_eq!(pages[0].dimensions(), (60, 80));
+        assert_eq!(pages[1].dimensions(), (100, 100));
+        assert!(pages[0].pixels().any(|pixel| pixel[3] == 0));
+        assert!(
+            pages[0]
+                .pixels()
+                .any(|pixel| pixel[3] > 0 && pixel[0] > 200 && pixel[1] < 20)
+        );
+        assert!(
+            pages[1]
+                .pixels()
+                .any(|pixel| pixel[3] > 0 && pixel[3] < 255)
+        );
+        assert!(
+            pages[1]
+                .pixels()
+                .any(|pixel| pixel[0] > 200 && pixel[1] < 20 && pixel[3] == 255)
+        );
+        for malformed in [
+            include_bytes!("../fixtures/pdf/malformed-truncated.pdf").as_slice(),
+            include_bytes!("../fixtures/pdf/encrypted-rejected.pdf").as_slice(),
+        ] {
+            assert!(
+                load_pdf(malformed.to_vec())
+                    .and_then(|pdf| info_from_pdf(&pdf, &PdfControl::default()))
+                    .is_err()
+            );
+        }
     }
 
     fn add_object(body: &mut String, offsets: &mut Vec<usize>, object: String) {

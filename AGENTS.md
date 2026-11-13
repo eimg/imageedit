@@ -587,10 +587,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   and is now a direct dependency for these grapheme and word boundaries.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
-- `src/project.rs` reads project versions 6, 7, and 8 and applies the same size limits
+- `src/project.rs` reads project versions 6, 7, 8, and 9 and applies the same size limits
   in both directions. Any layer lock requires version 8 with an optional per-layer
   `locks` object. Missing flags default to false; unlocked layers omit the object.
-  Without locks, projects containing guides write version 7; without guides
+  Without version 9 metadata or locks, projects containing guides write version 7; without guides
   they retain version 6 and omit the guides field for compatibility with older
   builds. Version 6 manifests may not contain nonempty guides. Versions 6/7 may
   not contain active layer locks; alpha-locked text is rejected. Versions before 6
@@ -600,6 +600,11 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   (`v6-two-layers.imageedit`); keep its legacy extension to exercise compatibility. New projects use `.lime`; the file magic
   stays unchanged; the existing version 6 fixture remains unchanged.
   `v8-layer-locks.lime` additionally covers the lock-bearing format.
+  Version 9 adds optional text layout, blend modes, masks, and retained effects;
+  these require version 9 independently of locks/guides. Mask/source/coverage PNGs
+  follow their layer PNG in `RasterLayer::storage` order, and all decoded buffers
+  count toward the aggregate limit. Lower feature-free versions still write as
+  before. `v9-capabilities.lime` covers the new fields and payload ordering.
   Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.
 - `src/pdf/pages.rs` parses bounded page-list expressions after checking source
@@ -616,8 +621,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   catches page render panics independently. Cancellation/parser failures discard
   the batch; individual page failures stay local. A per-source render mutex
   serializes thumbnail and full import parsing/rendering; cancellation is checked
-  before and after acquiring it, between pages, and after rendering. Active
-  parser/render calls complete before cancellation settles.
+  while waiting for the gate, between pages, and after rendering. Production
+  parsing/rendering use the disposable worker described below.
 - `src/workspace/pdf_preview.rs` owns the interactive page picker and one coalesced
   background preview worker per workspace. Source/batch/background changes
   invalidate its generation, cancel old work, and retain only the latest request.
@@ -637,8 +642,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   `PdfSource` retains the immutable shared `PdfData` bytes
   and inspected dimensions; render jobs parse those same bytes without reopening
   the path. `PdfControl` checks cancellation between bounded read chunks, page
-  inspection/rendering, and document preparation; renderer/parser calls themselves
-  remain uninterruptible. `src/workspace/pdf_ui.rs` owns probe and render jobs and
+  inspection/rendering, and document preparation; production renderer/parser calls
+  run in a child that can be killed and reaped on cancellation. `src/workspace/pdf_ui.rs` owns probe and render jobs and
   turns the result into new documents or layers above the active layer. New
   layered preparation checks the complete rendered page set and stack admission,
   rejects incomplete insertions, and centers every page consistently even for
@@ -840,3 +845,81 @@ for test images. Keep machine-specific settings and credentials out of source.
 `cargo clean` removes the rebuildable Rust output without deleting the current
 `dist/Lime.app` or DMG. Keep the golden project fixture and editable/packaged
 app icons; they are source assets, not generated leftovers.
+
+
+## Capability pass 26 contracts
+
+- `src/document/composite.rs` preserves the original high-precision Normal path
+  and adds alpha-aware Multiply/Screen/Overlay. Blend colors contribute where
+  source and backdrop overlap. Avoid replacing this with RGB blending followed
+  by ordinary source-over: partial backdrop alpha would be wrong.
+- `src/workspace/composite_preview.rs` retains the immediate normal-stack sprite
+  path, and coalesces one background full-stack preview for backdrop-dependent
+  stacks. Its key uses the GPUI image ID, tab generation, target, offset, and size.
+  Stale/canceled images are dropped. Complex stacks skip unused full-resolution
+  below/above split composites before the bounded frame is ready. Canvas previews
+  cap at 1024 pixels per edge;
+  scale sampling uses pixel centers. Warp previews bake transformed masks before
+  compositing; other sprite previews sample their linked mask in local coordinates.
+- `RasterLayer.mask` stores optional same-size straight RGBA coverage in alpha.
+  Coverage multiplies source alpha before layer opacity/blending. Existing
+  selection tools create/edit masks through the Layer menu; there is no separate
+  paint-mask target. Disabled masks retain storage. All linked geometry transforms
+  map masks alongside pixels, including uniform-source warps whose mask alone
+  changes. Copy/shadow silhouettes honor enabled masks. Text masks are rejected.
+- `src/document/layer_effect.rs` retains one adjustment or Blur/Sharpen source
+  and optional layer-local coverage bitmap. Pixels cache the applied appearance.
+  Re-edit previews use source/coverage and captured alpha-lock behavior; Cancel
+  never changes the cached layer. Identity re-edits restore the source. Source,
+  coverage, mask, and cached pixels count in project/stack/history budgets. Owned
+  retained metadata counts per history entry. Pixel/geometry writes bake the
+  retained effect; position/opacity/mask changes retain it. New effects bake the
+  previous result. Drop Shadow remains a separate raster-layer operation.
+- `TextLayout` stores optional fixed Width/Height and Left/Center/Right alignment.
+  Fixed boxes wrap by word or glyph, clip raster/caret/highlight coverage, retain
+  overflowing source, and expose an overflow notice. Draft history, defaults,
+  previews, matches, and version 9 projects carry it. Caret maps retain visual
+  wrap boundaries; glyph rasterization only visits visible fixed-box lines.
+  Mixed spans remain a recorded follow-up, not a partially persisted rich-text API.
+- Feathered simple selections retain source geometry in `Mask`. Move/resize
+  previews use the source shape, then rebuild feathering in the change worker.
+  A clipped source curve retains its original box. Combination/morphology/image
+  transforms or repeated feathering may deliberately drop editable geometry.
+  Wand color-edge reconstruction only adds bounded adjacent fractional coverage
+  when a premultiplied RGBA color segment supports it; it never expands traversal
+  and respects gap/selection exclusions.
+- `src/pdf/worker.rs` handles a private CLI mode before GPUI initialization, so it
+  never opens a window. Parent/child communicate through a private temporary
+  directory, bounded JSON, and validated raw RGBA pages. Source bytes are the
+  retained import snapshot. Cancellation/deadlines kill and reap the child. It
+  emits pages individually and does not retain the whole output stack. Unix
+  workers have CPU/file limits; macOS additionally uses a resident high-water
+  watchdog (50 ms, 2 GiB), other Unix uses an address-space limit, and Windows
+  uses a private job with process-memory/time limits. This is resource isolation,
+  not an OS security sandbox. Worker errors never publish partial imports.
+  Preparation checks cancellation inside compositing (32-row batches), between
+  thumbnail/tile operations, and before publication. Tiles reuse the flattened
+  image rather than recompositing the stack. Bounded preview/thumbnail resizes
+  finish their current call before the next cancellation check.
+- `src/recovery.rs` and `src/workspace/recovery_ui.rs` own five-second separate
+  atomic recovery projects, per-session file leases, clean-exit markers, bounded
+  admission, and stale-session recovery. Original paths and saved revisions stay
+  unchanged. Accepted close/discard cleans the session; unreadable/excess old
+  copies stay on disk. Text drafts are rendered into recovery candidates without
+  committing the live tab. Failed text rendering preserves a JSON source sidecar
+  and a recoverable draft. The name/draft are also embedded in the atomic version
+  9 project manifest; sidecars are readable copies, never authoritative over that
+  snapshot. Other unapplied previews are not snapshotted. Recovery
+  errors are surfaced and never trigger a write to an original document.
+- `src/color_management.rs` uses the already-present moxcms 0.8.1 as a direct
+  dependency. External RGB/grayscale ICC data is bounded and converted to the
+  sRGB 8-bit working space, preserving alpha. Unsupported/corrupt profiles fail
+  explicitly. Project PNG payloads are already working-space pixels and bypass
+  import conversion. Export embeds sRGB. macOS tags its Metal surface sRGB via
+  the main-thread AppKit view; Windows retains standard SDR display behavior,
+  with per-monitor verification outstanding. Do not advertise arbitrary working
+  spaces, soft proofing, CMYK ICC import, or high-precision editing.
+- `fixtures/pdf/` contains self-authored CropBox/rotation, Helvetica/embedded Type 3,
+  transparency, image, malformed, and encrypted inputs. These tests are in the
+  shared macOS/Windows suite. Windows execution/native display QA remains for CI
+  and the maintainer. No interactive app launch is part of this pass's validation.

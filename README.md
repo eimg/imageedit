@@ -95,8 +95,10 @@ not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
 together keep their import dialogs queued. Pages are rasterized at the chosen
 DPI; PDF text and vector objects do not become editable text or paths.
 Reading, inspection, rendering, and image preparation show progress. Use Cancel
-or Escape to discard the current import. Cancellation waits for a running page,
-parser call, or image-preparation step to finish; no partial result is added.
+or Escape to discard the current import. Inspection and rendering run in a
+separate worker process that can be terminated during a parser or page call.
+Preparation checks cancellation inside compositing and between tiles; a bounded
+preview resize can finish before cancellation settles. No partial result is added.
 Canceling one file leaves later queued files available to open.
 
 Each PDF is inspected when its turn opens, and its bytes are retained for that
@@ -173,8 +175,11 @@ starts off. These settings affect new selections when their gesture finishes;
 they leave an existing selection unchanged. A radius of zero skips feathering.
 Feathering happens before add/subtract/intersect, so repeated additions do not
 soften the old selection again. Use **Select → Feather…** to soften the current
-selection. Feathered selections are coverage masks; their numeric geometric
-position/size controls are unavailable, as with other mask selections.
+selection. A feathered rectangle, ellipse, or rounded rectangle retains its
+source box for moving, resizing, and numeric geometry edits. The drag shows its
+source shape; release rebuilds the soft coverage in the background. Combining,
+growing, shrinking, transforming, or repeatedly feathering a mask can rasterize
+that geometry. Arbitrary masks keep their existing coverage-only behavior.
 
 Feathering treats space outside the canvas as unselected. A selection touching
 the border softens there too, including Select All. Coverage remains inside the
@@ -213,7 +218,7 @@ resize as text or styles change. Opacity, visibility, layer order, and deletion
 remain available. Unlock participating layers before Merge Down. Locks undo/redo
 and are retained when a layer is duplicated.
 
-Save locked layers in **`.lime`** projects. Lock-bearing projects use format
+Save locked layers in **`.lime`** projects. Lock-bearing projects use at least format
 version 8 and require this build or newer. Export still makes flattened raster
 copies; ordinary raster Save cannot discard the lock settings.
 
@@ -250,7 +255,11 @@ straight boundaries and uniform interiors stay sharp. Color matching and gap
 closure find the connected region first, so smoothing cannot spread the flood
 into another region. Sealed gap barriers stay excluded. Small corners and very
 thin features can receive partial coverage; turn it off for exact pixel edges.
-Changing the option leaves the current selection and history unchanged.
+For antialiased artwork, a one-pixel color/alpha reconstruction can recover
+partial boundary pixels between an admitted neighbor and the next rejected
+color. It uses premultiplied RGBA, so transparent hidden colors cannot bias it;
+gap barriers and selection limits stay strict. Changing the option leaves the
+current selection and history unchanged.
 
 Wand applies new-selection feathering after contour antialiasing, then combines
 the new region with the existing selection. Bucket's Selection mode fills the whole
@@ -392,7 +401,9 @@ dots thin out at low zoom while snapping keeps the chosen spacing.
 Guides are stored in **`.lime`** projects, never flattened exports. A project
 containing guides uses format version 7 when its layers are unlocked. Existing
 version 6/7 projects still open; unlocked projects without guides retain version
-6 on save. Locked projects use version 8, with or without guides.
+6 on save. Lock-only projects use version 8, with or without guides. Blend modes,
+masks, retained effects, or text-box layout use version 9 and require this build
+or newer. The reader keeps opening versions 6–8.
 
 In **Text**, drag over characters, Shift-click, or use Shift+arrows to select a
 range. Copy/Cut use that range; typing and Paste replace it. Selection highlights
@@ -401,6 +412,63 @@ follow individual lines. Option+Left/Right and Option+Backspace/Delete on macOS
 arrows and deletion keep combining characters and emoji sequences together.
 Font/style controls still affect the entire text layer. Undo/Redo restore typing
 and its selection before falling through to document history.
+
+**Fixed box** in Text options enables editable pixel Width/Height, word wrapping,
+and Left/Center/Right paragraph alignment. Text outside the height remains in
+its source; an overflow notice identifies it. Increase the height to reveal it.
+Carets, selection highlights, and Home/End follow wrapped lines and clip to the
+box. Turning Fixed box off restores automatic sizing. Font/style controls still
+cover the entire layer; mixed styling within a text layer is deferred.
+
+The Layers panel offers **Normal**, **Multiply**, **Screen**, and **Overlay**.
+Blend modes honor layer opacity, transparency, and stack order in preview and
+export. Move, scale, text, gradient, and transform previews use bounded background
+compositing when the stack needs its backdrop. A preview may briefly trail a fast
+drag while its latest background frame finishes. Merge Down is disabled when a
+backdrop-dependent pair above other layers cannot be merged without changing its
+appearance; bottom pairs remain available.
+
+**Layer → Mask → From Selection** creates or replaces a raster layer's mask.
+No selection produces a white mask. Use the existing selection tools to define
+coverage, then choose From Selection; **Mask to Selection** loads it back for
+further editing. The Layer mask toggle enables/disables its coverage. The menu
+also offers Invert, Apply, and Remove. Apply permanently combines coverage with
+pixel alpha; unlock alpha first. Remove keeps the source pixels. Masks follow
+layer movement, scaling, crop, rotation, flip, and perspective, and save in a
+project. Rasterize text before adding a raster mask. Painting directly into a
+mask is a future extension; painting currently edits the layer beneath its mask.
+
+Applying a color adjustment, Blur, or Sharpen retains **one editable effect per
+raster layer**, including its source and original layer-local selection coverage.
+Use **Edit effect** or **Layer → Edit Layer Effect…** to replace its parameters
+with a preview. Cancel preserves the applied result. Remove restores its source;
+Bake keeps the result and frees retained source data. A subsequent effect bakes
+the previous one, and pixel/geometry edits bake the retained effect before changing
+its result. Movement, opacity, and mask changes retain it. Undo restores the prior
+state. Memory admission includes retained sources and coverage. Drop Shadow still
+creates a separate raster layer; its parameters are not retained on that layer.
+
+Crash recovery writes separate project copies under the app's Application Support
+**Recovery** folder (on Windows, Local AppData/Lime/Recovery). Dirty documents are
+snapshotted about every five seconds, without changing their saved revision or
+original destination. Recovery includes valid text drafts; failed text rendering
+also embeds its source in the same atomic project write, keeps a readable
+sidecar, and restores its draft when readable. Other
+unapplied canvas previews are not recovery snapshots. After an interrupted
+session, available copies reopen as unsaved **Recovered…** documents; use Save As.
+Saved/closed documents and an accepted clean exit remove their current recovery
+copies. A session lock skips another running instance. Recovery writes are atomic,
+with a 1 GiB storage limit; startup admits at most 512 MiB of layer data and leaves
+excess or unreadable copies on disk with a message. These are recovery copies,
+not a long-term backup history.
+
+Raster imports read embedded RGB/grayscale ICC profiles and convert pixels to
+sRGB; invalid or unsupported profiles return an error. Untagged images are
+assumed sRGB. PNG, JPEG, and WebP exports embed an sRGB profile. The macOS Metal
+surface is tagged sRGB for Core Animation's display conversion. Windows uses the
+standard SDR sRGB display path; per-monitor profile behavior still needs Windows
+verification. The working pixels remain **8-bit RGBA**. CMYK profiles, selectable
+working spaces, soft proofing, and higher-precision editing are not implemented.
 
 | Action | macOS | Windows |
 | --- | --- | --- |

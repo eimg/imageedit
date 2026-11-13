@@ -2,7 +2,7 @@ use image::{Rgba, RgbaImage};
 
 pub const PREVIEW_EDGE: u32 = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Adjustment {
     BrightnessContrast {
         brightness: i16,
@@ -21,6 +21,43 @@ pub enum Adjustment {
 }
 
 impl Adjustment {
+    pub fn valid(self) -> bool {
+        match self {
+            Self::BrightnessContrast {
+                brightness,
+                contrast,
+            } => (-100..=100).contains(&brightness) && (-100..=100).contains(&contrast),
+            Self::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+            } => {
+                (-180..=180).contains(&hue)
+                    && (-100..=100).contains(&saturation)
+                    && (-100..=100).contains(&lightness)
+            }
+            Self::Desaturate | Self::Invert => true,
+            Self::ColorBalance(value) => [value.shadows, value.midtones, value.highlights]
+                .into_iter()
+                .flatten()
+                .all(|value| (-100..=100).contains(&value)),
+            Self::Levels(value) => [value.value, value.red, value.green, value.blue]
+                .into_iter()
+                .all(|stops| {
+                    stops.input_black < stops.input_white
+                        && (GAMMA_MIN..=GAMMA_MAX).contains(&stops.gamma)
+                }),
+            Self::Curves(value) => [value.value, value.red, value.green, value.blue]
+                .into_iter()
+                .all(|curve| {
+                    (2..=MAX_CURVE_POINTS).contains(&(curve.count as usize))
+                        && curve.points().first().is_some_and(|point| point.0 == 0)
+                        && curve.points().last().is_some_and(|point| point.0 == 255)
+                        && curve.points().windows(2).all(|pair| pair[0].0 < pair[1].0)
+                }),
+        }
+    }
+
     pub fn is_identity(self) -> bool {
         match self {
             Self::BrightnessContrast {
@@ -45,14 +82,14 @@ pub const GAMMA_ONE: u16 = 100;
 pub const GAMMA_MIN: u16 = 10;
 pub const GAMMA_MAX: u16 = 1000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BalanceRange {
     Shadows,
     Midtones,
     Highlights,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MapChannel {
     Value,
     Red,
@@ -60,7 +97,7 @@ pub enum MapChannel {
     Blue,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColorBalance {
     pub shadows: [i16; 3],
     pub midtones: [i16; 3],
@@ -110,7 +147,7 @@ impl ColorBalance {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LevelStops {
     pub input_black: u8,
     pub input_white: u8,
@@ -158,7 +195,7 @@ impl LevelStops {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Levels {
     pub value: LevelStops,
     pub red: LevelStops,
@@ -204,7 +241,7 @@ impl Levels {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Curve {
     count: u8,
     points: [(u8, u8); MAX_CURVE_POINTS],
@@ -309,7 +346,7 @@ impl Curve {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Curves {
     pub value: Curve,
     pub red: Curve,

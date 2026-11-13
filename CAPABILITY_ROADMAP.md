@@ -7,7 +7,8 @@ functional reference; its interface is not a design target. Add no toolbox tools
 Existing review fixes and other uncommitted work must remain intact.
 
 Status: `[ ]` planned, `[x]` implemented and automatically checked. Manual testing
-is left to the maintainer. A checked item does not imply native interaction QA.
+is left to the maintainer. A checked item does not imply native interaction QA. For consider/plan/evaluate
+items it means the decision is recorded, not that a deferred feature is implemented.
 
 ## Pass 1 — selected scope
 
@@ -29,7 +30,7 @@ is left to the maintainer. A checked item does not imply native interaction QA.
 - [x] Preserve soft coverage through Grow/Shrink and combinations.
 - [x] Define feathering at canvas boundaries consistently.
 - [x] Exact geometric selection position/size controls and fixed-ratio constraints.
-- [ ] Retain editable source geometry for feathered geometric selections.
+- [x] Retain editable source geometry for feathered geometric selections.
 
 Acceptance: fill, paint, clear, clipboard, adjustments, and filters consume the
 same coverage; selection-only changes preserve the saved revision; geometry
@@ -99,8 +100,8 @@ preview/commit match; no performance regression on sparse dirty-tile strokes.
 
 - [x] Partial range selection using dragging, Shift-click, and Shift+arrows.
 - [x] Word navigation and deletion, with Unicode-aware boundaries.
-- [ ] Fixed text boxes, wrapping, and paragraph alignment.
-- [ ] Consider mixed styles only after ordinary editing is complete.
+- [x] Fixed text boxes, wrapping, and paragraph alignment.
+- [x] Consider mixed styles only after ordinary editing is complete.
 
 Acceptance: clipboard, typing history, caret mapping, and project round trips
 preserve source and layout; failed commits retain recoverable drafts.
@@ -109,7 +110,7 @@ preserve source and layout; failed commits retain recoverable drafts.
 
 - [x] Wand sampling from active layer or visible composite.
 - [x] Deliberate handling of fully transparent pixels and hidden RGB.
-- [ ] Improved edge coverage around antialiased artwork.
+- [x] Improved edge coverage around antialiased artwork.
 - [x] Optional small-gap closure for line-art fills and wand selections.
 - [x] Remember Wand/Bucket tolerance and gap radius separately during the session.
 
@@ -117,8 +118,8 @@ preserve source and layout; failed commits retain recoverable drafts.
 
 - [x] Alpha lock for safe recoloring.
 - [x] Position lock for protected backgrounds.
-- [ ] A small useful blend-mode set: Multiply, Screen, Overlay.
-- [ ] Layer masks as a separately scoped architectural milestone.
+- [x] A small useful blend-mode set: Multiply, Screen, Overlay.
+- [x] Layer masks as a separately scoped architectural milestone.
 
 ## PDF import — review of the other agent's feature
 
@@ -136,10 +137,10 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
       existing document/page/stack budgets and convert probe/render panics to errors.
 - [x] Add stage/per-page progress and cooperative cancellation during read,
       inspection, rendering, and document/layer preparation; discard canceled results.
-- [ ] Interrupt an already-running parser, page render, or image-preparation
+- [x] Interrupt an already-running parser, page render, or image-preparation
       call; evaluate worker isolation for prompt cancellation and resource limits.
 - [x] Preflight the destination stack budget before Open as Layers renders pages.
-- [ ] Consider incremental rendering/preparation to lower peak working memory,
+- [x] Consider incremental rendering/preparation to lower peak working memory,
       while retaining deliberate publication and undo semantics.
 - [x] Allow noncontiguous page selection with individual pages and ranges.
 - [x] Preview/select pages with an interactive, bounded thumbnail browser.
@@ -151,7 +152,7 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
       source snapshot for the import session.
 - [ ] Expand automated fixtures for CropBox/rotation, fonts, transparency, images,
       and representative malformed/encrypted documents on macOS and Windows.
-- [ ] Consider storing source/page/DPI metadata for explicit reimport later.
+- [x] Consider storing source/page/DPI metadata for explicit reimport later.
 
 The first reliability fixes are part of Pass 4; source snapshots, progress,
 cooperative cancellation, and destination preflight are part of Pass 8. The
@@ -163,7 +164,7 @@ overwritten by Save.
 - [x] Preview within the full composition, including selection and layer opacity.
 - [x] Before/after comparison and convenient reset.
 - [x] Remember prior parameters and repeat the last operation.
-- [ ] Re-editable applied effects as a separate project-format/history milestone.
+- [x] Re-editable applied effects as a separate project-format/history milestone.
 
 ## Paths and gradients
 
@@ -176,10 +177,10 @@ overwritten by Save.
 
 ## Document foundations
 
-- [ ] Crash recovery/autosave using a separate recoverable destination.
+- [x] Crash recovery/autosave using a separate recoverable destination.
 - [ ] Explicit embedded-profile handling and color-managed import/display/export.
-- [ ] Plan project compatibility before storing masks, blend modes, or effects.
-- [ ] Evaluate higher working precision separately from the core workflow pass.
+- [x] Plan project compatibility before storing masks, blend modes, or effects.
+- [x] Evaluate higher working precision separately from the core workflow pass.
 
 ## Decisions and follow-up notes
 
@@ -1567,7 +1568,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 25 — PDF page picker and import dialog
 
-Implemented; pending commit, including maintainer feedback on input behavior,
+Committed as `ab8f52b`, including maintainer feedback on input behavior,
 thumbnail selection, and the previously narrow/tall layout:
 
 - The PDF dialog uses a wider two-column layout: settings beside the page picker
@@ -1633,3 +1634,103 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Navigate and change backgrounds quickly, retry a failure, close/reopen another
   PDF, or start/cancel Import during a preview. No stale images should reappear;
   final DPI, page selection, source numbers, and one-step undo must stay correct.
+
+
+## Pass 26 — remaining capability implementation pass
+
+The preceding PDF picker pass was committed as `ab8f52b` before this work.
+This pass is committed for maintainer review. No new toolbox tool, package
+version, release publishing, installer, icon, or GitHub issue changes are included.
+
+Delivered together:
+
+- Fixed text boxes, word/glyph wrapping, three paragraph alignments, editable
+  width/height, overflow notices, clipped carets/highlights, visual-line Home/End,
+  draft undo/defaults, and layout persistence.
+- Editable source boxes for feathered rectangle/ellipse/rounded selections,
+  including clipped curves. Pointer previews are cheap source geometry; completed
+  edits rebuild coverage in the worker. Arbitrary combined/modified masks may
+  lose their simple-shape editing metadata deliberately.
+- Wand edge reconstruction for antialiased color and alpha artwork. It extends
+  fractional coverage at most one adjacent pixel when a color segment supports
+  it; traversal, gap closures, selection limits, and transparent hidden RGB keep
+  their existing contracts. Bucket connectivity itself remains hard.
+- Multiply, Screen, and Overlay with alpha-aware compositing, Layers choices,
+  backdrop-dependent coalesced previews, and safe Merge Down availability.
+- A first layer-mask milestone: selection-based creation/replacement/editing,
+  Mask to Selection, enable/invert/apply/remove, linked geometry, masked copy and
+  shadow silhouettes, undo/history budgets, and lossless persistence. Direct
+  brush targeting of a mask is not implemented; pixel tools edit beneath it.
+- A first retained-effects milestone: one editable adjustment or Blur/Sharpen
+  effect per layer. Source/local coverage/captured alpha behavior persist.
+  Re-edit replaces parameters; Remove restores the source; Bake frees retained
+  data. Subsequent effects and pixel/geometry edits bake the previous result.
+  Undo restores it. A general effect stack and re-editable Drop Shadow parameters
+  are not implemented; shadow is still a separately editable raster layer.
+- Project version 9 gates masks/blends/effects/layout and their payloads. Versions
+  6–8 remain readable; documents without new metadata keep their earlier writer
+  version. Existing golden fixtures remain unchanged; a new version 9 fixture
+  checks combined metadata and payload order. Every retained bitmap counts in
+  project/stack admission, and shared history buffers count once.
+- Disposable headless PDF workers for inspection/rendering/thumbnails, prompt
+  kill/reap cancellation, time/resource caps, incremental page output, private
+  temporary protocol files, strict result validation, and atomic publication.
+  Parent preparation checks inside composition and between tiles and reuses its
+  flattened canvas. A bounded preview/thumbnail resize finishes its current call.
+- Separate five-second atomic recovery projects, live-session leases, clean-exit
+  cleanup markers, unsaved recovered tabs, bounded disk/startup memory, preserved
+  unreadable/excess copies, and text-draft/source recovery. Saved revisions and
+  original files are unaffected. Other unapplied canvas previews are not saved.
+- Explicit RGB/grayscale ICC import to sRGB, tagged PNG/JPEG/WebP export, and an
+  sRGB Metal surface on macOS. Untagged input assumes sRGB. Invalid/unsupported
+  profiles fail clearly. Working pixels remain 8-bit; Windows per-monitor display
+  handling still needs its platform verification before claiming this item fully
+  complete across supported platforms.
+
+Recorded decisions for the planning items:
+
+- Mixed styles: defer span attributes. Ordinary range editing plus fixed-box
+  layout now has a coherent model; next define UTF-8 span insertion/deletion,
+  style-at-caret behavior, mixed-control states, clipboard and undo semantics,
+  and a separately versioned project representation. Keep today's whole-layer
+  styling explicit until that work is complete.
+- PDF provenance/reimport: a future explicit reimport should persist a source
+  filename, source-page number, DPI, background, and a content fingerprint, then
+  ask to relink the source and preview replacement. Absolute local paths should
+  not be silently embedded in portable/shared projects. No provenance/reimport
+  UI or metadata is added in this pass; Save still never overwrites a PDF.
+- Precision: retain the current 8-bit sRGB working contract for this pass. A real
+  16-bit/float milestone needs a shared sample type across paint/selection/
+  adjustments/filters/compositing, doubled-or-greater byte admission, lossless
+  project payloads, display conversion, and a deliberate gamma/linear blending
+  policy. Importing 16-bit files does not imply 16-bit editing. Do not add a
+  precision selector until those paths and undo/export round trips exist.
+
+Automatic validation: formatting, Clippy across all targets with warnings denied,
+and all 444 tests pass (28 more than the preceding committed pass). Both release
+benchmarks pass: 256 px tile interior p95 157 µs, boundary p95 643 µs, full 4K tile
+build 179 ms; 4K stroke buffer 527 µs, live tile composition 311 µs. The signed
+`dist/Lime.app` is rebuilt and verified. Its actual bundled executable passes
+headless Inspect, Pages, and Thumbnails protocol checks with the PDF fixture.
+Kill/reap cancellation and deadlines have a real child-process regression test.
+
+The review also caught and fixed pixel-center sampling in reduced scale previews,
+mask-only transforms on uniform pixels, effect-thumbnail invalidation, retained
+parameter edits with unchanged pixels, clipped shape movement, redundant split
+composition for complex previews, and atomic recovery of failed text drafts. A
+failed recovery replacement preserves the previous embedded source and title.
+Existing v6/v8 fixtures remain unchanged. No interactive/visual test or app-window
+launch was run; the maintainer reviews the built app after restarting Lime.
+
+Remaining platform verification:
+
+- [ ] Execute the expanded PDF fixture suite on Windows CI. Fixtures and tests are
+  implemented and pass on macOS; no Windows runtime is available in this workspace.
+- [ ] Verify per-monitor display color behavior on Windows; application-level
+  monitor-profile conversion/soft proofing is outside the delivered sRGB path.
+
+The original color-management and cross-platform PDF-fixture checkboxes remain
+open for these checks. The other original implementation/planning items have
+been addressed at the scoped milestones described above; their explicit limits
+are not claims that full GIMP masks, effect stacks, rich text, or high precision
+have been implemented.

@@ -17,7 +17,7 @@ pub const EXTENSION: &str = "lime";
 pub const LEGACY_EXTENSION: &str = "imageedit";
 // Preserve the on-disk signature so existing projects remain readable.
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 fn default_true() -> bool {
     true
@@ -29,6 +29,8 @@ const MAX_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryEntry>,
     version: u32,
     mode: crate::transform::ColorMode,
     width: u32,
@@ -39,6 +41,30 @@ struct Manifest {
     active_path: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guides: Vec<crate::guides::Guide>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryEntry {
+    pub name: String,
+    pub text: Option<serde_json::Value>,
+}
+
+pub fn recovery_metadata(path: &std::path::Path) -> Result<Option<RecoveryEntry>> {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut header = [0u8; 12];
+    reader.read_exact(&mut header)?;
+    ensure!(&header[..8] == MAGIC, "Invalid recovery header");
+    let length = u32::from_le_bytes(header[8..].try_into().unwrap());
+    ensure!(
+        length <= MAX_MANIFEST_BYTES,
+        "Recovery metadata is too large"
+    );
+    let mut bytes = vec![0; length as usize];
+    reader.read_exact(&mut bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&bytes)?;
+    check_limits(&manifest)?;
+    Ok(manifest.recovery)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -77,7 +103,19 @@ struct LayerEntry {
     blend_mode: WireBlendMode,
     #[serde(default, skip_serializing_if = "LayerLocks::is_unlocked")]
     locks: LayerLocks,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mask_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effect: Option<EffectEntry>,
     text: Option<TextEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EffectEntry {
+    spec: crate::document::layer_effect::EffectSpec,
+    alpha_locked: bool,
+    coverage: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -97,18 +135,26 @@ struct TextEntry {
     resolved_family: String,
     origin_x: i32,
     origin_y: i32,
+    #[serde(default, skip_serializing_if = "crate::text::TextLayout::is_auto")]
+    layout: crate::text::TextLayout,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum WireBlendMode {
     Normal,
+    Multiply,
+    Screen,
+    Overlay,
 }
 
 impl From<BlendMode> for WireBlendMode {
     fn from(mode: BlendMode) -> Self {
         match mode {
             BlendMode::Normal => Self::Normal,
+            BlendMode::Multiply => Self::Multiply,
+            BlendMode::Screen => Self::Screen,
+            BlendMode::Overlay => Self::Overlay,
         }
     }
 }
@@ -117,12 +163,17 @@ impl From<WireBlendMode> for BlendMode {
     fn from(mode: WireBlendMode) -> Self {
         match mode {
             WireBlendMode::Normal => Self::Normal,
+            WireBlendMode::Multiply => Self::Multiply,
+            WireBlendMode::Screen => Self::Screen,
+            WireBlendMode::Overlay => Self::Overlay,
         }
     }
 }
 
 // A project starts with the magic and a little-endian u32 JSON manifest length,
-// followed by one little-endian u64 length-prefixed PNG per layer in manifest order.
+// followed by u64 length-prefixed PNGs: layer, optional mask, effect source,
+// and optional effect coverage, in manifest order. Recovery metadata is optional
+// in version 9 and is written only to separate crash-recovery projects.
 pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let mut magic = [0; MAGIC.len()];
     reader
@@ -145,7 +196,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let manifest: Manifest =
         serde_json::from_slice(&manifest).context("Invalid project manifest")?;
     ensure!(
-        matches!(manifest.version, 6 | 7 | VERSION),
+        matches!(manifest.version, 6 | 7 | 8 | VERSION),
         "Unsupported Lime project version {}",
         manifest.version
     );
@@ -160,38 +211,69 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     let mut payload_budget = MAX_PAYLOAD_BYTES;
     let mut layers = Vec::with_capacity(manifest.layers.len());
     for entry in manifest.layers {
-        let mut length = [0; 8];
-        ensure!(remaining >= 8, "Layer \"{}\" is missing", entry.name);
-        reader.read_exact(&mut length)?;
-        remaining -= 8;
-        let length = u64::from_le_bytes(length);
-        ensure!(
-            length > 0 && length <= remaining,
-            "Layer \"{}\" is truncated",
-            entry.name
-        );
-        payload_budget = payload_budget
-            .checked_sub(length)
-            .context("Project layer data is too large")?;
-        remaining -= length;
+        let mut read_pixels = || -> Result<Arc<image::RgbaImage>> {
+            let mut length = [0; 8];
+            ensure!(remaining >= 8, "Layer \"{}\" is missing", entry.name);
+            reader.read_exact(&mut length)?;
+            remaining -= 8;
+            let length = u64::from_le_bytes(length);
+            ensure!(
+                length > 0 && length <= remaining,
+                "Layer \"{}\" is truncated",
+                entry.name
+            );
+            payload_budget = payload_budget
+                .checked_sub(length)
+                .context("Project layer data is too large")?;
+            remaining -= length;
 
-        let mut payload = Vec::with_capacity(usize::try_from(length)?);
-        (&mut reader).take(length).read_to_end(&mut payload)?;
-        ensure!(
-            payload.len() as u64 == length,
-            "Layer \"{}\" is truncated",
-            entry.name
-        );
-        let decoder = png::PngDecoder::new(Cursor::new(payload))
-            .with_context(|| format!("Layer \"{}\" is not a valid PNG", entry.name))?;
-        ensure!(
-            decoder.dimensions() == (entry.width, entry.height),
-            "Layer \"{}\" does not match its recorded size",
-            entry.name
-        );
+            let mut payload = Vec::with_capacity(usize::try_from(length)?);
+            (&mut reader).take(length).read_to_end(&mut payload)?;
+            ensure!(
+                payload.len() as u64 == length,
+                "Layer \"{}\" is truncated",
+                entry.name
+            );
+            let decoder = png::PngDecoder::new(Cursor::new(payload))
+                .with_context(|| format!("Layer \"{}\" is not a valid PNG", entry.name))?;
+            ensure!(
+                decoder.dimensions() == (entry.width, entry.height),
+                "Layer \"{}\" does not match its recorded size",
+                entry.name
+            );
+            Ok(Arc::new(decode_image(decoder)?.into_rgba8()))
+        };
+        let pixels = read_pixels()?;
+        let mask = entry
+            .mask_enabled
+            .map(|enabled| {
+                read_pixels().map(|pixels| crate::document::LayerMask { pixels, enabled })
+            })
+            .transpose()?;
+        let effect = entry
+            .effect
+            .map(
+                |effect| -> Result<crate::document::layer_effect::EditableEffect> {
+                    let source = read_pixels()?;
+                    let coverage = if effect.coverage {
+                        Some(read_pixels()?)
+                    } else {
+                        None
+                    };
+                    Ok(crate::document::layer_effect::EditableEffect {
+                        spec: effect.spec,
+                        alpha_locked: effect.alpha_locked,
+                        source,
+                        coverage,
+                    })
+                },
+            )
+            .transpose()?;
         layers.push(RasterLayer {
+            effect,
+            mask,
             id: LayerId(entry.id),
-            pixels: Arc::new(decode_image(decoder)?.into_rgba8()),
+            pixels,
             offset: (entry.x, entry.y),
             visible: entry.visible,
             opacity: entry.opacity,
@@ -199,6 +281,7 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
             locks: entry.locks,
             name: entry.name,
             text: entry.text.map(|text| crate::text::TextStyle {
+                layout: text.layout,
                 source: text.source,
                 family: text.family,
                 face: crate::text::FontFace {
@@ -246,20 +329,56 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
     Ok(content)
 }
 
-pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
+pub fn write(writer: impl Write, content: &DocumentContent) -> Result<()> {
+    write_impl(writer, content, None)
+}
+
+pub fn write_recovery(
+    writer: impl Write,
+    content: &DocumentContent,
+    name: &str,
+    text: Option<&serde_json::Value>,
+) -> Result<()> {
+    write_impl(
+        writer,
+        content,
+        Some(RecoveryEntry {
+            name: name.to_owned(),
+            text: text.cloned(),
+        }),
+    )
+}
+
+fn write_impl(
+    mut writer: impl Write,
+    content: &DocumentContent,
+    recovery: Option<RecoveryEntry>,
+) -> Result<()> {
     let (width, height) = content.size();
     let manifest = Manifest {
-        version: if content
+        version: if recovery.is_some()
+            || content.layers().iter().any(|layer| {
+                layer.effect.is_some()
+                    || layer.mask.is_some()
+                    || layer.blend_mode != BlendMode::Normal
+                    || layer
+                        .text
+                        .as_ref()
+                        .is_some_and(|text| !text.layout.is_auto())
+            }) {
+            VERSION
+        } else if content
             .layers()
             .iter()
             .any(|layer| !layer.locks.is_unlocked())
         {
-            VERSION
+            8
         } else if content.guides().is_empty() {
             6
         } else {
             7
         },
+        recovery,
         mode: content.mode(),
         width,
         height,
@@ -277,6 +396,12 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                 opacity: layer.opacity,
                 blend_mode: layer.blend_mode.into(),
                 locks: layer.locks,
+                mask_enabled: layer.mask.as_ref().map(|mask| mask.enabled),
+                effect: layer.effect.as_ref().map(|effect| EffectEntry {
+                    spec: effect.spec,
+                    alpha_locked: effect.alpha_locked,
+                    coverage: effect.coverage.is_some(),
+                }),
                 text: layer.text.as_ref().map(|text| TextEntry {
                     source: text.source.clone(),
                     family: text.family.clone(),
@@ -289,6 +414,7 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
                     resolved_family: text.resolved_family.clone(),
                     origin_x: text.origin.0,
                     origin_y: text.origin.1,
+                    layout: text.layout,
                 }),
             })
             .collect(),
@@ -330,25 +456,77 @@ pub fn write(mut writer: impl Write, content: &DocumentContent) -> Result<()> {
     let mut payload_budget = MAX_PAYLOAD_BYTES;
     let mut payload = Vec::new();
     for layer in content.layers() {
-        payload.clear();
-        png::PngEncoder::new(&mut payload).write_image(
-            layer.pixels.as_raw(),
-            layer.pixels.width(),
-            layer.pixels.height(),
-            ExtendedColorType::Rgba8,
-        )?;
-        let length = payload.len() as u64;
-        payload_budget = payload_budget
-            .checked_sub(length)
-            .context("Project layer data is too large")?;
-        writer.write_all(&length.to_le_bytes())?;
-        writer.write_all(&payload)?;
+        for pixels in layer.storage() {
+            payload.clear();
+            png::PngEncoder::new(&mut payload).write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                ExtendedColorType::Rgba8,
+            )?;
+            let length = payload.len() as u64;
+            payload_budget = payload_budget
+                .checked_sub(length)
+                .context("Project layer data is too large")?;
+            writer.write_all(&length.to_le_bytes())?;
+            writer.write_all(&payload)?;
+        }
     }
     Ok(())
 }
 
 // Reads and writes share these checks, which run before any pixel buffer is allocated.
 fn check_limits(manifest: &Manifest) -> Result<()> {
+    if let Some(recovery) = &manifest.recovery {
+        ensure!(
+            manifest.version >= 9
+                && recovery.name.chars().count() <= 4096
+                && recovery
+                    .text
+                    .as_ref()
+                    .is_none_or(|text| serde_json::to_vec(text)
+                        .is_ok_and(|bytes| bytes.len() <= 512 * 1024)),
+            "Invalid recovery metadata"
+        );
+    }
+    ensure!(
+        manifest
+            .layers
+            .iter()
+            .all(|layer| layer
+                .effect
+                .as_ref()
+                .is_none_or(|effect| manifest.version >= 9
+                    && layer.text.is_none()
+                    && effect.spec.valid()
+                    && !effect.spec.identity())),
+        "Invalid or unsupported retained effect"
+    );
+    ensure!(
+        manifest
+            .layers
+            .iter()
+            .all(|layer| layer.mask_enabled.is_none()
+                || (manifest.version >= 9 && layer.text.is_none())),
+        "This project version or text layer does not support masks"
+    );
+    ensure!(
+        manifest.version >= 9
+            || manifest
+                .layers
+                .iter()
+                .all(|layer| matches!(layer.blend_mode, WireBlendMode::Normal)),
+        "This project version does not support blend modes"
+    );
+    ensure!(
+        manifest.layers.iter().all(|layer| layer
+            .text
+            .as_ref()
+            .is_none_or(
+                |text| text.layout.allowed() && (manifest.version >= 9 || text.layout.is_auto())
+            )),
+        "Invalid or unsupported text box layout"
+    );
     ensure!(
         manifest.version >= 8
             || manifest
@@ -395,7 +573,14 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
             .filter(|&bytes| bytes <= MAX_IMAGE_BYTES)
             .with_context(|| format!("Layer \"{}\" is empty or too large", layer.name))?;
         total = total
-            .checked_add(bytes)
+            .checked_add(
+                bytes
+                    * (1 + u64::from(layer.mask_enabled.is_some())
+                        + layer
+                            .effect
+                            .as_ref()
+                            .map_or(0, |effect| 1 + u64::from(effect.coverage))),
+            )
             .filter(|&total| total <= MAX_STACK_BYTES)
             .context("The project layers are too large")?;
         ensure!(ids.insert(layer.id), "Layer ID {} is repeated", layer.id);
@@ -490,6 +675,8 @@ mod tests {
 
     fn two_layers() -> DocumentContent {
         let bottom = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(7),
             name: "Background".into(),
             pixels: Arc::new(RgbaImage::from_fn(4, 3, |x, y| {
@@ -503,6 +690,8 @@ mod tests {
             text: None,
         };
         let top = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(3),
             name: "Glaze ✦ 上".into(),
             pixels: Arc::new(RgbaImage::from_fn(3, 2, |x, y| match (x, y) {
@@ -543,6 +732,77 @@ mod tests {
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         serde_json::from_slice(&bytes[12..12 + length]).unwrap()
+    }
+
+    #[test]
+    fn version_nine_golden_preserves_masks_effect_sources_blending_and_text_layout() {
+        let bytes = include_bytes!("../fixtures/projects/v9-capabilities.lime");
+        let content = read_bytes(bytes).unwrap();
+        assert_eq!(content.layers().len(), 2);
+        assert!(content.layers()[0].mask.as_ref().unwrap().enabled);
+        assert_eq!(content.layers()[0].blend_mode, BlendMode::Multiply);
+        assert_eq!(
+            content.layers()[0]
+                .effect
+                .as_ref()
+                .unwrap()
+                .source
+                .get_pixel(0, 0)
+                .0,
+            [100, 120, 140, 200]
+        );
+        assert_eq!(
+            content.layers()[1].text.as_ref().unwrap().layout.align,
+            crate::text::TextAlign::Center
+        );
+        let loaded = read_bytes(&write_bytes(&content).unwrap()).unwrap();
+        assert_eq!(loaded.composite(), content.composite());
+        assert_eq!(loaded.layers()[1].text, content.layers()[1].text);
+        for version in [6, 7, 8] {
+            let mut manifest = manifest_json(bytes);
+            manifest["version"] = json!(version);
+            let mutated = with_manifest(bytes, &manifest);
+            assert!(read_bytes(&mutated).is_err());
+        }
+    }
+
+    #[test]
+    fn version_nine_round_trips_text_boxes_and_all_blend_modes() {
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+        ] {
+            let mut content =
+                DocumentContent::single_layer("Text".into(), image::RgbaImage::new(80, 50));
+            let mut layers = content.layers().to_vec();
+            let rendered = crate::text::render_spec(&crate::text::TextSpec {
+                source: "Wrapped text survives".into(),
+                family: "sans-serif".into(),
+                face: Default::default(),
+                size: 20.,
+                color: Rgba([10, 20, 30, 255]),
+                spacing: Default::default(),
+                layout: crate::text::TextLayout {
+                    width: Some(80),
+                    height: Some(50),
+                    align: crate::text::TextAlign::Center,
+                },
+            })
+            .unwrap();
+            layers[0].pixels = rendered.image;
+            layers[0].text = Some(rendered.style);
+            layers[0].blend_mode = mode;
+            content = DocumentContent::from_layers(80, 50, layers).unwrap();
+            let mut bytes = Vec::new();
+            write(&mut bytes, &content).unwrap();
+            assert_eq!(manifest_json(&bytes)["version"], json!(9));
+            let loaded = read(Cursor::new(bytes)).unwrap();
+            assert_eq!(loaded.layers()[0].text, content.layers()[0].text);
+            assert_eq!(loaded.layers()[0].blend_mode, mode);
+            assert_eq!(loaded.composite(), content.composite());
+        }
     }
 
     #[test]
@@ -752,6 +1012,7 @@ mod tests {
         }
         let mut layers = content.layers().to_vec();
         layers[0].text = Some(crate::text::TextStyle {
+            layout: Default::default(),
             source: "上".repeat(crate::text::MAX_TEXT_CHARS),
             family: "sans-serif".into(),
             resolved_family: "sans-serif".into(),
@@ -776,7 +1037,7 @@ mod tests {
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
         let edits: [Edit; 27] = [
-            ("unknown version", &|m| m["version"] = json!(9)),
+            ("unknown version", &|m| m["version"] = json!(10)),
             ("previous version", &|m| m["version"] = json!(5)),
             ("long layer name", &|m| {
                 m["layers"][0]["name"] = json!("x".repeat(65))
@@ -1001,6 +1262,7 @@ mod tests {
 
         for (bold, italic) in [(true, false), (false, true), (true, true)] {
             let rendered = crate::text::render_spec(&crate::text::TextSpec {
+                layout: Default::default(),
                 source: "Aa".into(),
                 family: "sans-serif".into(),
                 face: crate::text::FontFace { bold, italic },
@@ -1025,6 +1287,8 @@ mod tests {
         let layer = base.layers()[0].clone();
         let layers = (0..=MAX_LAYERS as u64)
             .map(|id| RasterLayer {
+                effect: None,
+                mask: None,
                 id: LayerId(id),
                 ..layer.clone()
             })

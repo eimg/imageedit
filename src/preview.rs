@@ -134,6 +134,32 @@ impl TileCache {
         }
     }
 
+    pub fn fill_from_composite(
+        &mut self,
+        pixels: &RgbaImage,
+        check: &impl Fn() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.shift == 0 && pixels.dimensions() == (self.canvas_width, self.canvas_height),
+            "Invalid prepared tile source"
+        );
+        for index in 0..self.tiles.len() {
+            check()?;
+            let rect = self.coverage(index as u32 % self.cols, index as u32 / self.cols);
+            self.tiles[index] = Some(Arc::new(
+                image::imageops::crop_imm(
+                    pixels,
+                    rect.x as u32,
+                    rect.y as u32,
+                    rect.width,
+                    rect.height,
+                )
+                .to_image(),
+            ));
+        }
+        check()
+    }
+
     pub fn shift(&self) -> u32 {
         self.shift
     }
@@ -496,6 +522,8 @@ mod tests {
     #[test]
     fn a_partial_layer_still_updates_only_the_dirty_tile() {
         let base = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(0),
             name: "Image".into(),
             pixels: Arc::new(RgbaImage::from_pixel(300, 80, Rgba([0, 0, 0, 255]))),
@@ -507,6 +535,8 @@ mod tests {
             text: None,
         };
         let glaze = RasterLayer {
+            effect: None,
+            mask: None,
             id: LayerId(1),
             name: "Glaze".into(),
             pixels: Arc::new(RgbaImage::from_pixel(20, 20, Rgba([255, 0, 0, 128]))),

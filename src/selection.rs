@@ -121,8 +121,30 @@ pub enum SelectionShape {
 // Coverage is 0 or 255 for a hard mask. Feather stores the values between.
 pub type MaskEdge = (i32, i32, i32, i32);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeatherGeometry {
+    pub rect: PixelRect,
+    pub radius: u32,
+    pub ellipse: bool,
+    pub antialias: bool,
+    pub feather: u32,
+}
+
+impl FeatherGeometry {
+    pub fn shape(self, rect: PixelRect, width: u32, height: u32) -> Selection {
+        if self.ellipse {
+            Selection::ellipse_rect_quality(rect, width, height, self.antialias)
+        } else if self.radius > 0 {
+            Selection::rounded_rect_quality(rect, self.radius, width, height, self.antialias)
+        } else {
+            Selection::Rect(rect)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Mask {
+    geometry: Option<FeatherGeometry>,
     x: i32,
     y: i32,
     width: u32,
@@ -133,7 +155,8 @@ pub struct Mask {
 
 impl PartialEq for Mask {
     fn eq(&self, other: &Self) -> bool {
-        self.bounds() == other.bounds()
+        self.geometry == other.geometry
+            && self.bounds() == other.bounds()
             && (Arc::ptr_eq(&self.pixels, &other.pixels) || self.pixels == other.pixels)
     }
 }
@@ -612,7 +635,7 @@ impl Selection {
                 pixels.push(self.coverage(x, y, width, height));
             }
         }
-        finish_mask(
+        let mut result = finish_mask(
             clipped.x as i32,
             clipped.y as i32,
             clipped.width,
@@ -620,7 +643,27 @@ impl Selection {
             pixels,
             width,
             height,
-        )
+        );
+        if let Self::Mask(mask) = &mut result {
+            mask.geometry = match self {
+                Self::Ellipse(shape) => Some(FeatherGeometry {
+                    rect,
+                    radius: 0,
+                    ellipse: true,
+                    antialias: shape.antialias,
+                    feather: 0,
+                }),
+                Self::RoundedRect(shape) => Some(FeatherGeometry {
+                    rect,
+                    radius: shape.radius,
+                    ellipse: false,
+                    antialias: shape.antialias,
+                    feather: 0,
+                }),
+                _ => None,
+            };
+        }
+        result
     }
 
     pub fn invert(self, width: u32, height: u32) -> Self {
@@ -704,11 +747,23 @@ impl Selection {
         match self {
             Self::Ellipse(shape) => shape.antialias,
             Self::RoundedRect(shape) => shape.antialias,
+            Self::Mask(mask) => mask.geometry.is_some_and(|geometry| geometry.antialias),
             _ => false,
         }
     }
 
     pub fn with_antialias(self, antialias: bool, width: u32, height: u32) -> Self {
+        if let Some(geometry) = self.feather_geometry() {
+            let geometry = FeatherGeometry {
+                antialias,
+                ..geometry
+            };
+            return geometry.shape(geometry.rect, width, height).feather(
+                geometry.feather,
+                width,
+                height,
+            );
+        }
         match self {
             Self::Ellipse(shape) => {
                 Self::ellipse_rect_quality(shape.rect, width, height, antialias)
@@ -1030,8 +1085,69 @@ impl Selection {
     // The square averaging kernel has zero coverage outside the canvas. Its
     // denominator stays fixed there, so a bounded full selection also softens
     // at image edges. Unrestricted means no mask and stays unrestricted.
+    pub fn from_coverage(width: u32, height: u32, coverage: impl Fn(u32, u32) -> u8) -> Self {
+        let mut pixels = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.push(coverage(x, y));
+            }
+        }
+        finish_mask(0, 0, width, height, pixels, width, height)
+    }
+
+    pub fn feather_geometry(&self) -> Option<FeatherGeometry> {
+        if let Self::Mask(mask) = self {
+            mask.geometry
+        } else {
+            None
+        }
+    }
+
     pub fn feather(self, radius: u32, width: u32, height: u32) -> Self {
-        reshape(self, radius, width, height, Reshape::Feather)
+        if radius == 0 {
+            return self;
+        }
+        let geometry = if radius == 0 {
+            None
+        } else {
+            match &self {
+                Self::Rect(rect) => Some(FeatherGeometry {
+                    rect: *rect,
+                    radius: 0,
+                    ellipse: false,
+                    antialias: false,
+                    feather: radius,
+                }),
+                Self::Ellipse(shape) => Some(FeatherGeometry {
+                    rect: shape.rect,
+                    radius: 0,
+                    ellipse: true,
+                    antialias: shape.antialias,
+                    feather: radius,
+                }),
+                Self::RoundedRect(shape) => Some(FeatherGeometry {
+                    rect: shape.rect,
+                    radius: shape.radius,
+                    ellipse: false,
+                    antialias: shape.antialias,
+                    feather: radius,
+                }),
+                Self::Mask(mask) => {
+                    mask.geometry
+                        .filter(|geometry| geometry.feather == 0)
+                        .map(|geometry| FeatherGeometry {
+                            feather: radius,
+                            ..geometry
+                        })
+                }
+                _ => None,
+            }
+        };
+        let mut result = reshape(self, radius, width, height, Reshape::Feather);
+        if let Self::Mask(mask) = &mut result {
+            mask.geometry = geometry;
+        }
+        result
     }
 
     // Moves each covered pixel. Turns and flips use this; scaling samples separately.
@@ -1800,6 +1916,18 @@ fn flood_selection(
                 bounds.width,
                 bounds.height,
             ),
+            &included,
+        );
+        antialias::color_edges(
+            &mut pixels,
+            &seen,
+            image,
+            PixelRect::new(
+                i64::from(local_x),
+                i64::from(local_y),
+                bounds.width,
+                bounds.height,
+            ),
             included,
         );
     }
@@ -2057,6 +2185,7 @@ fn finish_mask(
         );
     }
     Selection::Mask(Mask {
+        geometry: None,
         x,
         y,
         width,

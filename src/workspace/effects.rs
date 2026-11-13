@@ -41,6 +41,18 @@ impl Effect {
         }
     }
 
+    fn retained_spec(self) -> Option<crate::document::layer_effect::EffectSpec> {
+        use crate::document::layer_effect::EffectSpec;
+        match self {
+            Self::Adjustment(value) => Some(EffectSpec::Adjustment(value)),
+            Self::Filter(FilterSpec::Blur { radius }) => Some(EffectSpec::Blur { radius }),
+            Self::Filter(FilterSpec::Sharpen { radius, amount }) => {
+                Some(EffectSpec::Sharpen { radius, amount })
+            }
+            Self::Filter(FilterSpec::Shadow { .. }) => None,
+        }
+    }
+
     fn apply(self, content: &mut DocumentContent, layer: LayerId, selection: &Selection) -> Dirty {
         match self {
             Self::Adjustment(value) => content.apply_adjustment(layer, value, selection),
@@ -205,29 +217,75 @@ impl Workspace {
             target,
             tab.active_layer,
             tab.selection.clone(),
+            false,
             window,
             cx,
         );
     }
 
+    pub(super) fn edit_retained_layer_effect(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.form.is_some() || self.dialog_open || self.active_tab().is_none_or(|tab| tab.busy())
+        {
+            return;
+        }
+        let Some(effect) = self
+            .active_tab()
+            .and_then(|tab| tab.document.content.layer(tab.active_layer))
+            .and_then(|layer| layer.effect.as_ref())
+            .map(|effect| effect.spec)
+        else {
+            return;
+        };
+        self.effect_reediting = true;
+        match effect {
+            crate::document::layer_effect::EffectSpec::Adjustment(value) => {
+                self.adjustment_form(AdjustKind::of(value), window, cx)
+            }
+            spec => self.filter_form(FilterKind::of(spec.filter().unwrap()), window, cx),
+        }
+        self.effect_reediting = false;
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn edit_effect(
         &mut self,
         effect: Effect,
         target: (usize, u64),
         layer: LayerId,
         selection: Selection,
+        reediting: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if effect.is_identity()
+        if (effect.is_identity() && !reediting)
             || self.active_tab().is_none_or(|tab| {
                 tab.id != target.0 || tab.history.generation() != target.1 || tab.busy()
             })
         {
             return;
         }
+        if effect.retained_spec().is_some()
+            && self.active_tab().is_some_and(|tab| {
+                !tab.document
+                    .content
+                    .can_retain_effect(layer, &selection, reediting)
+            })
+        {
+            self.notice("There is not enough layer memory to retain this effect. Bake an existing effect or use a smaller layer.", cx);
+            return;
+        }
         self.edit_content(
-            move |content, _, _| effect.apply(content, layer, &selection),
+            move |content, _, _| {
+                if let Some(spec) = effect.retained_spec() {
+                    content.apply_retained_effect(layer, spec, &selection, reediting)
+                } else {
+                    effect.apply(content, layer, &selection)
+                }
+            },
             window,
             cx,
         );

@@ -920,7 +920,20 @@ impl Workspace {
             });
             return;
         }
-        let form = FormKind::adjustment_parameters(self.effect_memory.adjustment(operation));
+        let retained = self
+            .effect_reediting
+            .then(|| {
+                self.active_tab()
+                    .and_then(|tab| tab.document.content.layer(tab.active_layer))
+                    .and_then(|layer| layer.effect.as_ref())
+                    .map(|effect| effect.spec)
+            })
+            .flatten();
+        let value = match retained {
+            Some(crate::document::layer_effect::EffectSpec::Adjustment(value)) => value,
+            _ => self.effect_memory.adjustment(operation),
+        };
+        let form = FormKind::adjustment_parameters(value);
         let Some(adjustment) = form.adjustment_value() else {
             return;
         };
@@ -948,10 +961,21 @@ impl Workspace {
             return;
         }
         let color = solid_color(self.colors[0]);
-        let form = self.effect_memory.filter(kind).map_or_else(
-            || FormKind::filter_defaults(kind, color),
-            FormKind::filter_parameters,
-        );
+        let retained = self
+            .effect_reediting
+            .then(|| {
+                self.active_tab()
+                    .and_then(|tab| tab.document.content.layer(tab.active_layer))
+                    .and_then(|layer| layer.effect.as_ref())
+                    .and_then(|effect| effect.spec.filter())
+            })
+            .flatten();
+        let form = retained
+            .or_else(|| self.effect_memory.filter(kind))
+            .map_or_else(
+                || FormKind::filter_defaults(kind, color),
+                FormKind::filter_parameters,
+            );
         let Some(spec) = form.filter_value() else {
             return;
         };

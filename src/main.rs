@@ -4,6 +4,9 @@
 )]
 
 mod adjustments;
+#[cfg(test)]
+mod capability_tests;
+mod color_management;
 mod commands;
 mod constraints;
 mod document;
@@ -21,6 +24,7 @@ mod paths;
 mod pdf;
 mod preview;
 mod project;
+mod recovery;
 mod selection;
 mod text;
 mod theme;
@@ -42,6 +46,9 @@ use url::Url;
 use workspace::Workspace;
 
 fn main() {
+    if pdf::run_if_requested() {
+        return;
+    }
     #[cfg(target_os = "windows")]
     windows_menu::configure_renderer();
     let app = Application::new().with_assets(icons::Icons);
@@ -109,6 +116,8 @@ fn ensure_workspace(cx: &mut App) -> Result<WindowHandle<Workspace>> {
             ..Default::default()
         },
         |window, cx| {
+            #[cfg(target_os = "macos")]
+            macos::set_srgb_surface(window);
             let workspace = cx.new(|cx| Workspace::new(window, cx));
             #[cfg(target_os = "windows")]
             windows_menu::attach(window, cx);
