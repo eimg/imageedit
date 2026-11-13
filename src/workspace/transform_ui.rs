@@ -293,7 +293,7 @@ fn layer_mirror(action: LayerAdjust) -> Mirror {
 }
 
 const PREVIEW_EDGE: u32 = 256;
-pub(super) const MAX_PIVOT_COORD: f64 = i32::MAX as f64 + document::MAX_NEW_EDGE as f64;
+pub(super) const MAX_TRANSFORM_COORD: f64 = i32::MAX as f64 + document::MAX_NEW_EDGE as f64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WarpKind {
@@ -329,6 +329,7 @@ pub(super) struct WarpSession {
     pivot: (f64, f64),
     mirror: Mirror,
     corners: [(f64, f64); 4],
+    selected_corner: usize,
     drag: Option<WarpDrag>,
 }
 
@@ -340,6 +341,7 @@ pub(super) struct WarpFrame {
     pub grip_count: usize,
     pub invalid: bool,
     pub pivot: Option<(f64, f64)>,
+    pub active_grip: Option<usize>,
 }
 
 pub(super) struct WarpStatus {
@@ -407,6 +409,7 @@ impl Workspace {
             ),
             mirror: Mirror::Horizontal,
             corners: transform::layer_corners(offset, size),
+            selected_corner: 0,
             drag: None,
         });
         self.warp_error = None;
@@ -536,7 +539,12 @@ impl Workspace {
         }
     }
 
-    fn set_rotation_anchor(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_rotation_anchor(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_numeric_edit(window, cx);
         let Some(pivot) = self
             .warp
@@ -551,48 +559,11 @@ impl Workspace {
     pub(super) fn rotation_pivot_options(&self, cx: &Context<Self>) -> Div {
         use super::numeric::NumericField;
         use super::tooltip::tooltip;
-        use super::view::{ACCENT, BORDER, CANVAS, HOVER, MUTED, TEXT};
-        let names = [
-            "Top left",
-            "Top center",
-            "Top right",
-            "Left center",
-            "Center",
-            "Right center",
-            "Bottom left",
-            "Bottom center",
-            "Bottom right",
-        ];
-        let grid = div().flex().flex_col().gap_1().children((0..3).map(|row| {
-            div().flex().gap_1().children((0..3).map(|column| {
-                let index = row * 3 + column;
-                let selected = self
-                    .warp
-                    .as_ref()
-                    .is_some_and(|session| session.pivot_anchor(index) == Some(session.pivot));
-                div()
-                    .id(("rotation-anchor", index))
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(if selected { ACCENT } else { BORDER }))
-                    .bg(rgb(CANVAS))
-                    .cursor_pointer()
-                    .hover(|button| button.bg(rgb(HOVER)))
-                    .tooltip(tooltip(names[index]))
-                    .child(div().size(px(4.)).rounded_full().bg(rgb(if selected {
-                        ACCENT
-                    } else {
-                        TEXT
-                    })))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_rotation_anchor(index, window, cx)
-                    }))
-            }))
-        }));
+        use super::view::{MUTED, TransformPointControl, transform_point_grid};
+        let selected = self.warp.as_ref().and_then(|session| {
+            (0..9).find(|index| session.pivot_anchor(*index) == Some(session.pivot))
+        });
+        let grid = transform_point_grid(TransformPointControl::Rotation, selected, cx);
         div()
             .flex()
             .flex_col()
@@ -621,6 +592,137 @@ impl Workspace {
                         ),
                 ),
             )
+    }
+
+    pub(super) fn perspective_point(&self, index: u8) -> Option<(f64, f64)> {
+        self.warp
+            .as_ref()
+            .filter(|session| session.kind == WarpKind::Perspective)
+            .and_then(|session| session.corners.get(usize::from(index)).copied())
+    }
+
+    pub(super) fn set_perspective_point(
+        &mut self,
+        index: u8,
+        point: (f64, f64),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.warp_applying {
+            return;
+        }
+        let Some(session) = self
+            .warp
+            .as_mut()
+            .filter(|session| session.kind == WarpKind::Perspective && !session.dragging())
+        else {
+            return;
+        };
+        if session.set_corner(usize::from(index), point) {
+            self.request_warp_preview(window, cx);
+        }
+    }
+
+    pub(super) fn select_perspective_corner(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_numeric_edit(window, cx);
+        if self.warp_applying || index >= 4 {
+            return;
+        }
+        if let Some(session) = self
+            .warp
+            .as_mut()
+            .filter(|session| session.kind == WarpKind::Perspective && !session.dragging())
+        {
+            session.selected_corner = index;
+            cx.notify();
+        }
+    }
+
+    fn reset_perspective(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_numeric_edit(window, cx);
+        if self.warp_applying {
+            return;
+        }
+        let Some(session) = self
+            .warp
+            .as_mut()
+            .filter(|session| session.kind == WarpKind::Perspective && !session.dragging())
+        else {
+            return;
+        };
+        if session.reset_corners(all) {
+            self.request_warp_preview(window, cx);
+        }
+    }
+
+    pub(super) fn perspective_corner_options(&self, cx: &Context<Self>) -> Div {
+        use super::numeric::NumericField;
+        use super::tooltip::tooltip;
+        use super::view::{
+            MUTED, TransformPointControl, action_row, choice_button, transform_point_grid,
+        };
+        let index = self
+            .warp
+            .as_ref()
+            .map_or(0, |session| session.selected_corner);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child("Corner"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(transform_point_grid(
+                        TransformPointControl::Perspective,
+                        Some(index),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                self.numeric_chip(
+                                    NumericField::PerspectiveX(index as u8),
+                                    Some("X"),
+                                    cx,
+                                )
+                                .tooltip(tooltip("Corner X in canvas pixels")),
+                            )
+                            .child(
+                                self.numeric_chip(
+                                    NumericField::PerspectiveY(index as u8),
+                                    Some("Y"),
+                                    cx,
+                                )
+                                .tooltip(tooltip("Corner Y in canvas pixels")),
+                            ),
+                    ),
+            )
+            .child(action_row([
+                choice_button("Reset Corner", false).on_click(
+                    cx.listener(|this, _, window, cx| this.reset_perspective(false, window, cx)),
+                ),
+                choice_button("Reset All", false).on_click(
+                    cx.listener(|this, _, window, cx| this.reset_perspective(true, window, cx)),
+                ),
+            ]))
     }
 
     pub(super) fn set_warp_mirror(
@@ -680,6 +782,11 @@ impl Workspace {
         let Some(session) = self.warp.as_mut() else {
             return;
         };
+        if session.kind == WarpKind::Perspective
+            && let Some(index) = grip
+        {
+            session.selected_corner = index;
+        }
         session.drag = match session.kind {
             WarpKind::Rotate if pivot_hit => Some(WarpDrag::Pivot {
                 grab: (session.pivot.0 - canvas.0, session.pivot.1 - canvas.1),
@@ -752,9 +859,7 @@ impl Workspace {
                     }
                 }
                 Some(WarpDrag::Corner { index, grab }) => {
-                    let corner = (canvas.0 + grab.0, canvas.1 + grab.1);
-                    changed = session.corners[index] != corner;
-                    session.corners[index] = corner;
+                    changed = session.set_corner(index, (canvas.0 + grab.0, canvas.1 + grab.1));
                 }
                 None => {}
             }
@@ -795,6 +900,7 @@ impl Workspace {
                     grip_count: 1,
                     invalid: self.warp_error.is_some(),
                     pivot: Some(session.pivot),
+                    active_grip: None,
                 }
             }
             WarpKind::Flip => {
@@ -809,6 +915,7 @@ impl Workspace {
                     grip_count: 4,
                     invalid: self.warp_error.is_some(),
                     pivot: None,
+                    active_grip: None,
                 }
             }
             WarpKind::Perspective => WarpFrame {
@@ -818,6 +925,7 @@ impl Workspace {
                 grip_count: 4,
                 invalid: self.warp_error.is_some(),
                 pivot: None,
+                active_grip: Some(session.selected_corner),
             },
         })
     }
@@ -1073,8 +1181,8 @@ impl WarpSession {
     fn set_pivot(&mut self, pivot: (f64, f64)) -> bool {
         if !pivot.0.is_finite()
             || !pivot.1.is_finite()
-            || pivot.0.abs() > MAX_PIVOT_COORD
-            || pivot.1.abs() > MAX_PIVOT_COORD
+            || pivot.0.abs() > MAX_TRANSFORM_COORD
+            || pivot.1.abs() > MAX_TRANSFORM_COORD
         {
             return false;
         }
@@ -1084,6 +1192,36 @@ impl WarpSession {
         }
         self.pivot = pivot;
         true
+    }
+
+    fn set_corner(&mut self, index: usize, point: (f64, f64)) -> bool {
+        if !point.0.is_finite()
+            || !point.1.is_finite()
+            || point.0.abs() > MAX_TRANSFORM_COORD
+            || point.1.abs() > MAX_TRANSFORM_COORD
+        {
+            return false;
+        }
+        let Some(corner) = self.corners.get_mut(index) else {
+            return false;
+        };
+        let point = ((point.0 * 10.).round() / 10., (point.1 * 10.).round() / 10.);
+        if *corner == point {
+            return false;
+        }
+        *corner = point;
+        true
+    }
+
+    fn reset_corners(&mut self, all: bool) -> bool {
+        let original = transform::layer_corners(self.offset, self.source.dimensions());
+        let before = self.corners;
+        if all {
+            self.corners = original;
+        } else {
+            self.corners[self.selected_corner] = original[self.selected_corner];
+        }
+        self.corners != before
     }
 
     fn pivot_anchor(&self, index: usize) -> Option<(f64, f64)> {
@@ -1162,6 +1300,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn perspective_corners_share_exact_tenths_and_recover_invalid_geometry() {
+        let mut session = WarpSession {
+            layer: LayerId(7),
+            source: Arc::new(RgbaImage::new(5, 2)),
+            offset: (-3, 4),
+            opacity: 180,
+            kind: WarpKind::Perspective,
+            degrees: 0.,
+            pivot: (-0.5, 5.),
+            mirror: Mirror::Horizontal,
+            corners: transform::layer_corners((-3, 4), (5, 2)),
+            selected_corner: 2,
+            drag: None,
+        };
+        let source = session.source.clone();
+        assert!(!session.changed()); // Corner selection alone is not an image edit.
+        assert!(session.set_corner(0, (-3.56, 4.34)));
+        assert_eq!(session.corners[0], (-3.6, 4.3));
+        assert!(!session.set_corner(0, (-3.6, 4.3)));
+        let before = session.corners;
+        for point in [
+            (f64::NAN, 0.),
+            (0., f64::INFINITY),
+            (MAX_TRANSFORM_COORD + 1., 0.),
+        ] {
+            assert!(!session.set_corner(0, point));
+            assert_eq!(session.corners, before);
+        }
+        assert!(!session.set_corner(4, (0., 0.)));
+        assert!(session.set_corner(2, (-20., 30.)));
+        assert!(
+            transform::warp_bounds(session.offset, session.source.dimensions(), session.spec())
+                .is_err()
+        );
+        assert!(session.reset_corners(false));
+        assert_eq!(session.corners[0], before[0]);
+        assert!(session.changed());
+        assert!(
+            transform::warp_bounds(session.offset, session.source.dimensions(), session.spec())
+                .is_ok()
+        );
+        assert!(session.reset_corners(true));
+        assert!(!session.changed());
+        assert!(!session.reset_corners(true));
+        assert!(Arc::ptr_eq(&source, &session.source));
+    }
+
+    #[test]
     fn pivot_anchors_precision_and_default_center_leave_source_and_pending_state_intact() {
         let mut session = WarpSession {
             layer: LayerId(7),
@@ -1173,6 +1359,7 @@ mod tests {
             pivot: (-0.5, 5.),
             mirror: Mirror::Horizontal,
             corners: transform::layer_corners((-3, 4), (5, 2)),
+            selected_corner: 0,
             drag: None,
         };
         let pixels = session.source.clone();
@@ -1202,7 +1389,7 @@ mod tests {
         for bad in [
             (f64::NAN, 0.),
             (0., f64::INFINITY),
-            (MAX_PIVOT_COORD + 1., 0.),
+            (MAX_TRANSFORM_COORD + 1., 0.),
         ] {
             assert!(!session.set_pivot(bad));
             assert_eq!(session.pivot, (1.2, -4.6));
@@ -1236,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn applying_pivot_rotation_is_one_undo_step_and_keeps_selection_in_canvas_coordinates() {
+    fn applying_precise_transforms_is_one_undo_step_and_keeps_canvas_selection() {
         use super::super::{Change, Tab, history::State};
         fn publish(tab: &mut Tab, state: State, change: Change) {
             let patch = document::RenderedCanvas::prepare_patch(
@@ -1257,48 +1444,59 @@ mod tests {
                 .0
             );
         }
-        let mut tab = super::super::tests::opacity_tab();
-        tab.selection = Selection::Rect(PixelRect::new(0, 0, 1, 2));
-        let selection = tab.selection.clone();
-        let layer = tab.active_layer;
-        let before = tab.document.content.layer(layer).unwrap().pixels.clone();
-        let placed = transform::warp_layer(
-            &before,
-            (0, 0),
-            Warp::RotateAround {
-                degrees: 90.,
-                pivot: (0., 0.),
-            },
-            Resample::Bicubic,
-            None,
-        )
-        .unwrap();
-        assert_eq!(placed.offset, (-2, 0));
-        assert!(!tab.history.is_dirty());
-        let mut state = tab.state();
-        assert_ne!(
-            state
-                .content
-                .place_layer(layer, placed.pixels, placed.offset),
-            Dirty::None
-        );
-        publish(&mut tab, state, Change::Edit);
-        assert!(tab.history.is_dirty());
-        assert_eq!(tab.selection, selection);
-        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (-2, 0));
-        let previous = tab.history.undo_target().unwrap().0.clone();
-        publish(&mut tab, previous, Change::Undo);
-        assert!(!tab.history.is_dirty());
-        assert!(tab.history.undo_target().is_none());
-        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (0, 0));
-        assert!(Arc::ptr_eq(
-            &before,
-            &tab.document.content.layer(layer).unwrap().pixels
-        ));
-        let next = tab.history.redo_target().unwrap().0.clone();
-        publish(&mut tab, next, Change::Redo);
-        assert_eq!(tab.document.content.layer(layer).unwrap().offset, (-2, 0));
-        assert_eq!(tab.selection, selection);
+        for (spec, expected_offset) in [
+            (
+                Warp::RotateAround {
+                    degrees: 90.,
+                    pivot: (0., 0.),
+                },
+                (-2, 0),
+            ),
+            (
+                Warp::Perspective([(-1., -1.), (2., 0.), (2., 2.), (0., 2.)]),
+                (-1, -1),
+            ),
+        ] {
+            let mut tab = super::super::tests::opacity_tab();
+            tab.selection = Selection::Rect(PixelRect::new(0, 0, 1, 2));
+            let selection = tab.selection.clone();
+            let layer = tab.active_layer;
+            let before = tab.document.content.layer(layer).unwrap().pixels.clone();
+            let placed =
+                transform::warp_layer(&before, (0, 0), spec, Resample::Bicubic, None).unwrap();
+            assert_eq!(placed.offset, expected_offset);
+            assert!(!tab.history.is_dirty());
+            let mut state = tab.state();
+            assert_ne!(
+                state
+                    .content
+                    .place_layer(layer, placed.pixels, placed.offset),
+                Dirty::None
+            );
+            publish(&mut tab, state, Change::Edit);
+            assert!(tab.history.is_dirty());
+            assert_eq!(tab.selection, selection);
+            assert_eq!(
+                tab.document.content.layer(layer).unwrap().offset,
+                expected_offset
+            );
+            let previous = tab.history.undo_target().unwrap().0.clone();
+            publish(&mut tab, previous, Change::Undo);
+            assert!(!tab.history.is_dirty());
+            assert!(tab.history.undo_target().is_none());
+            assert_eq!(tab.document.content.layer(layer).unwrap().offset, (0, 0));
+            assert!(Arc::ptr_eq(
+                &before,
+                &tab.document.content.layer(layer).unwrap().pixels
+            ));
+            let next = tab.history.redo_target().unwrap().0.clone();
+            publish(&mut tab, next, Change::Redo);
+            assert_eq!(
+                tab.document.content.layer(layer).unwrap().offset,
+                expected_offset
+            );
+            assert_eq!(tab.selection, selection);
+        }
     }
 
     #[test]
@@ -1370,6 +1568,7 @@ mod tests {
             pivot: (2.5, 3.),
             mirror: Mirror::Horizontal,
             corners: transform::layer_corners((1, 2), (3, 2)),
+            selected_corner: 0,
             drag: None,
         };
         assert!(!session.changed());

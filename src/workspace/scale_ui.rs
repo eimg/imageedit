@@ -25,6 +25,7 @@ pub(super) struct ScaleDrag {
     start: (i64, i64),
     target: PixelRect,
     pointer: bool,
+    anchor: crate::transform::Anchor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +130,7 @@ impl Workspace {
                 start,
                 target: original,
                 pointer: true,
+                anchor: self.scale_anchor,
             },
             window,
             cx,
@@ -178,6 +180,7 @@ impl Workspace {
                 bottom: false,
             },
             pointer: false,
+            anchor: self.scale_anchor,
         };
         self.start_scale_preview(drag, window, cx);
         true
@@ -277,16 +280,40 @@ impl Workspace {
             );
             return;
         };
-        let offset = crate::transform::centered_offset(
+        let Some(offset) = crate::transform::anchored_offset(
             (drag.original.x as i32, drag.original.y as i32),
             (drag.original.width, drag.original.height),
             (w, h),
-        );
+            drag.anchor,
+        ) else {
+            self.restore_scale_size(cx);
+            self.notice(
+                "That anchored position exceeds the layer coordinate limits.",
+                cx,
+            );
+            return;
+        };
         if !self.update_scale_target(
             PixelRect::new(i64::from(offset.0), i64::from(offset.1), w, h),
             cx,
         ) {
             self.restore_scale_size(cx);
+        }
+    }
+
+    pub(super) fn set_scale_anchor(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_numeric_edit(window, cx);
+        let Some(anchor) = crate::transform::Anchor::from_grid(index) else {
+            return;
+        };
+        if self.scale_drag.is_none() && self.scale_anchor != anchor {
+            self.scale_anchor = anchor;
+            cx.notify();
         }
     }
 
@@ -425,6 +452,8 @@ fn commit_scale(
     resample: crate::transform::Resample,
 ) -> Dirty {
     if drag.target == drag.original
+        || i32::try_from(drag.target.x).is_err()
+        || i32::try_from(drag.target.y).is_err()
         || !content.scale_layer(drag.layer, drag.target.width, drag.target.height, resample)
     {
         return Dirty::None;
@@ -583,6 +612,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn numeric_anchor_commit_rejects_unplaceable_targets_before_resampling() {
+        let tab = super::super::tests::opacity_tab();
+        let mut state = tab.state();
+        let before = state
+            .content
+            .layer(state.active_layer)
+            .unwrap()
+            .pixels
+            .clone();
+        let mut drag = ScaleDrag {
+            layer: state.active_layer,
+            original: PixelRect::new(0, 0, 2, 2),
+            target: PixelRect::new(i64::from(i32::MAX) + 1, 0, 4, 4),
+            edges: ScaleEdges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
+            start: (0, 0),
+            pointer: false,
+            anchor: crate::transform::Anchor::SouthEast,
+        };
+        assert!(matches!(
+            commit_scale(
+                &mut state.content,
+                drag,
+                crate::transform::Resample::Bicubic
+            ),
+            Dirty::None
+        ));
+        let layer = state.content.layer(state.active_layer).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before, &layer.pixels));
+        assert_eq!(layer.offset, (0, 0));
+        let offset =
+            crate::transform::anchored_offset((0, 0), (2, 2), (4, 4), drag.anchor).unwrap();
+        drag.target = PixelRect::new(i64::from(offset.0), i64::from(offset.1), 4, 4);
+        assert!(matches!(
+            commit_scale(
+                &mut state.content,
+                drag,
+                crate::transform::Resample::Nearest
+            ),
+            Dirty::Canvas
+        ));
+        let layer = state.content.layer(state.active_layer).unwrap();
+        assert_eq!(layer.offset, (-2, -2));
+        assert_eq!(layer.pixels.dimensions(), (4, 4));
+    }
+
+    #[test]
     fn numeric_scale_commits_pixels_and_placement_as_one_undo_step() {
         let mut tab = super::super::tests::opacity_tab();
         let generation = tab.history.generation();
@@ -600,6 +680,7 @@ mod tests {
             },
             start: (0, 0),
             pointer: false,
+            anchor: crate::transform::Anchor::Center,
         };
         assert!(matches!(
             commit_scale(

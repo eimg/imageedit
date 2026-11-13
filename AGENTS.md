@@ -120,10 +120,15 @@ original-layer anchors, signed canvas X/Y in tenths of an image pixel, and a
 screen-sized circular crosshair that can be dragged without snapping to the click.
 Custom pivots recalculate the original layer at the current angle; Shift-drag
 rotates around that pivot and snaps to absolute 15-degree angles, including when Shift changes without moving the pointer. Perspective
-corner grips keep a dark rim so they stay visible on a white image. The Scale
+corner grips keep a dark rim so they stay visible on a white image. A 2×2
+corner selector and signed canvas X/Y fields edit individual points to tenths of
+a pixel; dragging selects and accents that grip. Reset Corner or Reset All
+restores original source geometry in the draft, without editing pixels. Invalid
+quads remain editable with Apply disabled. The Scale
 Layer tool draws a frame around the active layer and scales it from a dragged
 border or corner; release commits one undo step, and the tool uses Shift+S.
-Width/Height edits preview a centered resize and commit on Return or leaving
+Width/Height edits preview a resize about the chosen nine-point Size anchor
+(Center initially) and commit on Return or leaving
 the field; empty text and Escape restore the original size. Aspect locking starts
 on and applies to numeric edits and handles; Shift reverses it during a drag.
 Nearest, Bilinear, and Bicubic choose the commit resampling. Escape or a
@@ -413,7 +418,10 @@ document is a single plain layer without paths, guides, or editable text.
   the preview in the background and rejects results after release or cancellation.
   Numeric dimensions use the same preview/commit path; aspect locking retains
   opposite corner anchors or centers the unhandled axis. Numeric edits keep the
-  layer center. All targets respect image and stack budgets. Hidden layers must
+  selected Size anchor, captured when that edit starts. Choosing an anchor alone
+  changes no pixels/history; handle behavior stays independent. Anchor placement
+  rounds absolute canvas coordinates and rejects i32 overflow before resampling.
+  All targets respect image and stack budgets. Hidden layers must
   be shown before scaling.
 - `src/adjustments.rs` changes brightness, contrast, hue, saturation, and
   lightness, and it desaturates or inverts. It also balances color and maps
@@ -512,6 +520,11 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   to tenths, avoiding accumulated drift. Center restores the original lossless
   centered quarter-turn path. Session/layer/tab/tool cancellation clears pivot
   numeric editors; position-locked and editable-text layers keep their guards.
+- Perspective uses the same bounded signed-tenths numeric contract as pivots.
+  Coordinate fields carry their corner index, so switching the selected corner
+  finishes the old edit before showing another point. Pointer corners quantize
+  to tenths too, preserving exact empty/Escape restoration. Reset actions keep
+  unrelated corner changes; source pixels remain immutable until Apply.
 - `src/geometry.rs` centers a layer, finds nonzero-alpha bounds, and copies
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
@@ -643,16 +656,16 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
 - `src/workspace/numeric.rs` edits the selection radius, selection position/size, crop
   fields, separate wand/fill tolerance and gap radius, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
-  Rotate angle/pivot coordinates, and text size/letter/line
+  Rotate angle/pivot coordinates, Perspective corner coordinates, and text size/letter/line
   spacing inline with a caret and text selection. Values preview live; selection,
-  scale, and Move edits commit one history entry. Rotate angles retain Apply/Cancel.
+  scale, and Move edits commit one history entry. Warp fields retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing
   accepts negative values. A shortcut or a switch to another numeric field waits
   for a selection, scale, or Move edit to settle and its action bindings to render; stale
-  followups are rejected after a tab, tool, or revision change. Rotation accepts
-  signed decimals for angles and pivot coordinates; other numeric fields retain
-  their existing contracts. Pivot fields retain Apply/Cancel and restore exact
-  tenths on empty text/Escape. Apply and canvas drags finish a numeric edit first.
+  followups are rejected after a tab, tool, or revision change. Transform fields
+  accept signed decimals for angles, pivots, and Perspective corners; other
+  numeric fields retain their existing contracts. Pivot and corner fields
+  restore exact tenths on empty text/Escape. Apply and canvas drags finish a numeric edit first.
 - `src/workspace/canvas_tools.rs` maps canvas gestures to full-resolution
   pixels, including creating, moving, and resizing the crop box. The Crop tool
   options edit X, Y, Width, and Height live.

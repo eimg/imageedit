@@ -39,6 +39,31 @@ pub enum Anchor {
     SouthEast,
 }
 
+impl Anchor {
+    pub const ALL: [Self; 9] = [
+        Self::NorthWest,
+        Self::North,
+        Self::NorthEast,
+        Self::West,
+        Self::Center,
+        Self::East,
+        Self::SouthWest,
+        Self::South,
+        Self::SouthEast,
+    ];
+
+    pub fn from_grid(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    pub fn grid_index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|anchor| *anchor == self)
+            .expect("all anchors are represented")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ColorMode {
@@ -139,6 +164,26 @@ pub fn centered_offset(offset: (i32, i32), old: (u32, u32), new: (u32, u32)) -> 
             .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
     };
     (place(offset.0, old.0, new.0), place(offset.1, old.1, new.1))
+}
+
+pub fn anchored_offset(
+    offset: (i32, i32),
+    old: (u32, u32),
+    new: (u32, u32),
+    anchor: Anchor,
+) -> Option<(i32, i32)> {
+    if old.0 == 0 || old.1 == 0 || new.0 == 0 || new.1 == 0 {
+        return None;
+    }
+    let index = anchor.grid_index();
+    let axis = |origin: i32, before: u32, after: u32, at: usize| {
+        let value = f64::from(origin) + (f64::from(before) - f64::from(after)) * at as f64 / 2.;
+        as_i32(value.round())
+    };
+    Some((
+        axis(offset.0, old.0, new.0, index % 3)?,
+        axis(offset.1, old.1, new.1, index / 3)?,
+    ))
 }
 
 pub fn anchor_delta(old: (u32, u32), new: (u32, u32), anchor: Anchor) -> (i32, i32) {
@@ -832,6 +877,50 @@ fn unpremultiply(pixels: &PremultipliedImage) -> RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_scale_anchors_preserve_edges_and_center_without_overflow() {
+        for (index, anchor) in Anchor::ALL.into_iter().enumerate() {
+            assert_eq!(Anchor::from_grid(index), Some(anchor));
+            assert_eq!(anchor.grid_index(), index);
+            let placed = anchored_offset((-3, 7), (4, 6), (8, 10), anchor).unwrap();
+            assert_eq!(
+                placed,
+                (-3 - 2 * (index % 3) as i32, 7 - 2 * (index / 3) as i32)
+            );
+            assert_eq!(
+                anchored_offset(placed, (8, 10), (4, 6), anchor),
+                Some((-3, 7))
+            );
+        }
+        assert_eq!(Anchor::from_grid(9), None);
+        for origin in [(-3, -4), (0, 0), (3, 4)] {
+            assert_eq!(
+                anchored_offset(origin, (2, 3), (3, 2), Anchor::Center),
+                Some(centered_offset(origin, (2, 3), (3, 2)))
+            );
+        }
+        assert_eq!(
+            anchored_offset((i32::MIN, 0), (1, 1), (3, 1), Anchor::East),
+            None
+        );
+        assert_eq!(
+            anchored_offset((i32::MAX, 0), (3, 1), (1, 1), Anchor::East),
+            None
+        );
+        assert_eq!(
+            anchored_offset((i32::MIN, i32::MAX), (1, 1), (3, 3), Anchor::NorthWest),
+            Some((i32::MIN, i32::MAX))
+        );
+        assert_eq!(
+            anchored_offset((0, 0), (0, 1), (1, 1), Anchor::Center),
+            None
+        );
+        assert_eq!(
+            anchored_offset((0, 0), (1, 1), (1, 0), Anchor::Center),
+            None
+        );
+    }
 
     #[test]
     fn custom_rotation_pivots_place_integral_quarter_turns_without_resampling() {

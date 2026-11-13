@@ -43,7 +43,8 @@ clipping retains the original curves; pixel-art hard selections remain available
 - [x] Keyboard layer nudging, with larger modifier steps.
 - [x] Typed layer position.
 - [x] Rotation pivot anchors, typed canvas coordinates, and dragging.
-- [ ] Evaluate further Scale/Perspective anchoring separately.
+- [x] Nine-point anchors for typed Scale Layer dimensions and precise Perspective
+  corner coordinates with individual/all-corner reset.
 - [x] Crop aspect ratios and consistent dimension constraints.
 
 Acceptance: preview and commit agree; Escape cancels drafts; one completed edit
@@ -1266,7 +1267,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 20 — persistent named gradient library
 
-Implemented; committed at the start of Pass 21:
+Implemented and committed as `d4d44ad`:
 
 - Replaced six numbered session slots with a personal library of up to 32 named
   gradients. Save… opens the existing text-field dialog; Rename and Delete act
@@ -1325,3 +1326,57 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Save a library change and immediately close/quit, including with unsaved image
   work. The write should finish before the normal close decision. Changing tools
   or colors during a write must not replace the active gradient with old data.
+
+## Pass 21 — precise Scale anchors and Perspective corners
+
+Implemented; pending commit:
+
+- Scale Layer offers a nine-point Size anchor for typed Width/Height edits,
+  initially Center. The numeric session captures that choice and calculates
+  placement from original bounds, preserving absolute-coordinate rounding.
+  Choosing an anchor alone changes no image/history; pointer handles retain
+  their opposite-edge/corner behavior. Unplaceable coordinates are rejected
+  before pixel resampling rather than narrowed or clamped into another location.
+- Perspective offers a spatial 2×2 corner selector and signed canvas X/Y fields
+  in tenths of a pixel. Pointer grips select the corresponding point, quantize
+  to the same precision, and highlight it with an accent while retaining the
+  dark contrast rim. Rotate, Scale, and Perspective share the compact point-grid
+  control; labels use regular option styling.
+- Coordinate editors carry the original corner index. Corner selection, reset,
+  Apply, and a new canvas gesture finish the prior numeric edit first; empty
+  text and Escape restore its exact original coordinate. Existing tab/tool/layer
+  cancellation, locked-position, and editable-text guards remain in force.
+- Reset Corner restores just the selected point to its source location, keeping
+  other edits; Reset All restores the original rectangle. These are draft-only
+  changes. Invalid/crossed/concave or oversized quads retain their correction
+  controls with Apply disabled. Full-resolution Apply uses the immutable source
+  and commits one undo step with stationary canvas selections.
+- Updated help, README, and AGENTS. No new toolbox tool, project metadata,
+  dependency, package version, publishing, installer, or icon changes.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 390 tests
+pass. Three new regression tests cover all nine anchored placements, negative
+and odd-size rounding, coordinate overflow without partial resampling, and
+Perspective precision, invalid input, invalid geometry recovery, partial/all
+reset, and source sharing. Expanded existing checks cover all ten transform
+coordinate fields with unique IDs, exact numeric restoration, and both custom
+rotation and Perspective Apply/undo/redo with saved-state and canvas selection
+preservation. Both release benchmarks pass. `dist/Lime.app` is rebuilt and its
+signature verified. No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Resize offset, odd-sized layers using each Size anchor with aspect lock on/off,
+  then undo/redo. Change the anchor after typing a dimension; only the completed
+  edit should land. Confirm pointer handles retain their existing anchors and
+  choosing an anchor alone does not dirty the document.
+- Drag and select all four Perspective corners at Fit/high zoom after pan. Check
+  highlighted grip/selector correspondence, tenths readouts, negative coordinates,
+  and numeric X/Y preview. Type an empty/partial field, then Escape, switch
+  corners, reset a corner, or Apply; the previous field must resolve correctly.
+- Cross corners or enter an unplaceable point, then correct it or use Reset
+  Corner/Reset All. Verify the other corner edits survive a single reset, Apply
+  stays unavailable for invalid geometry, and no discarded preview reappears.
+- Apply under each resampler, undo/redo, and switch tools/layers/tabs during a
+  preview. Check unchanged selection coordinates, source layer opacity/order,
+  and the existing position-lock and editable-text restrictions.

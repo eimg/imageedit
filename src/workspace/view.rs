@@ -1836,6 +1836,10 @@ impl Workspace {
                                         this.scale_lock = !locked;
                                         cx.notify();
                                     })))
+                                    .child(div().flex().items_center().justify_between().gap_2()
+                                        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Size anchor"))
+                                        .child(transform_point_grid(TransformPointControl::Scale, Some(self.scale_anchor.grid_index()), cx))
+                                        .id("scale-anchor-options").tooltip(tooltip("Anchor for typed Width/Height changes. Handle drags keep their opposite edge or corner.")))
                                     .child(section_label("RESAMPLE"))
                                     .child(segmented([
                                         resample_choice("Nearest", Resample::Nearest, resample, cx),
@@ -1855,6 +1859,7 @@ impl Workspace {
                                     .when_some(status.degrees, |panel, _| {
                                         panel.child(self.numeric_chip(NumericField::RotateAngle, Some("Angle °"), cx)).child(self.rotation_pivot_options(cx))
                                     })
+                                    .when(self.tool == Tool::Perspective, |panel| panel.child(self.perspective_corner_options(cx)))
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
                                     })
@@ -2777,6 +2782,84 @@ pub(super) fn action_row(children: impl IntoIterator<Item = gpui::Stateful<Div>>
         .flex()
         .gap_2()
         .children(children.into_iter().map(|child| child.flex_1()))
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TransformPointControl {
+    Rotation,
+    Scale,
+    Perspective,
+}
+
+pub(super) fn transform_point_grid(
+    control: TransformPointControl,
+    selected: Option<usize>,
+    cx: &Context<Workspace>,
+) -> Div {
+    let names = [
+        "Top left",
+        "Top center",
+        "Top right",
+        "Left center",
+        "Center",
+        "Right center",
+        "Bottom left",
+        "Bottom center",
+        "Bottom right",
+    ];
+    let (prefix, rows, columns) = match control {
+        TransformPointControl::Rotation => ("rotation-anchor", 3, 3),
+        TransformPointControl::Scale => ("scale-anchor", 3, 3),
+        TransformPointControl::Perspective => ("perspective-corner", 2, 2),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .children((0..rows).map(|row| {
+            div()
+                .flex()
+                .gap_1()
+                .children((0..columns).map(move |column| {
+                    let grid = row * columns + column;
+                    let (index, name) = match control {
+                        TransformPointControl::Perspective => {
+                            ([0, 1, 3, 2][grid], names[[0, 2, 6, 8][grid]])
+                        }
+                        _ => (grid, names[grid]),
+                    };
+                    let active = selected == Some(index);
+                    div()
+                        .id((prefix, index))
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(if active { ACCENT } else { BORDER }))
+                        .bg(rgb(CANVAS))
+                        .cursor_pointer()
+                        .hover(|button| button.bg(rgb(HOVER)))
+                        .tooltip(tooltip(name))
+                        .child(div().size(px(4.)).rounded_full().bg(rgb(if active {
+                            ACCENT
+                        } else {
+                            TEXT
+                        })))
+                        .on_click(cx.listener(move |this, _, window, cx| match control {
+                            TransformPointControl::Rotation => {
+                                this.set_rotation_anchor(index, window, cx)
+                            }
+                            TransformPointControl::Scale => {
+                                this.set_scale_anchor(index, window, cx)
+                            }
+                            TransformPointControl::Perspective => {
+                                this.select_perspective_corner(index, window, cx)
+                            }
+                        }))
+                }))
+        }))
 }
 
 pub(super) fn section_label(text: &'static str) -> Div {
@@ -3902,9 +3985,26 @@ fn paint_warp_frame(
             }
         }
         let scale = window.scale_factor();
-        for grip in frame.grips.iter().take(frame.grip_count) {
+        for (index, grip) in frame.grips.iter().take(frame.grip_count).enumerate() {
             let center = project(*grip);
-            paint_contrast_square(window, f32::from(center.x), f32::from(center.y), 7., scale);
+            let active = frame.active_grip == Some(index);
+            paint_contrast_square(
+                window,
+                f32::from(center.x),
+                f32::from(center.y),
+                if active { 11. } else { 7. },
+                scale,
+            );
+            if active {
+                window.paint_quad(gpui::quad(
+                    Bounds::centered_at(center, gpui::size(px(9.), px(9.))),
+                    px(0.),
+                    rgb(0xffffff),
+                    px(2.),
+                    rgb(ACCENT),
+                    gpui::BorderStyle::Solid,
+                ));
+            }
         }
     });
 }

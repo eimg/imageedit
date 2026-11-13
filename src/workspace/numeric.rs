@@ -37,6 +37,8 @@ pub(super) enum NumericField {
     RotateAngle,
     RotatePivotX,
     RotatePivotY,
+    PerspectiveX(u8),
+    PerspectiveY(u8),
     MoveX,
     MoveY,
     GridSpacing,
@@ -79,6 +81,8 @@ impl NumericField {
             Self::RotateAngle => 18,
             Self::RotatePivotX => 35,
             Self::RotatePivotY => 36,
+            Self::PerspectiveX(index) => 37 + 2 * usize::from(index),
+            Self::PerspectiveY(index) => 38 + 2 * usize::from(index),
             Self::MoveX => 19,
             Self::MoveY => 20,
             Self::GridSpacing => 21,
@@ -113,12 +117,19 @@ impl NumericField {
     pub(super) fn is_warp(self) -> bool {
         matches!(
             self,
-            Self::RotateAngle | Self::RotatePivotX | Self::RotatePivotY
+            Self::RotateAngle
+                | Self::RotatePivotX
+                | Self::RotatePivotY
+                | Self::PerspectiveX(_)
+                | Self::PerspectiveY(_)
         )
     }
 
-    fn is_pivot(self) -> bool {
-        matches!(self, Self::RotatePivotX | Self::RotatePivotY)
+    fn is_warp_position(self) -> bool {
+        matches!(
+            self,
+            Self::RotatePivotX | Self::RotatePivotY | Self::PerspectiveX(_) | Self::PerspectiveY(_)
+        )
     }
 
     fn parse(self, text: &str) -> Option<i64> {
@@ -132,9 +143,9 @@ impl NumericField {
                 };
                 value.round() as i64
             })
-        } else if self.is_pivot() {
+        } else if self.is_warp_position() {
             let value = text.parse::<f64>().ok()?;
-            (value.is_finite() && value.abs() <= super::transform_ui::MAX_PIVOT_COORD)
+            (value.is_finite() && value.abs() <= super::transform_ui::MAX_TRANSFORM_COORD)
                 .then(|| (value * 10.).round() as i64)
         } else if self == Self::RotateAngle {
             let value = text.parse::<f64>().ok()?;
@@ -152,7 +163,8 @@ impl NumericField {
     fn format(self, value: i64) -> String {
         if self == Self::GradientStopOpacity {
             format!("{:.1}", value as f64 * 100. / 255.)
-        } else if self.is_pivot() || matches!(self, Self::RotateAngle | Self::GradientStopPosition)
+        } else if self.is_warp_position()
+            || matches!(self, Self::RotateAngle | Self::GradientStopPosition)
         {
             format!("{:.1}", value as f64 / 10.)
         } else {
@@ -175,9 +187,9 @@ impl NumericField {
         ch.is_ascii_digit()
             || ((matches!(self, Self::TextLetterSpacing | Self::RotateAngle)
                 || self.is_move()
-                || self.is_pivot())
+                || self.is_warp_position())
                 && ch == '-')
-            || ((self.is_pivot()
+            || ((self.is_warp_position()
                 || matches!(
                     self,
                     Self::RotateAngle | Self::GradientStopPosition | Self::GradientStopOpacity
@@ -202,6 +214,8 @@ impl NumericField {
                 | Self::RotateAngle
                 | Self::RotatePivotX
                 | Self::RotatePivotY
+                | Self::PerspectiveX(_)
+                | Self::PerspectiveY(_)
                 | Self::GridSpacing
                 | Self::SelectionRatioWidth
                 | Self::SelectionRatioHeight
@@ -228,8 +242,11 @@ impl NumericField {
             | Self::CropRatioWidth
             | Self::CropRatioHeight => (1, 16384),
             Self::RotateAngle => (-3600, 3600),
-            Self::RotatePivotX | Self::RotatePivotY => {
-                let limit = (super::transform_ui::MAX_PIVOT_COORD * 10.).round() as i64;
+            Self::RotatePivotX
+            | Self::RotatePivotY
+            | Self::PerspectiveX(_)
+            | Self::PerspectiveY(_) => {
+                let limit = (super::transform_ui::MAX_TRANSFORM_COORD * 10.).round() as i64;
                 (-limit, limit)
             }
             Self::BrushSize | Self::PathStrokeSize => (1, 500),
@@ -433,6 +450,16 @@ impl Workspace {
                         pivot.0
                     } else {
                         pivot.1
+                    }) * 10.)
+                        .round() as i64
+                })
+            }
+            NumericField::PerspectiveX(index) | NumericField::PerspectiveY(index) => {
+                self.perspective_point(index).map(|point| {
+                    ((if matches!(field, NumericField::PerspectiveX(_)) {
+                        point.0
+                    } else {
+                        point.1
                     }) * 10.)
                         .round() as i64
                 })
@@ -1018,6 +1045,16 @@ impl Workspace {
                     self.set_rotation_pivot(pivot, window, cx);
                 }
             }
+            NumericField::PerspectiveX(index) | NumericField::PerspectiveY(index) => {
+                if let Some(mut point) = self.perspective_point(index) {
+                    if matches!(field, NumericField::PerspectiveX(_)) {
+                        point.0 = value as f64 / 10.;
+                    } else {
+                        point.1 = value as f64 / 10.;
+                    }
+                    self.set_perspective_point(index, point, window, cx);
+                }
+            }
             NumericField::TextLetterSpacing => {
                 self.set_text_letter_spacing(value as f32, window, cx)
             }
@@ -1145,8 +1182,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pivot_fields_accept_signed_decimal_canvas_positions_and_restore_exact_tenths() {
-        for field in [NumericField::RotatePivotX, NumericField::RotatePivotY] {
+    fn transform_positions_accept_signed_decimals_and_restore_exact_tenths() {
+        let fields = [NumericField::RotatePivotX, NumericField::RotatePivotY]
+            .into_iter()
+            .chain((0..4).flat_map(|index| {
+                [
+                    NumericField::PerspectiveX(index),
+                    NumericField::PerspectiveY(index),
+                ]
+            }))
+            .collect::<Vec<_>>();
+        let ids = fields
+            .iter()
+            .map(|field| field.id())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), fields.len());
+        for field in fields {
             assert!(field.is_warp() && field.is_tool_option());
             assert!(field.accepts_character('-') && field.accepts_character('.'));
             assert_eq!(field.parse("-12.56"), Some(-126));
@@ -1154,7 +1205,7 @@ mod tests {
             for text in ["", "-", "NaN", "inf", "1e100"] {
                 assert_eq!(field.parse(text), None);
             }
-            let limit = super::super::transform_ui::MAX_PIVOT_COORD;
+            let limit = super::super::transform_ui::MAX_TRANSFORM_COORD;
             assert!(field.parse(&limit.to_string()).is_some());
             assert_eq!(field.parse(&(limit + 1.).to_string()), None);
             let mut edit = NumericEdit::new(field, 25, None);

@@ -291,10 +291,10 @@ impl Tool {
                 "Choose Horizontal or Vertical, or drag to choose a direction. Return applies the flip; Escape cancels. The selection stays in canvas coordinates."
             }
             Self::Perspective => {
-                "Drag the corner grips to change perspective. Keep the corners in a convex shape. Return applies the preview; Escape cancels. The selection stays in canvas coordinates."
+                "Drag a corner grip or choose a corner and edit its signed canvas X/Y to tenths of a pixel. The accented grip marks the selected corner. Reset Corner restores only that point; Reset All restores the original layer rectangle. Keep corners in a convex shape; invalid or oversized previews cannot be applied. Return finishes a numeric edit; Apply or Return on the canvas applies the preview. Empty text or Escape restores the numeric edit; Escape on the canvas cancels the preview. The selection stays in canvas coordinates."
             }
             Self::ScaleLayer => {
-                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels. Type Width or Height for a centered live preview; Return or clicking outside commits, and empty text restores the original size. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at commit. Rasterize editable text before scaling it."
+                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels. Type Width or Height for a live preview about the selected Size anchor (Center initially); Return or clicking outside commits, and empty text restores the original size. The Size anchor affects typed dimensions; handle drags keep their opposite edge or corner. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at commit. Rasterize editable text before scaling it."
             }
             Self::Select => {
                 "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, Height, and corner radius update immediately; empty text or Escape restores the numeric edit. Choose Free or a fixed aspect ratio; Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Antialias edges smooths rounded corners. Shift adds, Control subtracts, and Shift-Control intersects."

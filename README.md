@@ -99,7 +99,10 @@ hidden layer before dragging its Scale Layer frame.
 Reduced previews and layer thumbnails also preserve transparent edge colors.
 Save and Undo shortcuts finish an active numeric selection edit first.
 
-With **Scale Layer** (Shift+S), type Width or Height to preview a centered resize.
+With **Scale Layer** (Shift+S), type Width or Height to preview a resize.
+**Size anchor** chooses which of nine points stays fixed during numeric resizing;
+it starts at Center. Choosing an anchor alone does not resize the layer. Border
+and corner drags keep their opposite edge or corner, independent of this choice.
 Return or clicking outside commits one undo step; Escape or empty text restores
 the original size. Aspect locking starts on; Shift temporarily reverses the lock
 while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
@@ -115,6 +118,14 @@ Pivot choices alone at zero angle do not edit pixels or add history. Empty
 numeric text or Escape restores that field; Escape on the canvas cancels the
 whole preview. A new rotation session starts centered. Applying a changed result
 creates one undo step while the canvas and selection keep their coordinates.
+**Perspective** offers a corner selector and signed canvas X/Y coordinates in
+tenths of a pixel. Dragging a grip selects it; its larger accented outline keeps
+a dark rim for contrast. Reset Corner restores that point to its original layer
+corner, and Reset All restores the original rectangle. Both change the preview
+only. Empty text or Escape restores the active field. Crossed, concave, or
+oversized results show an error and cannot be applied until corrected; Apply
+commits one undo step and leaves the selection in canvas coordinates.
+
 **Sample All Layers** on the Magic Wand samples the visible composite and can
 select beyond the active layer.
 
