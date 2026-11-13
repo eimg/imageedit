@@ -116,6 +116,118 @@ enum FormKind {
 }
 
 impl FormKind {
+    fn adjustment_parameters(value: Adjustment) -> Self {
+        let mut form = Self::adjustment_defaults(AdjustKind::of(value));
+        if let Self::Adjustment {
+            brightness,
+            contrast,
+            hue,
+            saturation,
+            lightness,
+            balance,
+            levels,
+            curves,
+            ..
+        } = &mut form
+        {
+            match value {
+                Adjustment::BrightnessContrast {
+                    brightness: b,
+                    contrast: c,
+                } => {
+                    *brightness = b;
+                    *contrast = c;
+                }
+                Adjustment::HueSaturation {
+                    hue: h,
+                    saturation: s,
+                    lightness: l,
+                } => {
+                    *hue = h;
+                    *saturation = s;
+                    *lightness = l;
+                }
+                Adjustment::ColorBalance(value) => *balance = value,
+                Adjustment::Levels(value) => *levels = value,
+                Adjustment::Curves(value) => *curves = value,
+                Adjustment::Desaturate | Adjustment::Invert => {}
+            }
+        }
+        form
+    }
+
+    fn adjustment_value(&self) -> Option<Adjustment> {
+        let Self::Adjustment {
+            operation,
+            brightness,
+            contrast,
+            hue,
+            saturation,
+            lightness,
+            balance,
+            levels,
+            curves,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(match operation {
+            AdjustKind::BrightnessContrast => Adjustment::BrightnessContrast {
+                brightness: *brightness,
+                contrast: *contrast,
+            },
+            AdjustKind::HueSaturation => Adjustment::HueSaturation {
+                hue: *hue,
+                saturation: *saturation,
+                lightness: *lightness,
+            },
+            AdjustKind::Desaturate => Adjustment::Desaturate,
+            AdjustKind::Invert => Adjustment::Invert,
+            AdjustKind::ColorBalance => Adjustment::ColorBalance(*balance),
+            AdjustKind::Levels => Adjustment::Levels(*levels),
+            AdjustKind::Curves => Adjustment::Curves(*curves),
+        })
+    }
+
+    fn filter_parameters(value: FilterSpec) -> Self {
+        let mut form = Self::filter_defaults(FilterKind::of(value), image::Rgba([0, 0, 0, 255]));
+        if let Self::Filter {
+            radius,
+            amount,
+            offset_x,
+            offset_y,
+            opacity,
+            color,
+            ..
+        } = &mut form
+        {
+            match value {
+                FilterSpec::Blur { radius: r } => *radius = r as i16,
+                FilterSpec::Sharpen {
+                    radius: r,
+                    amount: a,
+                } => {
+                    *radius = r as i16;
+                    *amount = i16::from(a);
+                }
+                FilterSpec::Shadow {
+                    radius: r,
+                    offset,
+                    opacity: o,
+                    color: c,
+                } => {
+                    *radius = r as i16;
+                    *offset_x = offset.0 as i16;
+                    *offset_y = offset.1 as i16;
+                    *opacity = i16::from(o);
+                    *color = c;
+                }
+            }
+        }
+        form
+    }
+
     fn adjustment_defaults(operation: AdjustKind) -> Self {
         Self::Adjustment {
             operation,
@@ -653,13 +765,15 @@ impl Workspace {
             });
             return;
         }
-        if self.dialog_open
-            || self.form.is_some()
-            || !self.begin_adjustment(operation.defaults(), window, cx)
+        let form = FormKind::adjustment_parameters(self.effect_memory.adjustment(operation));
+        let Some(adjustment) = form.adjustment_value() else {
+            return;
+        };
+        if self.dialog_open || self.form.is_some() || !self.begin_adjustment(adjustment, window, cx)
         {
             return;
         }
-        self.show_form(FormKind::adjustment_defaults(operation), window, cx);
+        self.show_form(form, window, cx);
         if matches!(operation, AdjustKind::Levels | AdjustKind::Curves) {
             self.start_adjustment_histogram(window, cx);
         }
@@ -679,7 +793,10 @@ impl Workspace {
             return;
         }
         let color = solid_color(self.colors[0]);
-        let form = FormKind::filter_defaults(kind, color);
+        let form = self.effect_memory.filter(kind).map_or_else(
+            || FormKind::filter_defaults(kind, color),
+            FormKind::filter_parameters,
+        );
         let Some(spec) = form.filter_value() else {
             return;
         };
@@ -690,6 +807,7 @@ impl Workspace {
     }
 
     fn reset_effect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let foreground = solid_color(self.colors[0]);
         let Some(form) = self.form.as_mut() else {
             return;
         };
@@ -698,8 +816,8 @@ impl Workspace {
                 form.kind = FormKind::adjustment_defaults(operation);
                 Some(operation.defaults())
             }
-            FormKind::Filter { kind, color, .. } => {
-                form.kind = FormKind::filter_defaults(kind, color);
+            FormKind::Filter { kind, .. } => {
+                form.kind = FormKind::filter_defaults(kind, foreground);
                 None
             }
             _ => return,
@@ -713,6 +831,27 @@ impl Workspace {
         if let Some(filter) = filter {
             self.set_filter(filter, window, cx);
         }
+        cx.notify();
+    }
+
+    fn use_shadow_foreground(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let foreground = solid_color(self.colors[0]);
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        let FormKind::Filter {
+            kind: FilterKind::Shadow,
+            color,
+            ..
+        } = &mut form.kind
+        else {
+            return;
+        };
+        *color = foreground;
+        let Some(spec) = form.kind.filter_value() else {
+            return;
+        };
+        self.set_filter(spec, window, cx);
         cx.notify();
     }
 
@@ -2174,7 +2313,7 @@ impl Workspace {
                     offset_x,
                     offset_y,
                     opacity,
-                    ..
+                    color,
                 } => {
                     let title = match kind {
                         FilterKind::Blur => "Blur",
@@ -2188,6 +2327,12 @@ impl Workspace {
                         .child(self.effect_preview_panel(filter_preview, self.filter_generation.pending(), cx))
                         .child(filter_controls(
                             *kind, *radius, *amount, *offset_x, *offset_y, *opacity, cx,
+                        ))
+                        .when(*kind == FilterKind::Shadow, |body| body.child(
+                            div().flex().items_center().gap_2()
+                                .child(div().size(px(16.)).border_1().border_color(rgb(BORDER)).rounded_sm().bg(rgba(u32::from_be_bytes(color.0))))
+                                .child(div().flex_1().child("Shadow color"))
+                                .child(form_button("Use Foreground", false).on_click(cx.listener(|this, _, window, cx| this.use_shadow_foreground(window, cx))))
                         ));
                     (title, "Apply", body)
                 }
@@ -2569,7 +2714,7 @@ fn filter_controls(
                 FilterSlider::Opacity,
                 cx,
             ))
-            .child("Adds a layer under the active layer, using the foreground color."),
+            .child("Adds a layer under the active layer, using the shadow color shown below."),
     }
 }
 
@@ -2978,6 +3123,97 @@ fn hit_curve_point(bounds: Bounds<Pixels>, position: Point<Pixels>, curve: Curve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembered_adjustment_controls_round_trip_all_channels_and_reset_to_defaults() {
+        let levels = Levels::default()
+            .set_stops(
+                MapChannel::Value,
+                crate::adjustments::LevelStops::IDENTITY.set_input_black(12),
+            )
+            .set_stops(
+                MapChannel::Red,
+                crate::adjustments::LevelStops::IDENTITY.set_gamma(150),
+            )
+            .set_stops(
+                MapChannel::Green,
+                crate::adjustments::LevelStops::IDENTITY.set_output_white(210),
+            )
+            .set_stops(
+                MapChannel::Blue,
+                crate::adjustments::LevelStops::IDENTITY.set_input_white(230),
+            );
+        let curves = Curves::default()
+            .set_curve(
+                MapChannel::Red,
+                Curve::identity().try_add(100, 160).unwrap(),
+            )
+            .set_curve(
+                MapChannel::Blue,
+                Curve::identity().try_add(150, 120).unwrap(),
+            );
+        for value in [
+            Adjustment::BrightnessContrast {
+                brightness: -30,
+                contrast: 24,
+            },
+            Adjustment::HueSaturation {
+                hue: 175,
+                saturation: -41,
+                lightness: 23,
+            },
+            Adjustment::Desaturate,
+            Adjustment::Invert,
+            Adjustment::ColorBalance(ColorBalance {
+                shadows: [-10, 20, 30],
+                midtones: [40, -50, 60],
+                highlights: [-70, 80, 90],
+                preserve_luminosity: false,
+            }),
+            Adjustment::Levels(levels),
+            Adjustment::Curves(curves),
+        ] {
+            let form = FormKind::adjustment_parameters(value);
+            assert_eq!(form.adjustment_value(), Some(value));
+            let kind = AdjustKind::of(value);
+            assert_eq!(
+                FormKind::adjustment_defaults(kind).adjustment_value(),
+                Some(kind.defaults())
+            );
+        }
+    }
+
+    #[test]
+    fn remembered_filter_controls_keep_shadow_color_and_signed_offsets() {
+        for value in [
+            FilterSpec::Blur { radius: 32 },
+            FilterSpec::Sharpen {
+                radius: 3,
+                amount: 89,
+            },
+            FilterSpec::Shadow {
+                radius: 15,
+                offset: (-64, 64),
+                opacity: 38,
+                color: image::Rgba([20, 40, 60, 80]),
+            },
+        ] {
+            assert_eq!(
+                FormKind::filter_parameters(value).filter_value(),
+                Some(value)
+            );
+        }
+        let foreground = image::Rgba([12, 34, 56, 255]);
+        assert_eq!(
+            FormKind::filter_defaults(FilterKind::Shadow, foreground).filter_value(),
+            Some(FilterSpec::Shadow {
+                radius: 4,
+                offset: (8, 8),
+                opacity: 75,
+                color: foreground,
+            })
+        );
+    }
 
     #[test]
     fn font_query_fields_keep_unicode_cursor_boundaries_and_the_full_font_name_limit() {

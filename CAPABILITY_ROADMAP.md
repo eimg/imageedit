@@ -154,7 +154,7 @@ overwritten by Save.
 
 - [x] Preview within the full composition, including selection and layer opacity.
 - [x] Before/after comparison and convenient reset.
-- [ ] Remember prior parameters and repeat the last operation.
+- [x] Remember prior parameters and repeat the last operation.
 - [ ] Re-editable applied effects as a separate project-format/history milestone.
 
 ## Paths and gradients
@@ -595,7 +595,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 9 — alpha and position locks
 
-Implemented; committed at the start of Pass 10:
+Implemented; committed as `993ab0a` at the start of Pass 10:
 
 - Layers have independent Lock Alpha and Lock Position icon toggles beside each
   row's visibility button, with closed/open lock states and explanatory
@@ -676,3 +676,57 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Toggle locks, undo/redo, save/reopen `.lime`, and export a raster copy. Undo to
   the saved state should clear the dirty marker. Try Save on an imported PNG
   after locking it; the app should preserve the settings through project Save.
+
+## Pass 10 — remembered and repeated effects
+
+Implemented; committed at the start of Pass 11:
+
+- All seven adjustments and three filters reopen with their own last successfully
+  applied parameters, shared across tabs for the app session. Color Balance keeps
+  all three ranges and its luminosity option; Levels and Curves retain every
+  channel, not just the currently displayed one. Memory contains parameters only.
+- Filters → Repeat Last Effect (Cmd/Ctrl+F) applies the most recent successful
+  adjustment or filter directly. Reopen Last Effect… (Cmd/Ctrl+Shift+F) opens its
+  remembered dialog for preview and further editing. Native menus on both
+  platforms share these actions, shortcut labels, and availability.
+- Repeat resolves the current visible raster layer and current selection after
+  typed geometry/text commits. Hidden/editable-text layers, busy/modal states,
+  and unfinished canvas previews disable it. It follows alpha/position locks,
+  preserves the active layer, and uses the ordinary background edit/history path.
+  A changed result is one undo step; an empty/unchanged result creates none.
+- Shadow repeats use the whole current source silhouette, insert below it, and
+  preflight the current destination's layer budget and representable offsets.
+  The dialog now shows its remembered color and offers Use Foreground. Reset
+  restores built-in values, including the current foreground for shadows, and
+  returns to After rather than restoring the remembered opening parameters.
+- Memory updates only after an edit successfully publishes. Canceled, identity,
+  pixel-no-op, rejected/stale, and closed-tab edits cannot replace prior values.
+  Submission order prevents slower jobs in another tab from restoring older
+  settings. Undo/Redo change the document without rewriting session preferences.
+- No toolbox tool, dependency, project-format, package-version, or publishing
+  changes. Re-editable effects remain a separate architectural milestone.
+
+Automatic validation: formatting, Clippy with warnings denied, and all 317 tests
+pass. Seven new regression tests cover per-effect memory, out-of-order cross-tab
+completion, failed/no-op/stale publication, current target/selection and lock
+handling, shadow preflight/insertion, and adjustment/filter control round trips.
+The shared native-menu checklist and icon validation include both new actions.
+The macOS bundle is rebuilt and signed for the maintainer's manual testing.
+No interactive or visual smoke tests are run. Rendering and stroke algorithms are
+unchanged; release benchmarks are not repeated for this workflow/UI pass.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Before any applied effect, confirm both new commands are disabled. Apply several
+  adjustment/filter kinds and reopen each ordinary dialog to check independent
+  remembered values. Exercise every Levels/Curves channel and Color Balance range.
+- Cancel a changed preview, Reset/Apply an identity adjustment, and apply with an
+  empty selection; verify they do not replace the last repeatable operation.
+- Repeat on another layer or tab and inside a new feathered selection. Check
+  alpha/position locks, hidden and text layers, typed Move/Scale values, one-step
+  undo/redo, saved revision markers, and both shortcuts on macOS/Windows.
+- Reopen a remembered shadow after changing the foreground. Inspect the swatch,
+  Use Foreground, Before/After, Reset, and Cancel; compare the eventual layer.
+  Repeat with a constrained destination stack and confirm it is rejected cleanly.
+- Leave a gradient/transform/crop/free-selection draft or an active pointer
+  gesture and confirm Repeat/Reopen cannot silently discard that work.

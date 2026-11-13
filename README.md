@@ -153,8 +153,24 @@ Adjustment and filter dialogs preview the whole canvas composition, including
 layer order, offsets, opacity, and the selection's soft coverage. A checker
 shows transparency. **Before** shows the original composition; **After** shows
 the chosen effect. Switching views does not change parameters, and Apply always
-uses those parameters. **Reset** restores the dialog's opening defaults and
+uses those parameters. **Reset** restores the built-in defaults and
 returns to After. Cancel leaves the document unchanged.
+
+Each adjustment and filter remembers its last successfully applied parameters
+for this app session, shared across tabs. Canceled, failed, and unchanged edits
+leave the previous settings in place. Reset changes the current preview without
+overwriting those settings until a changed result is applied.
+Drop Shadow also remembers its color; its dialog shows a swatch and offers
+**Use Foreground**. Reset uses the current foreground color.
+
+**Filters → Repeat Last Effect** applies the last successful adjustment or
+filter to the current layer using the current selection, without a dialog
+(Cmd/Ctrl+F). **Reopen Last Effect…** opens its remembered settings with a preview
+(Cmd/Ctrl+Shift+F). Repeat creates one undo step when it changes pixels or adds a
+shadow layer. Both commands require a visible raster layer and wait for typed
+geometry to commit; unfinished canvas previews must be applied or canceled first.
+Shadow repeats use the whole layer silhouette, as they do in the dialog, and
+check the destination's layer budget before applying.
 
 These fitted previews are limited to 256 pixels on their longest side. Filters
 keep nearby off-canvas pixels that can influence the visible result, and shadows

@@ -4,6 +4,7 @@ mod clipboard;
 mod color;
 mod cursor;
 mod dialogs;
+mod effects;
 mod files;
 mod filter_ui;
 mod gradient_ui;
@@ -322,6 +323,7 @@ pub struct Workspace {
     filter: Option<filter_ui::FilterSession>,
     filter_preview: Option<EffectImages>,
     effect_before: bool,
+    effect_memory: effects::EffectMemory,
     filter_generation: crate::adjustments::PreviewGeneration,
     filter_busy: bool,
     filter_dirty: bool,
@@ -579,6 +581,7 @@ impl Workspace {
             filter: None,
             filter_preview: None,
             effect_before: false,
+            effect_memory: effects::EffectMemory::default(),
             filter_generation: crate::adjustments::PreviewGeneration::default(),
             filter_busy: false,
             filter_dirty: false,
@@ -921,6 +924,7 @@ impl Workspace {
             self.drop_settled_text(window, cx);
         }
         let published = self.publish_change(id, generation, change, result, window, cx);
+        self.effect_memory.finish(id, generation, published);
         self.finish_clone_alignment(id, generation, published);
         if let Some(index) = self.tab_index(id)
             && self.tabs[index].settle_text_commit(published)

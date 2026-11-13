@@ -23,6 +23,18 @@ pub(super) enum AdjustKind {
 }
 
 impl AdjustKind {
+    pub(super) fn of(adjustment: Adjustment) -> Self {
+        match adjustment {
+            Adjustment::BrightnessContrast { .. } => Self::BrightnessContrast,
+            Adjustment::HueSaturation { .. } => Self::HueSaturation,
+            Adjustment::Desaturate => Self::Desaturate,
+            Adjustment::Invert => Self::Invert,
+            Adjustment::ColorBalance(_) => Self::ColorBalance,
+            Adjustment::Levels(_) => Self::Levels,
+            Adjustment::Curves(_) => Self::Curves,
+        }
+    }
+
     pub(super) fn defaults(self) -> Adjustment {
         match self {
             Self::BrightnessContrast => Adjustment::BrightnessContrast {
@@ -204,12 +216,16 @@ impl Workspace {
         let selection = session.selection.clone();
         let layer = session.layer;
         let adjustment = session.adjustment;
+        let target = (session.tab, session.generation);
         self.clear_adjustment(window, cx);
         if adjustment.is_identity() {
             return;
         }
-        self.edit_content(
-            move |content, _, _| content.apply_adjustment(layer, adjustment, &selection),
+        self.edit_effect(
+            super::effects::Effect::Adjustment(adjustment),
+            target,
+            layer,
+            selection,
             window,
             cx,
         );

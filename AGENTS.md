@@ -130,7 +130,7 @@ effect in the canvas composition inside a dialog, and apply inside the selection
 The preview includes offsets, layer opacity/order, and soft selection coverage;
 a checker displays transparency. Before/After switches between the original
 composition and the chosen effect without changing parameters. Apply still uses
-the chosen parameters while Before is displayed. Reset restores opening defaults
+the chosen parameters while Before is displayed. Reset restores built-in defaults
 and switches to After; fixed operations such as Invert retain their operation.
 The layer's alpha stays in place. Cancel
 leaves the pixels unchanged, and identity settings do not create a history
@@ -139,7 +139,17 @@ share a per-channel lookup table, and their histogram skips transparent pixels.
 Blur, Sharpen, and Drop Shadow use the same composition preview controls. Blur and
 Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
 beneath the source from its blurred silhouette. A zero radius or amount does
-not create a history entry. Path (`P`) edits cubic anchors in canvas
+not create a history entry. Each adjustment/filter remembers successful parameters
+for the workspace session, shared across tabs; cancellation, failed/stale jobs,
+and pixel no-ops leave prior settings intact. Filters → Repeat Last Effect
+(Cmd/Ctrl+F) applies the last successful adjustment/filter to the current visible
+raster layer and current selection as one undoable edit. Reopen Last Effect
+(Cmd/Ctrl+Shift+F) opens its remembered parameters with preview. Typed geometry
+and text resolve first; unfinished canvas previews disable these commands.
+Shadow repeat preflights the current destination and keeps the source active.
+Its dialog exposes the remembered color and Use Foreground; Reset restores
+built-in parameters and the current foreground color. Memory is not project data
+and is not undone with the document. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
 first anchor closes the path. Path to Selection fills every closed path with
 nonzero winding. Selection to Path creates closed paths from the current
@@ -291,9 +301,18 @@ document is a single plain layer without paths, guides, or editable text.
   compare these paths to real commits; larger-image filter previews are approximate.
   `EffectImages` keeps a checker-backed Before/After pair. Replaced, canceled,
   and stale pairs release both GPUI images. Preview generation gates publication
-  and supplies the dialogs' updating status. Reset shares the opening form defaults;
-  neither comparison nor reset edits pixels or history. Remembered/repeated effects
-  remain outside the current implementation.
+  and supplies the dialogs' updating status. Reset uses built-in form defaults,
+  independently of remembered parameters; neither comparison nor reset edits pixels
+  or history.
+- `src/workspace/effects.rs` shares the normal/repeated effect commit path and
+  owns bounded, session-only parameter memory for the seven adjustments and three
+  filters. Pending entries contain parameter values plus tab/generation/submission
+  order, never source pixels or selection snapshots. Only successful publication
+  records parameters; late completions from another tab cannot replace newer
+  settings. Repeat resolves the current layer and selection after typed geometry/
+  text commits, honors model locks, and preflights drop-shadow stack/offset limits.
+  No-op/rejected/closed-tab jobs are removed without changing memory. Reopen uses
+  the ordinary dialogs, histogram, preview, Apply, Reset, and Cancel paths.
 - `src/paths.rs` stores cubic paths in canvas coordinates, flattens them, fills
   closed paths with nonzero winding, and builds path outlines from simple and
   mask selections. `src/workspace/path_ui.rs` edits anchors and handles and

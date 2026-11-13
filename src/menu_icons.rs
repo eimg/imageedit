@@ -56,6 +56,7 @@ pub(crate) fn for_action(action: &dyn Action) -> Option<&'static str> {
         ApplyCrop => "crop", CropToSelection => "crop", CropImageToContent => "crop",
         CropLayerToContent => "crop", StrokePath => "stroke", StrokeSelection => "stroke",
         SwapColors => "swap",
+        RepeatLastEffect => "redo", ReopenLastEffect => "redo",
     }
     None
 }

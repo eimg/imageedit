@@ -7,7 +7,6 @@ use crate::adjustments::PREVIEW_EDGE;
 use crate::commands::{DropShadow, GaussianBlur, Sharpen};
 use crate::document::LayerId;
 use crate::filters::FilterSpec;
-use crate::preview::Dirty;
 use crate::selection::Selection;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15,6 +14,16 @@ pub(super) enum FilterKind {
     Blur,
     Sharpen,
     Shadow,
+}
+
+impl FilterKind {
+    pub(super) fn of(spec: FilterSpec) -> Self {
+        match spec {
+            FilterSpec::Blur { .. } => Self::Blur,
+            FilterSpec::Sharpen { .. } => Self::Sharpen,
+            FilterSpec::Shadow { .. } => Self::Shadow,
+        }
+    }
 }
 
 pub(super) struct FilterSession {
@@ -123,6 +132,7 @@ impl Workspace {
         let selection = session.selection.clone();
         let layer = session.layer;
         let spec = session.spec;
+        let target = (session.tab, session.generation);
         if let FilterSpec::Shadow {
             radius,
             opacity,
@@ -147,13 +157,11 @@ impl Workspace {
         if spec.is_identity() {
             return true;
         }
-        self.edit_content(
-            move |content, _, _| match spec {
-                FilterSpec::Shadow { .. } => content
-                    .place_drop_shadow(layer, spec)
-                    .map_or(Dirty::None, Dirty::Region),
-                _ => content.apply_filter(layer, spec, &selection),
-            },
+        self.edit_effect(
+            super::effects::Effect::Filter(spec),
+            target,
+            layer,
+            selection,
             window,
             cx,
         );

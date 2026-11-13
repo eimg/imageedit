@@ -141,6 +141,7 @@ impl Render for Workspace {
                 let root = self.bind_transform_actions(root, cx);
                 let root = self.bind_adjustment_actions(root, cx);
                 let root = self.bind_filter_actions(root, cx);
+                let root = self.bind_effect_actions(root, cx);
                 let root = self.bind_path_actions(root, cx);
                 let root = self.bind_stroke_actions(root, cx);
                 let root = self.bind_text_actions(root, cx);
