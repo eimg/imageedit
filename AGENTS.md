@@ -278,7 +278,17 @@ or switch between RGB and grayscale. Copy and Cut use the active layer inside th
 selection, Paste adds a centered layer, and Open as Layers imports images
 the same way. File → Open also imports PDFs through a dialog that selects all
 pages or a range, sets a resolution from 1 to 1200 DPI, and renders pages as
-layers on the first page's canvas or as separate tabs. PDF imports use the
+layers on the first page's canvas, layers on a Fit All Pages canvas, or separate
+tabs at each page's own size. White is the default page background; Transparent
+preserves unpainted areas and source opacity without removing painted white.
+Fit All Pages takes the maximum width and height across the selected range after
+DPI rounding, and validates the combined canvas before rendering. All imported
+layers retain their pixels and use the same integer centering rule, including
+the first page. The dialog shows canvas dimensions and warns about pages extending
+outside the first-page or existing canvas. Open as Layers never resizes its target.
+Successful imports remember DPI/background during the session, and successful
+new-document imports also remember mode/canvas choice. Failed/canceled imports
+do not change defaults; page ranges reset per source. PDF imports use the
 normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
 save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
 one PDF at a time. PDF read/inspection/render/preparation jobs show progress and
@@ -488,13 +498,21 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   projects written before those controls were added.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
-  a white background. `PdfSource` retains the immutable shared `PdfData` bytes
+  a white or transparent page background. Its `layered_canvas_size` validates
+  First Page/Fit All Pages canvas bounds independently of individual page budgets;
+  portrait/landscape maxima can exceed the canvas pixel budget even when each
+  page fits. Transparent rendering requests straight RGBA from the renderer.
+  `PdfSource` retains the immutable shared `PdfData` bytes
   and inspected dimensions; render jobs parse those same bytes without reopening
   the path. `PdfControl` checks cancellation between bounded read chunks, page
   inspection/rendering, and document preparation; renderer/parser calls themselves
   remain uninterruptible. `src/workspace/pdf_ui.rs` owns probe and render jobs and
-  turns the result into new documents or layers above the active layer. Import
-  results publish only while their import token and target tab are current and
+  turns the result into new documents or layers above the active layer. New
+  layered preparation checks the complete rendered range and stack admission,
+  rejects incomplete insertions, and centers every page consistently even for
+  odd dimensions. Session `PdfPreferences` update only after successful document
+  or existing-layer publication; importing into layers preserves the remembered
+  new-document mode/canvas policy. Import results publish only while their import token and target tab are current and
   cancellation has not been requested. Dropping a job requests cancellation.
   An event stream carries stage and page progress, without idle polling.
   Probe/page-tree and rendering panics are converted into import errors. Page

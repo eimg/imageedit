@@ -21,7 +21,7 @@ use crate::document::{
     Document, FileFormat, LayerId, MAX_LAYER_NAME_CHARS, file_name, solid_color,
 };
 use crate::filters::{self, FilterSpec};
-use crate::pdf::{self, DEFAULT_DPI, PdfMode, PdfOptions, PdfSource};
+use crate::pdf::{self, PdfBackground, PdfCanvas, PdfMode, PdfOptions, PdfSource};
 use crate::preview::Dirty;
 use crate::transform::{Anchor, Resample};
 
@@ -116,6 +116,8 @@ enum FormKind {
         to: Field,
         all_pages: bool,
         mode: PdfMode,
+        background: PdfBackground,
+        canvas: PdfCanvas,
         target: PdfTarget,
         active: usize,
     },
@@ -727,11 +729,17 @@ impl Workspace {
         self.show_form(
             FormKind::PdfImport {
                 path,
-                dpi: Field::new(DEFAULT_DPI.to_string()),
+                dpi: Field::new(self.pdf_preferences.dpi.to_string()),
                 from: Field::new("1".into()),
                 to: Field::new(source.info.pages.to_string()),
                 all_pages: true,
-                mode: PdfMode::Layers,
+                mode: if target == PdfTarget::NewDocument {
+                    self.pdf_preferences.mode
+                } else {
+                    PdfMode::Layers
+                },
+                background: self.pdf_preferences.background,
+                canvas: self.pdf_preferences.canvas,
                 target,
                 source,
                 active: 0,
@@ -1150,6 +1158,8 @@ impl Workspace {
                 to,
                 all_pages,
                 mode,
+                background,
+                canvas,
                 target,
                 ..
             } => {
@@ -1182,6 +1192,12 @@ impl Workspace {
                     last,
                     dpi,
                     mode,
+                    background: *background,
+                    canvas: if *target == PdfTarget::NewDocument {
+                        *canvas
+                    } else {
+                        PdfCanvas::FirstPage
+                    },
                 };
                 let sizes = match pdf::validate_options(info, &options) {
                     Ok(sizes) => sizes,
@@ -1889,6 +1905,8 @@ impl Workspace {
                     to,
                     all_pages,
                     mode,
+                    background,
+                    canvas,
                     target,
                     active,
                 } => {
@@ -1898,27 +1916,48 @@ impl Workspace {
                     } else {
                         format!("{} pages", info.pages)
                     };
-                    let first_page = if *all_pages {
-                        Some(1)
-                    } else {
-                        from.text
-                            .parse::<usize>()
-                            .ok()
-                            .filter(|page| (1..=info.pages).contains(page))
+                    let preview = (|| -> Result<_, String> {
+                        let dpi = dpi.text.parse::<u32>().map_err(|_| "Enter a resolution in DPI.".to_owned())?;
+                        let (first, last) = if *all_pages { (1, info.pages) }
+                            else {
+                                let first = from.text.parse::<usize>().map_err(|_| "Enter a page range.".to_owned())?;
+                                let last = to.text.parse::<usize>().map_err(|_| "Enter a page range.".to_owned())?;
+                                (first, last)
+                            };
+                        let options = PdfOptions {
+                            path: path.clone(), first, last, dpi,
+                            mode: if *target == PdfTarget::NewDocument { *mode } else { PdfMode::Layers },
+                            background: *background,
+                            canvas: if *target == PdfTarget::NewDocument { *canvas } else { PdfCanvas::FirstPage },
+                        };
+                        let sizes = pdf::validate_options(info, &options).map_err(|error| error.to_string())?;
+                        Ok((options, sizes))
+                    })();
+                    let target_canvas = match target {
+                        PdfTarget::NewDocument => preview.as_ref().ok().and_then(|(options, sizes)| {
+                            (options.mode == PdfMode::Layers).then(|| pdf::layered_canvas_size(sizes, options.canvas).ok()).flatten()
+                        }),
+                        PdfTarget::Layers { tab_id, .. } => self.active_tab().filter(|tab| tab.id == *tab_id).map(|tab| tab.document.content.size()),
                     };
-                    let estimate = match (
-                        dpi.text.parse::<u32>().ok(),
-                        first_page.and_then(|page| info.sizes.get(page - 1)),
-                    ) {
-                        (Some(dpi), Some(size)) => {
-                            let (width, height) = pdf::scaled_page_size(*size, dpi);
-                            format!(
-                                "Page {} at {dpi} DPI: {width} × {height} px",
-                                first_page.unwrap_or(1)
-                            )
+                    let estimate = preview.as_ref().map_or_else(
+                        |error| error.clone(),
+                        |(options, sizes)| {
+                            if *target == PdfTarget::NewDocument && let Some((width, height)) = target_canvas {
+                                format!("Canvas: {width} × {height} px at {} DPI", options.dpi)
+                            } else {
+                                format!("Page {} at {} DPI: {} × {} px", options.first, options.dpi, sizes[0].0, sizes[0].1)
+                            }
+                        },
+                    );
+                    let clipping = preview.as_ref().ok().and_then(|(_, sizes)| {
+                        let (width, height) = target_canvas?;
+                        let count = sizes.iter().filter(|size| size.0 > width || size.1 > height).count();
+                        match count {
+                            0 => None,
+                            1 => Some("1 selected page extends outside the canvas. Its pixels are retained in its layer.".to_owned()),
+                            _ => Some(format!("{count} selected pages extend outside the canvas. Their pixels are retained in the layers.")),
                         }
-                        _ => "Enter a page and a resolution in DPI.".to_owned(),
-                    };
+                    });
                     let range = div()
                         .flex()
                         .gap_2()
@@ -2032,6 +2071,20 @@ impl Workspace {
                     } else {
                         modes
                     };
+                    let backgrounds = div().flex().gap_2().children([
+                        ("White", PdfBackground::White), ("Transparent", PdfBackground::Transparent),
+                    ].map(|(label, choice)| form_button(label, *background == choice).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Form { kind: FormKind::PdfImport { background, .. }, .. }) = &mut this.form {
+                            *background = choice; cx.notify();
+                        }
+                    }))));
+                    let canvases = div().flex().gap_2().children([
+                        ("First Page", PdfCanvas::FirstPage), ("Fit All Pages", PdfCanvas::FitAllPages),
+                    ].map(|(label, choice)| form_button(label, *canvas == choice).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Form { kind: FormKind::PdfImport { canvas, .. }, .. }) = &mut this.form {
+                            *canvas = choice; cx.notify();
+                        }
+                    }))));
                     let body = div()
                         .flex()
                         .flex_col()
@@ -2066,19 +2119,15 @@ impl Workspace {
                         .when(*target == PdfTarget::NewDocument, |body| {
                             body.child(div().child("Open pages as").child(modes.mt_1()))
                         })
+                        .child(div().child("Page background").child(backgrounds.mt_1()))
+                        .when(*target == PdfTarget::NewDocument && *mode == PdfMode::Layers && info.pages > 1, |body| {
+                            body.child(div().child("Canvas size").child(canvases.mt_1()))
+                        })
                         .child(div().text_xs().text_color(rgb(MUTED)).child(estimate))
-                        .when(
-                            *target == PdfTarget::NewDocument
-                                && *mode == PdfMode::Layers
-                                && info.pages > 1,
-                            |body| {
-                                body.child(
-                                    div().text_xs().text_color(rgb(MUTED)).child(
-                                        "Pages are added as layers centered on the first page.",
-                                    ),
-                                )
-                            },
-                        );
+                        .when_some(clipping, |body, warning| body.child(div().text_xs().text_color(rgb(0xffd699)).child(warning)))
+                        .when(matches!(target, PdfTarget::Layers { .. }), |body| {
+                            body.child(div().text_xs().text_color(rgb(MUTED)).child("Pages are centered on the existing canvas; its size stays unchanged."))
+                        });
                     ("Import PDF", "Import", body)
                 }
                 FormKind::Color {

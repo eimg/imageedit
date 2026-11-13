@@ -138,8 +138,9 @@ only, renders onto white, and does not preserve editable PDF text/vector objects
 - [ ] Consider incremental rendering/preparation to lower peak working memory,
       while retaining deliberate publication and undo semantics.
 - [ ] Preview page thumbnails and allow noncontiguous page selection.
-- [ ] Offer white versus transparent page background and remember import options.
-- [ ] Offer layered canvas sizing (first page versus largest selected page), with
+- [x] Offer white versus transparent page background and remember import options
+      for the session.
+- [x] Offer layered canvas sizing (first page versus fitting all selected pages), with
       an indication when larger page layers extend outside the first-page canvas.
 - [x] Detect a source PDF changed between probe and render, or retain a consistent
       source snapshot for the import session.
@@ -1034,7 +1035,7 @@ Manual interaction testing stays with the maintainer. Useful checks:
 
 ## Pass 16 — optional bounded stroke smoothing
 
-Implemented; committed at the start of Pass 17:
+Implemented; committed as `8f87605` at the start of Pass 17:
 
 - Brush, Eraser, Blur, Sharpen, and Clone Stamp offer Off/Light/Strong smoothing
   in the existing brush options, in a full-width group below a regular mixed-case
@@ -1085,3 +1086,64 @@ Manual interaction testing stays with the maintainer. Useful checks:
 - Cancel a live tail, immediately start another stroke, change tabs/layers/tools,
   and lose/regain app focus. Confirm canceled work cannot resume or change the
   new target. Changing smoothing alone should not dirty a document.
+
+
+## Pass 17 — PDF backgrounds, canvas sizing, and session defaults
+
+Implemented; committed at the start of Pass 18:
+
+- PDF import offers White (default) and Transparent page backgrounds. Rendering
+  starts with that background and retains straight RGBA opacity; transparent
+  import does not remove actual white content in a PDF. The choice applies to
+  new images and Open as Layers without adding an artificial background layer.
+- New layered imports offer First Page or Fit All Pages canvas sizing. Fit All
+  takes the maximum selected width and height after the renderer's DPI rounding,
+  accommodating mixed portrait/landscape pages without resampling their pixels.
+  Every page is centered with the same integer rounding, including the first.
+  Separate images keep their own dimensions; existing-layer imports keep their
+  destination canvas unchanged.
+- The dialog shows resulting canvas dimensions and warns when selected pages
+  extend outside the first-page or existing canvas. Full page pixels stay in
+  their layers. Page-range/DPI and composite-canvas validation run for the live
+  readout as well as Import; combined width/height maxima must fit the canvas
+  pixel budget even when every individual page is otherwise valid.
+- Successful imports remember DPI/background for the workspace session.
+  Successful new-document imports also remember Layers/Images and canvas policy;
+  Open as Layers cannot overwrite those new-document choices. Cancel, failure,
+  stale targets, or refused publication do not update defaults. Ranges start
+  fresh per file. Preferences are session-only and are not project metadata.
+- New layered preparation verifies the complete page count, page sizes, layer
+  capacity, and pixel admission, and rejects incomplete insertion rather than
+  publishing a prefix. Existing queued imports, immutable source snapshots,
+  cooperative cancellation, target-generation checks, and one-step insertion
+  history retain their contracts.
+- Updated README and AGENTS. No new toolbox tool, dependency, project format,
+  package version, installer, icon, or release publishing change. The broader
+  PDF fixture matrix, noncontiguous pages/thumbnails, interruptible workers,
+  incremental preparation, and source reimport metadata remain planned.
+
+Automatic validation: formatting, Clippy with warnings denied, all 369 tests,
+and both release benchmarks pass. Five new regression tests cover actual PDF
+transparent/white rendering with translucent art and painted white, combined
+canvas preflight, consistent odd-dimension centering without resampling, separate
+image sizing, complete-range/stack rejection, and remembered-default target
+semantics. Existing cancellation, immutable-source, import-budget, and one-step
+history tests remain passing; the insertion test also verifies existing canvas
+and full page dimensions. `dist/Lime.app` is rebuilt and its signature verified.
+No interactive or visual smoke tests are run.
+
+Manual interaction testing stays with the maintainer. Useful checks:
+
+- Import a PDF with unpainted margins, translucent art, and painted white shapes
+  on White and Transparent. Check canvas/thumbnail checkers, source opacity,
+  save/reopen, and flattened PNG export. Actual white artwork should remain white.
+- Import mixed portrait/landscape and odd-sized pages using First Page and Fit
+  All Pages, change DPI and range, and check the canvas readout and clipping
+  warning. Confirm all page layers keep full pixels and align consistently.
+- Compare As Images and Open as Layers. Separate tabs should use each page's
+  size; existing images must keep their canvas. Undo one existing-layer import
+  should remove its entire selected range.
+- Queue several PDFs and confirm successful choices carry forward. Cancel an
+  import, use invalid/oversized choices, or let a target become stale, then check
+  defaults stay at the last successful settings. Open as Layers must preserve
+  the remembered new-document mode/canvas policy; restart resets session defaults.

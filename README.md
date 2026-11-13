@@ -61,8 +61,18 @@ check offers a retry and a link to the releases page if it cannot connect.
 
 Open a PNG, JPEG, WebP, or PDF, drop one into the workspace, or create a new image.
 PDF files open an import dialog: choose all pages or a range, set the resolution
-in DPI, and add the pages as layers or as separate images. A PDF import becomes a
-new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
+in DPI, and add the pages as layers or as separate images. **Page background**
+can be White (the default) or Transparent. Transparent keeps unpainted page
+areas clear and preserves PDF opacity; white shapes painted in the PDF stay
+white. For a new layered image, **Canvas size** offers First Page or **Fit All
+Pages**, which fits the greatest selected width and height. Every page stays at
+its rendered size and is centered. The dialog shows the canvas size and warns
+when selected pages extend outside it; those layer pixels are retained.
+Separate images keep each page's own size, and Open as Layers keeps the existing
+canvas size. Successful imports remember DPI and page background for the session;
+new-document imports also remember Layers/Images and canvas sizing. Canceling
+or failing an import leaves those defaults unchanged. Page ranges reset for each
+file. A PDF import becomes a new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
 not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
 together keep their import dialogs queued. Pages are rasterized at the chosen
 DPI; PDF text and vector objects do not become editable text or paths.

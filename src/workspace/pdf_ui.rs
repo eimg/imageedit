@@ -10,7 +10,9 @@ use gpui::{Context, Div, Window, div, prelude::*, px, rgb, rgba};
 use super::Workspace;
 use crate::{
     document::{self, Document, DocumentContent, ImageLayer, InsertStop, LayerId},
-    pdf::{self, PdfControl, PdfMode, PdfOptions, PdfProgress, PdfSource},
+    pdf::{
+        self, PdfBackground, PdfCanvas, PdfControl, PdfMode, PdfOptions, PdfProgress, PdfSource,
+    },
     preview::Dirty,
 };
 
@@ -22,6 +24,36 @@ pub(super) enum PdfTarget {
         generation: u64,
         above: LayerId,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PdfPreferences {
+    pub dpi: u32,
+    pub mode: PdfMode,
+    pub background: PdfBackground,
+    pub canvas: PdfCanvas,
+}
+
+impl Default for PdfPreferences {
+    fn default() -> Self {
+        Self {
+            dpi: pdf::DEFAULT_DPI,
+            mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
+        }
+    }
+}
+
+impl PdfPreferences {
+    fn remember_success(&mut self, options: &PdfOptions, target: PdfTarget) {
+        self.dpi = options.dpi;
+        self.background = options.background;
+        if target == PdfTarget::NewDocument {
+            self.mode = options.mode;
+            self.canvas = options.canvas;
+        }
+    }
 }
 
 pub(super) enum PendingOpen {
@@ -439,6 +471,7 @@ impl Workspace {
                             for document in documents {
                                 workspace.show_document(document, window, cx);
                             }
+                            workspace.pdf_preferences.remember_success(&options, target);
                         }
                         Ok(PdfResult::Layers { change, added }) => {
                             if let Err(error) = workspace.validate_pdf_target(target, &[]) {
@@ -455,6 +488,7 @@ impl Workspace {
                                     cx,
                                 )
                             {
+                                workspace.pdf_preferences.remember_success(&options, target);
                                 let layers = if added == 1 { "layer" } else { "layers" };
                                 workspace
                                     .notice(&format!("Added {added} {layers} from the PDF."), cx);
@@ -479,6 +513,22 @@ fn prepare_documents(
 ) -> anyhow::Result<Vec<Document>> {
     control.check()?;
     anyhow::ensure!(!pages.is_empty(), "The PDF import has no rendered pages.");
+    anyhow::ensure!(
+        pages.len() <= document::MAX_LAYERS,
+        "The PDF import has too many pages."
+    );
+    anyhow::ensure!(
+        options.first > 0
+            && options
+                .last
+                .checked_sub(options.first)
+                .and_then(|count| count.checked_add(1))
+                == Some(pages.len()),
+        "The PDF import did not render the complete page range."
+    );
+    for page in &pages {
+        Document::validate_size(page.width(), page.height())?;
+    }
     let name = document::file_name(&options.path);
     let total = if options.mode == PdfMode::Separate {
         pages.len()
@@ -515,7 +565,7 @@ fn prepare_documents(
         }
         documents
     } else {
-        let document = Document::from_content(name, document_from_layers(pages, options.first));
+        let document = Document::from_content(name, document_from_layers(pages, options)?);
         control.check()?;
         progress(PdfProgress::Preparing { done: 1, total });
         vec![document]
@@ -524,26 +574,200 @@ fn prepare_documents(
     Ok(documents)
 }
 
-fn document_from_layers(mut pages: Vec<image::RgbaImage>, first_page: usize) -> DocumentContent {
-    let first = pages.remove(0);
-    let mut content = DocumentContent::single_layer(format!("Page {first_page}"), first);
+fn document_from_layers(
+    pages: Vec<image::RgbaImage>,
+    options: &PdfOptions,
+) -> anyhow::Result<DocumentContent> {
+    let sizes: Vec<_> = pages.iter().map(image::RgbaImage::dimensions).collect();
+    let canvas = pdf::layered_canvas_size(&sizes, options.canvas)?;
+    let mut pages = pages.into_iter();
+    let first = pages
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("The PDF import has no pages."))?;
+    let mut content = DocumentContent::single_layer(format!("Page {}", options.first), first);
+    if canvas != content.size() {
+        anyhow::ensure!(
+            content
+                .resize_canvas(canvas.0, canvas.1, crate::transform::Anchor::Center)
+                .is_some(),
+            "The PDF canvas could not be sized."
+        );
+    }
+    // Canvas resizing and imported layers round odd centers differently. Use
+    // the same centering rule for the first page as for every inserted page.
+    content.align_layer(content.top_layer_id(), crate::geometry::Alignment::Both);
+    content.room_for_sizes(&sizes[1..]).map_err(|_| {
+        anyhow::anyhow!("The selected pages exceed the document's layer or pixel budget.")
+    })?;
     let above = content.top_layer_id();
     let layers = pages
-        .into_iter()
         .enumerate()
         .map(|(index, pixels)| ImageLayer {
-            name: format!("Page {}", first_page + index + 1),
+            name: format!("Page {}", options.first + index + 1),
             pixels,
         })
         .collect();
-    content.insert_centered_layers(above, layers);
-    content
+    let inserted = content.insert_centered_layers(above, layers);
+    anyhow::ensure!(
+        inserted.added == sizes.len() - 1,
+        "The complete PDF layer stack could not be prepared."
+    );
+    Ok(content)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn fit_all_pages_centers_lossless_page_layers_and_separate_images_keep_their_own_sizes() {
+        let options = PdfOptions {
+            path: "mixed.pdf".into(),
+            first: 4,
+            last: 6,
+            dpi: 72,
+            mode: PdfMode::Layers,
+            background: PdfBackground::Transparent,
+            canvas: PdfCanvas::FitAllPages,
+        };
+        let pages = vec![
+            RgbaImage::from_pixel(3, 7, Rgba([200, 10, 20, 128])),
+            RgbaImage::from_pixel(8, 2, Rgba([20, 30, 220, 64])),
+            RgbaImage::from_pixel(4, 3, Rgba([0; 4])),
+        ];
+        let documents =
+            prepare_documents(&options, pages.clone(), &PdfControl::default(), |_| {}).unwrap();
+        let document = &documents[0];
+        assert_eq!(document.content.size(), (8, 7));
+        assert!(document.canvas.preview.has_transparency);
+        for (index, layer) in document.content.layers().iter().enumerate() {
+            assert_eq!(layer.name, format!("Page {}", index + 4));
+            assert_eq!(layer.pixels.as_ref(), &pages[index]);
+            assert_eq!(layer.offset, [(2, 0), (0, 2), (2, 2)][index]);
+            assert!(layer.offset.0 >= 0 && layer.offset.1 >= 0);
+        }
+        assert!(document.path.is_none());
+        assert_eq!(document.format, document::FileFormat::Project);
+        let first_page = prepare_documents(
+            &PdfOptions {
+                canvas: PdfCanvas::FirstPage,
+                ..options.clone()
+            },
+            pages.clone(),
+            &PdfControl::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(first_page[0].content.size(), (3, 7));
+        assert_eq!(first_page[0].content.layers()[1].offset, (-2, 2));
+        assert_eq!(first_page[0].content.layers()[1].pixels.as_ref(), &pages[1]);
+        let separate = prepare_documents(
+            &PdfOptions {
+                mode: PdfMode::Separate,
+                ..options
+            },
+            pages.clone(),
+            &PdfControl::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(separate.len(), 3);
+        for (index, document) in separate.iter().enumerate() {
+            assert_eq!(document.content.size(), pages[index].dimensions());
+            assert_eq!(document.content.layers()[0].offset, (0, 0));
+            assert_eq!(document.content.layers()[0].pixels.as_ref(), &pages[index]);
+        }
+    }
+
+    #[test]
+    fn incomplete_or_over_budget_pdf_stacks_never_prepare_a_partial_document() {
+        let mut options = PdfOptions {
+            path: "pages.pdf".into(),
+            first: 2,
+            last: 3,
+            dpi: 72,
+            mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
+        };
+        let page = RgbaImage::from_pixel(1, 1, Rgba([255; 4]));
+        assert!(
+            prepare_documents(&options, vec![page.clone()], &PdfControl::default(), |_| {})
+                .is_err()
+        );
+        options.first = 1;
+        options.last = document::MAX_LAYERS + 1;
+        assert!(
+            prepare_documents(
+                &options,
+                vec![page.clone(); document::MAX_LAYERS + 1],
+                &PdfControl::default(),
+                |_| {}
+            )
+            .is_err()
+        );
+        options.last = 1;
+        assert!(
+            prepare_documents(
+                &options,
+                vec![RgbaImage::new(0, 1)],
+                &PdfControl::default(),
+                |_| {}
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn successful_import_preferences_keep_new_document_choices_when_importing_into_existing_layers()
+    {
+        let mut preferences = PdfPreferences::default();
+        assert_eq!(preferences.dpi, pdf::DEFAULT_DPI);
+        assert_eq!(preferences.background, PdfBackground::White);
+        assert_eq!(preferences.canvas, PdfCanvas::FirstPage);
+        assert_eq!(preferences.mode, PdfMode::Layers);
+        let mut options = PdfOptions {
+            path: "art.pdf".into(),
+            first: 3,
+            last: 8,
+            dpi: 300,
+            mode: PdfMode::Separate,
+            background: PdfBackground::Transparent,
+            canvas: PdfCanvas::FitAllPages,
+        };
+        preferences.remember_success(&options, PdfTarget::NewDocument);
+        assert_eq!(
+            preferences,
+            PdfPreferences {
+                dpi: 300,
+                mode: PdfMode::Separate,
+                background: PdfBackground::Transparent,
+                canvas: PdfCanvas::FitAllPages
+            }
+        );
+        options.dpi = 72;
+        options.background = PdfBackground::White;
+        options.mode = PdfMode::Layers;
+        options.canvas = PdfCanvas::FirstPage;
+        preferences.remember_success(
+            &options,
+            PdfTarget::Layers {
+                tab_id: 0,
+                generation: 0,
+                above: LayerId(0),
+            },
+        );
+        assert_eq!(
+            preferences,
+            PdfPreferences {
+                dpi: 72,
+                mode: PdfMode::Separate,
+                background: PdfBackground::White,
+                canvas: PdfCanvas::FitAllPages
+            }
+        );
+    }
 
     #[test]
     fn cancellation_and_job_teardown_reject_late_publication() {
@@ -585,6 +809,8 @@ mod tests {
                 last: 2,
                 dpi: 72,
                 mode,
+                background: PdfBackground::White,
+                canvas: PdfCanvas::FirstPage,
             };
             for stop_done in 0..=if mode == PdfMode::Separate { 2 } else { 1 } {
                 let control = PdfControl::default();
@@ -634,6 +860,9 @@ mod tests {
         );
         assert_eq!(tab.selection, selection);
         assert_eq!(tab.document.content.layers().len(), 3);
+        assert_eq!(tab.document.content.size(), (2, 2));
+        assert_eq!(tab.document.content.layers()[1].pixels.dimensions(), (2, 3));
+        assert_eq!(tab.document.content.layers()[2].pixels.dimensions(), (3, 2));
         assert_eq!(tab.document.content.layers()[1].name, "Page 3");
         assert_eq!(tab.document.content.layers()[2].name, "Page 4");
         assert_eq!(tab.active_layer, tab.document.content.layers()[2].id);
@@ -652,6 +881,8 @@ mod tests {
             last: 4,
             dpi: 72,
             mode: PdfMode::Separate,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         let pages = || {
             vec![

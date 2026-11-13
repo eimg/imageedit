@@ -15,7 +15,10 @@ use hayro::{
     hayro_interpret::InterpreterSettings,
     hayro_syntax::{Pdf, PdfData},
     render,
-    vello_cpu::{color::palette::css::WHITE, peniko::ImageAlphaType},
+    vello_cpu::{
+        color::palette::css::{TRANSPARENT, WHITE},
+        peniko::ImageAlphaType,
+    },
 };
 use image::RgbaImage;
 
@@ -31,6 +34,20 @@ pub const MAX_DPI: u32 = 1200;
 pub enum PdfMode {
     Layers,
     Separate,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PdfBackground {
+    #[default]
+    White,
+    Transparent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PdfCanvas {
+    #[default]
+    FirstPage,
+    FitAllPages,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +113,23 @@ pub struct PdfOptions {
     pub last: usize,
     pub dpi: u32,
     pub mode: PdfMode,
+    pub background: PdfBackground,
+    pub canvas: PdfCanvas,
+}
+
+pub fn layered_canvas_size(sizes: &[(u32, u32)], policy: PdfCanvas) -> Result<(u32, u32)> {
+    let mut canvas = *sizes
+        .first()
+        .ok_or_else(|| anyhow!("Choose at least one page."))?;
+    if policy == PdfCanvas::FitAllPages {
+        for size in sizes {
+            canvas = (canvas.0.max(size.0), canvas.1.max(size.1));
+        }
+    }
+    Document::validate_size(canvas.0, canvas.1).context(
+        "The layered canvas is too large. Use First Page, lower the DPI, or choose fewer pages",
+    )?;
+    Ok(canvas)
 }
 
 pub fn is_pdf_path(path: &Path) -> bool {
@@ -195,6 +229,9 @@ pub fn validate_options(info: &PdfInfo, options: &PdfOptions) -> Result<Vec<(u32
             "The selected pages need too much memory. Use a lower resolution or fewer pages."
         );
         sizes.push(size);
+    }
+    if options.mode == PdfMode::Layers {
+        layered_canvas_size(&sizes, options.canvas)?;
     }
     Ok(sizes)
 }
@@ -313,7 +350,10 @@ fn render_data(
                 &PixmapSettings {
                     x_scale: scale,
                     y_scale: scale,
-                    bg_color: WHITE,
+                    bg_color: match options.background {
+                        PdfBackground::White => WHITE,
+                        PdfBackground::Transparent => TRANSPARENT,
+                    },
                 },
             )
         }))
@@ -350,6 +390,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transparent_and_white_backgrounds_preserve_real_pdf_alpha_and_painted_white() {
+        let data = test_pdf_with(
+            &[(16., 16.)],
+            "/ExtGState << /GS1 << /Type /ExtGState /ca 0.5 /CA 0.5 >> >>",
+            |_, _| "q /GS1 gs 1 0 0 rg 2 2 6 6 re f Q\n1 1 1 rg 10 10 4 4 re f\n".into(),
+        );
+        let mut options = PdfOptions {
+            path: "alpha.pdf".into(),
+            first: 1,
+            last: 1,
+            dpi: 72,
+            mode: PdfMode::Separate,
+            background: PdfBackground::Transparent,
+            canvas: PdfCanvas::FirstPage,
+        };
+        let transparent = render_data(
+            data.clone().into(),
+            &options,
+            &PdfControl::default(),
+            &|_| {},
+        )
+        .unwrap()
+        .remove(0);
+        options.background = PdfBackground::White;
+        let white = render_data(data.into(), &options, &PdfControl::default(), &|_| {})
+            .unwrap()
+            .remove(0);
+        assert_eq!(transparent.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(white.get_pixel(0, 0).0, [255; 4]);
+        let red = transparent.get_pixel(4, 12).0;
+        assert_eq!(&red[..3], &[255, 0, 0]);
+        assert!(red[3].abs_diff(128) <= 1);
+        let flattened = white.get_pixel(4, 12).0;
+        assert_eq!((flattened[0], flattened[3]), (255, 255));
+        assert!(flattened[1].abs_diff(127) <= 1 && flattened[2].abs_diff(127) <= 1);
+        // Transparent import does not remove an actual white rectangle in the PDF.
+        assert_eq!(transparent.get_pixel(12, 4).0, [255; 4]);
+        assert_eq!(white.get_pixel(12, 4).0, [255; 4]);
+    }
+
+    #[test]
+    fn fit_all_pages_uses_both_maximum_edges_and_rejects_an_oversized_combination() {
+        assert_eq!(
+            layered_canvas_size(&[(3, 8), (10, 2), (5, 5)], PdfCanvas::FitAllPages).unwrap(),
+            (10, 8)
+        );
+        assert_eq!(
+            layered_canvas_size(&[(3, 8), (10, 2)], PdfCanvas::FirstPage).unwrap(),
+            (3, 8)
+        );
+        assert!(layered_canvas_size(&[], PdfCanvas::FitAllPages).is_err());
+        let info = PdfInfo {
+            pages: 2,
+            sizes: vec![(16_000., 1.), (1., 16_000.)],
+        };
+        let mut options = PdfOptions {
+            path: "mixed.pdf".into(),
+            first: 1,
+            last: 2,
+            dpi: 72,
+            mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
+        };
+        assert!(validate_options(&info, &options).is_ok());
+        options.canvas = PdfCanvas::FitAllPages;
+        let error = validate_options(&info, &options).unwrap_err().to_string();
+        assert!(error.contains("layered canvas"));
+        options.mode = PdfMode::Separate;
+        assert!(validate_options(&info, &options).is_ok());
+        options.mode = PdfMode::Layers;
+        options.first = 2;
+        assert_eq!(
+            validate_options(&info, &options).unwrap(),
+            vec![(1, 16_000)]
+        );
+    }
+
+    #[test]
     fn source_snapshot_survives_replacement_and_removal_of_the_original_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.pdf");
@@ -372,6 +491,8 @@ mod tests {
             last: 2,
             dpi: 72,
             mode: PdfMode::Separate,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         let pages = render_pages(&source, &options, &PdfControl::default(), |_| {}).unwrap();
         assert_eq!(
@@ -421,6 +542,8 @@ mod tests {
             last: 2,
             dpi: 72,
             mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         for stop_done in [0, 1, 2] {
             let control = PdfControl::default();
@@ -451,6 +574,8 @@ mod tests {
             last: 1,
             dpi: 72,
             mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         for size in [
             (f32::NAN, 10.),
@@ -511,6 +636,16 @@ mod tests {
     }
 
     fn test_pdf(pages: &[(f32, f32)]) -> Vec<u8> {
+        test_pdf_with(pages, "", |width, height| {
+            format!("1 0 0 rg\n0 0 {width} {height} re\nf\n")
+        })
+    }
+
+    fn test_pdf_with(
+        pages: &[(f32, f32)],
+        resources: &str,
+        content: impl Fn(f32, f32) -> String,
+    ) -> Vec<u8> {
         let mut body = String::from("%PDF-1.4\n");
         let mut offsets = Vec::new();
         let page_ids: Vec<usize> = (0..pages.len()).map(|index| 3 + 2 * index).collect();
@@ -539,10 +674,10 @@ mod tests {
                 &mut body,
                 &mut offsets,
                 format!(
-                    "{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << >> /Contents {content_id} 0 R >>\nendobj\n"
+                    "{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << {resources} >> /Contents {content_id} 0 R >>\nendobj\n"
                 ),
             );
-            let content = format!("1 0 0 rg\n0 0 {width} {height} re\nf\n");
+            let content = content(*width, *height);
             add_object(
                 &mut body,
                 &mut offsets,
@@ -586,6 +721,8 @@ mod tests {
             last: 2,
             dpi: 144,
             mode: PdfMode::Separate,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         let pages = render_data(
             test_pdf(&[(72., 72.), (72., 144.)]).into(),
@@ -611,6 +748,8 @@ mod tests {
             last,
             dpi,
             mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         assert!(validate_options(&info, &options(1, 2, 150)).is_ok());
         assert!(validate_options(&info, &options(0, 1, 150)).is_err());
@@ -631,6 +770,8 @@ mod tests {
             last: 1,
             dpi: 72,
             mode: PdfMode::Layers,
+            background: PdfBackground::White,
+            canvas: PdfCanvas::FirstPage,
         };
         assert!(validate_options(&info, &options).is_err());
     }
