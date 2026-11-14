@@ -851,7 +851,7 @@ mod tests {
             section_labels(&plan),
             [
                 "File", "Edit", "Select", "View", "Image", "Layer", "Tools", "Colors", "Filters",
-                "Window",
+                "Window", "Help",
             ]
         );
 
@@ -867,6 +867,11 @@ mod tests {
             find_command(&plan, "Exit")
                 .action
                 .partial_eq(&crate::commands::Quit)
+        );
+        assert!(
+            find_command(&plan, "Check for Updates…")
+                .action
+                .partial_eq(&crate::commands::CheckForUpdates)
         );
 
         let view = plan.menus.iter().find(|menu| menu.label == "View").unwrap();

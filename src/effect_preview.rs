@@ -597,7 +597,8 @@ mod tests {
         let content = DocumentContent::from_layers(128, 128, vec![large_layer]).unwrap();
         let preview = EffectPreview::new(content, LayerId(1), Selection::Full, 32);
         let region = preview.region(filters::MAX_RADIUS, (0, 0)).unwrap();
-        assert_eq!(region.pixels.dimensions(), (80, 80));
+        // Filter inputs use twice the display resolution.
+        assert_eq!(region.pixels.dimensions(), (160, 160));
         assert_eq!(
             preview
                 .filter(FilterSpec::Blur {
