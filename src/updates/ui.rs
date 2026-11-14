@@ -46,6 +46,10 @@ pub(crate) fn show(cx: &mut App) {
     let height = dialog_height(cx.global::<UpdateState>());
     let result = cx.open_window(
         WindowOptions {
+            #[cfg(target_os = "linux")]
+            app_id: Some("com.eimg.lime".into()),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(crate::linux::decorations()),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(480.), px(height)),
@@ -175,6 +179,19 @@ impl Render for UpdatesWindow {
             .bg(rgb(PANEL))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
+            .map(|root| {
+                #[cfg(target_os = "linux")]
+                let root = root.on_mouse_down(gpui::MouseButton::Left, |event, window, _| {
+                    if matches!(
+                        window.window_decorations(),
+                        gpui::Decorations::Client { .. }
+                    ) && event.position.y < px(20.)
+                    {
+                        window.start_window_move();
+                    }
+                });
+                root
+            })
             .on_key_down(|event, window, cx| match event.keystroke.key.as_str() {
                 "escape" => {
                     window.remove_window();

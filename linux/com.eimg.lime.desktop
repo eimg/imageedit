@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Lime
+Comment=Lite Image Editor
+Exec=lime %F
+Icon=com.eimg.lime
+Terminal=false
+Categories=Graphics;RasterGraphics;
+MimeType=application/x-lime;image/png;image/jpeg;image/webp;application/pdf;
+StartupWMClass=com.eimg.lime

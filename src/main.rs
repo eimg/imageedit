@@ -16,6 +16,8 @@ mod geometry;
 mod gradient;
 mod guides;
 mod icons;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu_icons;
@@ -49,6 +51,8 @@ fn main() {
     if pdf::run_if_requested() {
         return;
     }
+    #[cfg(target_os = "linux")]
+    linux::init();
     #[cfg(target_os = "windows")]
     windows_menu::configure_renderer();
     let app = Application::new().with_assets(icons::Icons);
@@ -107,6 +111,10 @@ fn ensure_workspace(cx: &mut App) -> Result<WindowHandle<Workspace>> {
     let bounds = Bounds::centered(None, size(px(1140.), px(740.)), cx);
     cx.open_window(
         WindowOptions {
+            #[cfg(target_os = "linux")]
+            app_id: Some("com.eimg.lime".into()),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(crate::linux::decorations()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(800.), px(520.))),
             titlebar: Some(TitlebarOptions {

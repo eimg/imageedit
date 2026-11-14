@@ -3,8 +3,8 @@
 Work directly on `main` unless the user explicitly requests another branch.
 
 Lime is a Rust and GPUI desktop image editor. Build for macOS first and
-keep the shared workspace portable for Windows. Hide and Quit stay in the macOS
-app menu. Windows uses File → Exit. The product
+keep the shared workspace portable for Windows and Linux. Hide and Quit stay in the macOS
+app menu. Windows and Linux use File → Exit. The product
 takes cues from GIMP, with native menus, a docked, resizable, and foldable
 toolbox, a Layers panel, and a tabbed canvas. File commands belong in the menu.
 The workspace favors canvas space and has no top toolbar.
@@ -13,6 +13,30 @@ shared GPUI menu tree, and `.github/workflows/windows.yml` produces an x64
 portable ZIP. Releases distribute the EXE without an installer or file
 associations. The macOS DMG is currently Apple silicon only. See README.md
 for downloads and signing status.
+
+Linux x86_64 and ARM64 (`aarch64`) are experimental pending desktop review.
+GPUI's Linux target enables both Wayland and X11. `src/workspace/linux_menu.rs`
+renders an in-window menu bar from `commands::application_menus(false)` without
+introducing GTK or changing the macOS/Windows menu adapters. Menu navigation
+runs before inline editors in the workspace keystroke interceptor; editor focus
+stays in place for action dispatch. F10/Alt-letter, arrows, Return, Escape,
+scrolling, submenu Back/Left, and current action availability are supported.
+Wayland explicitly requests client decorations to avoid GPUI 0.2.2 recording
+nonexistent server decorations on GNOME/Weston. Client decorations get a draggable
+title bar, close/minimize/maximize controls, and resize edges; server-decorated
+windows retain native chrome.
+The menu module and integration also compile under `cfg(test)` on other platforms.
+`vendor/xattr-compat` bridges GPUI's legacy archive dependency to maintained xattr,
+retaining its `set` API without pinning libc or copying obsolete FFI.
+`.github/workflows/linux.yml` builds/tests natively on Ubuntu 22.04 x86_64 and ARM64;
+`scripts/package-linux.sh` creates raw ELF downloads, portable tarballs, and SHA-256
+checksums in `dist/`. Build on the baseline rather than raising the glibc minimum
+on a newer host. Linux requires Vulkan, fonts/window libraries, and a working
+file chooser portal; do not advertise a fully static universal binary or assume
+all ARM GPUs work. The portable archive contains optional desktop integration
+files but never installs them. Update discovery recognizes both Linux architectures
+and stores its cooldown in XDG cache storage. See `linux/README.txt` for runtime
+packages and manual desktop integration.
 
 Use the user's current request to scope work. This guide records the current
 architecture and editing contracts; [README.md](README.md) describes using the

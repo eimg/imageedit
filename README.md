@@ -2,8 +2,9 @@
 
 <img src="macos/AppIcon.svg" width="96" height="96" alt="Lime half-slice logo">
 
-**Lite Image Editor** for macOS and Windows. Layered editing, native menus with
-tool and command icons, and a workspace that keeps the canvas in focus.
+**Lite Image Editor** for macOS and Windows, with experimental Linux x86_64 and
+ARM64 builds. Layered editing, menus with tool and command icons, and a workspace
+that keeps the canvas in focus.
 
 Current source version: **1.2.0**.
 
@@ -58,6 +59,63 @@ also available in the Lime menu on macOS and the Help menu on Windows.
 Downloads open in your browser; you choose when to download and install them.
 Lime never installs updates automatically. Offline checks stay quiet; a manual
 check offers a retry and a link to the releases page if it cannot connect.
+
+## Linux (experimental)
+
+Linux supports **x86_64** and **ARM64 (`aarch64`)**, with Wayland and X11 enabled.
+Desktop verification is still in progress. Linux uses an in-window menu bar built
+from the same commands as macOS/Windows. Click a menu or press **F10**; arrows
+navigate, Return activates, and Escape closes. Alt plus a menu's first letter
+opens it. Submenus have a Back row; Left returns to the parent. **File → Exit**
+and **Ctrl+Q** quit. Standard editing shortcuts use Ctrl. Wayland windows request
+client decorations and provide their own title bar and resize edges; X11 keeps
+the window manager's decorations.
+
+The **Linux build** workflow produces native binaries on Ubuntu 22.04 for both
+architectures. Download its matching `Lime-linux-aarch64` or `Lime-linux-x86_64`
+artifact from [GitHub Actions](https://github.com/eimg/lime/actions/workflows/linux.yml).
+Each artifact contains `Lime-<version>-linux-<arch>.tar.gz`, a raw executable,
+and SHA-256 checksums. Extract the tarball and run `./lime`; no installer or root
+access is needed. For a raw executable download, set its executable permission
+with `chmod +x` before running it. These artifacts are test builds, separate from
+the stable downloads above.
+
+The build baseline is **glibc 2.35 (Ubuntu 22.04)**. A working Vulkan driver,
+installed fonts, FreeType/Fontconfig, X11/Wayland libraries, libxkbcommon, and
+libxkbcommon-x11 are required. Open/Save dialogs need a D-Bus session and
+`xdg-desktop-portal` with a file chooser backend appropriate to the desktop.
+An ARM64 CPU alone does not establish GPU compatibility.
+
+On Arch Linux, install `vulkan-icd-loader`, `fontconfig`, `freetype2`,
+`libxkbcommon`, `libxkbcommon-x11`, `libxcb`, `libx11`, `wayland`, and
+`xdg-desktop-portal`, plus your GPU's Vulkan driver and a file chooser portal
+backend (for example `xdg-desktop-portal-gtk`). For virtual machines without
+Vulkan GPU support,
+`vulkan-swrast` provides Mesa's software Vulkan renderer; performance depends on
+the CPU, and a current Mesa release is recommended. See
+[the portable-build requirements](linux/README.txt) for Ubuntu package names
+and optional desktop launcher/icon installation. Nothing is installed automatically.
+
+To build on Linux, install Rust stable, a C/C++ compiler, Clang, CMake, pkg-config,
+Python 3, and the development packages for the libraries above. On Ubuntu 22.04:
+
+```sh
+sudo apt-get install build-essential clang cmake pkg-config python3 \
+  libfontconfig1-dev libfreetype-dev libxkbcommon-x11-dev \
+  libwayland-dev libx11-xcb-dev libxcb-shape0-dev libxcb-xfixes0-dev
+cargo build --release --locked
+./target/release/lime
+./scripts/package-linux.sh --no-build
+```
+
+The package script writes both download formats and checksums to `dist/`,
+including a linked-library report inside the archive. To test X11 within a
+Wayland session, run `env -u WAYLAND_DISPLAY ./target/release/lime`.
+Gradient settings and recovery copies use `$XDG_CONFIG_HOME/lime` (default
+`~/.config/lime`); update checks use `$XDG_CACHE_HOME/lime` (default `~/.cache/lime`).
+Linux downloads still depend on system libraries and drivers; they are not fully
+static or universal across distributions. In-app update checks recognize the
+matching Linux assets when they are attached to a future stable release.
 
 ## Getting started
 

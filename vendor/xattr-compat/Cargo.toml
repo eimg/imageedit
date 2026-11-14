@@ -1,0 +1,10 @@
+[package]
+name = "xattr"
+version = "0.2.3"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Compatibility bridge for GPUI's legacy async-tar dependency"
+
+[dependencies]
+xattr-current = { package = "xattr", version = "1.6" }

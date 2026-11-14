@@ -139,9 +139,25 @@ fn cache_path() -> Option<PathBuf> {
     } else if cfg!(target_os = "macos") {
         std::env::var_os("HOME")
             .map(|root| PathBuf::from(root).join("Library/Caches/com.eimg.lime/update-check.json"))
+    } else if cfg!(target_os = "linux") {
+        linux_cache_path(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
     } else {
         None
     }
+}
+
+fn linux_cache_path(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    xdg.map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".cache"))
+        })
+        .map(|path| path.join("lime/update-check.json"))
 }
 
 fn run_check(force: bool, path: Option<PathBuf>, timestamp: u64) -> (Option<Release>, CheckStatus) {
@@ -275,6 +291,10 @@ impl Release {
                 format!("Lime-{version}-windows-x64.exe"),
                 format!("Lime-{version}-windows-x64.zip"),
             ],
+            ("linux", "x86_64" | "aarch64") => vec![
+                format!("Lime-{version}-linux-{arch}.tar.gz"),
+                format!("Lime-{version}-linux-{arch}"),
+            ],
             _ => Vec::new(),
         };
         let download = names.iter().find_map(|name| {
@@ -316,6 +336,8 @@ mod tests {
                 format!("Lime-{version}.dmg"),
                 format!("Lime-{version}-windows-x64.exe"),
                 format!("Lime-{version}-windows-x64.zip"),
+                format!("Lime-{version}-linux-x86_64.tar.gz"),
+                format!("Lime-{version}-linux-aarch64.tar.gz"),
             ]
             .into_iter()
             .map(|name| Asset {
@@ -379,7 +401,7 @@ mod tests {
         for (os, arch) in [
             ("macos", "x86_64"),
             ("windows", "aarch64"),
-            ("linux", "x86_64"),
+            ("linux", "arm"),
         ] {
             assert!(get(&candidate, os, arch).download.is_none());
         }
@@ -392,6 +414,80 @@ mod tests {
         );
         candidate.assets[0].state = "new".into();
         assert!(get(&candidate, "macos", "aarch64").download.is_none());
+    }
+
+    #[test]
+    fn linux_downloads_match_architecture_and_fall_back_to_raw_binaries() {
+        let mut candidate = release("2.0.0");
+        for arch in ["x86_64", "aarch64"] {
+            let expected = format!("Lime-2.0.0-linux-{arch}.tar.gz");
+            assert!(
+                candidate
+                    .available("1.0.0", "linux", arch)
+                    .unwrap()
+                    .unwrap()
+                    .download
+                    .unwrap()
+                    .ends_with(&expected)
+            );
+        }
+        candidate
+            .assets
+            .retain(|asset| !asset.name.ends_with("aarch64.tar.gz"));
+        assert!(
+            candidate
+                .available("1.0.0", "linux", "aarch64")
+                .unwrap()
+                .unwrap()
+                .download
+                .is_none()
+        );
+        let name = "Lime-2.0.0-linux-aarch64";
+        candidate.assets.push(Asset {
+            name: name.into(),
+            browser_download_url: format!("{RELEASES}/download/v2.0.0/{name}"),
+            state: "uploaded".into(),
+        });
+        assert!(
+            candidate
+                .available("1.0.0", "linux", "aarch64")
+                .unwrap()
+                .unwrap()
+                .download
+                .unwrap()
+                .ends_with(name)
+        );
+        candidate.assets.last_mut().unwrap().browser_download_url =
+            "https://evil.example/linux".into();
+        assert!(
+            candidate
+                .available("1.0.0", "linux", "aarch64")
+                .unwrap()
+                .unwrap()
+                .download
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn linux_update_cache_follows_xdg_and_rejects_relative_roots() {
+        let path = |xdg: Option<&str>, home: Option<&str>| {
+            linux_cache_path(xdg.map(Into::into), home.map(Into::into))
+        };
+        assert_eq!(
+            path(Some("/cache"), Some("/home/test")),
+            Some(PathBuf::from("/cache/lime/update-check.json"))
+        );
+        assert_eq!(
+            path(None, Some("/home/test")),
+            Some(PathBuf::from("/home/test/.cache/lime/update-check.json"))
+        );
+        assert_eq!(
+            path(Some("relative"), Some("/home/test")),
+            path(None, Some("/home/test"))
+        );
+        assert_eq!(path(Some(""), Some("relative")), None);
+        assert_eq!(path(None, None), None);
     }
 
     #[test]
