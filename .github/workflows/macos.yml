@@ -54,7 +54,7 @@ jobs:
       - name: Build and verify the signed release app
         run: |
           ./scripts/bundle-macos.sh
-          lipo -verify_arch arm64 dist/Lime.app/Contents/MacOS/lime
+          lipo dist/Lime.app/Contents/MacOS/lime -verify_arch arm64
 
       - name: Test the bundled headless PDF worker
         run: python3 scripts/check-pdf-worker.py --binary dist/Lime.app/Contents/MacOS/lime
