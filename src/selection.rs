@@ -134,7 +134,7 @@ impl FeatherGeometry {
     pub fn shape(self, rect: PixelRect, width: u32, height: u32) -> Selection {
         if self.ellipse {
             Selection::ellipse_rect_quality(rect, width, height, self.antialias)
-        } else if self.radius > 0 {
+        } else if self.radius > 0 || self.antialias {
             Selection::rounded_rect_quality(rect, self.radius, width, height, self.antialias)
         } else {
             Selection::Rect(rect)
@@ -607,7 +607,9 @@ impl Selection {
         antialias: bool,
     ) -> Self {
         let radius = radius.min(rect.width.min(rect.height) / 2);
-        if radius == 0 {
+        // Keep an existing curve's quality even when its corners reach zero.
+        // Coverage remains a hard rectangle; a later radius edit restores AA.
+        if radius == 0 && !antialias {
             return Self::from_rect(rect, width, height);
         }
         Self::RoundedRect(RoundedRectSelection {

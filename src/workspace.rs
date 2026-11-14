@@ -272,6 +272,7 @@ pub struct Workspace {
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
+    pending_aspect_ratio: Option<selection::PendingAspectRatio>,
     free_points: Vec<Point<f32>>,
     free_nodes: Vec<usize>,
     free_node_drag: Option<(usize, Point<f32>)>,
@@ -284,6 +285,8 @@ pub struct Workspace {
     scale_drag: Option<scale_ui::ScaleDrag>,
     scale_overlay: Option<layers::MovePaint>,
     scale_token: u64,
+    scale_preview_busy: bool,
+    scale_preview_dirty: bool,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
     pending_nudge: Option<layers::PendingNudge>,
@@ -521,6 +524,7 @@ impl Workspace {
             crop: None,
             selection_drag: None,
             selection_preview: None,
+            pending_aspect_ratio: None,
             free_points: Vec::new(),
             free_nodes: Vec::new(),
             free_node_drag: None,
@@ -533,6 +537,8 @@ impl Workspace {
             scale_drag: None,
             scale_overlay: None,
             scale_token: 0,
+            scale_preview_busy: false,
+            scale_preview_dirty: false,
             move_settled: None,
             move_token: 0,
             pending_nudge: None,
@@ -926,6 +932,7 @@ impl Workspace {
         }
         self.finish_numeric_followup(id, generation, published, window, cx);
         self.finish_pending_nudge(id, generation, published, window, cx);
+        self.finish_pending_aspect_ratio(id, generation, change, published, window, cx);
     }
 
     // Publishes a background result only if the tab has not changed since the job started.

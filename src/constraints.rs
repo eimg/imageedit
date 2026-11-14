@@ -12,6 +12,18 @@ impl AspectRatio {
         height: 1,
     };
 
+    /// Largest centered box of this ratio contained in the existing geometry.
+    /// Signed positions retain off-canvas selection geometry.
+    pub fn inscribe(self, rect: PixelRect) -> PixelRect {
+        let (width, height) = self.fit(true, rect.width, (rect.width, rect.height));
+        PixelRect::new(
+            rect.x.saturating_add(i64::from((rect.width - width) / 2)),
+            rect.y.saturating_add(i64::from((rect.height - height) / 2)),
+            width,
+            height,
+        )
+    }
+
     pub fn fit(self, width_axis: bool, value: u32, limit: (u32, u32)) -> (u32, u32) {
         if limit.0 == 0 || limit.1 == 0 {
             return (0, 0);
@@ -164,6 +176,26 @@ impl AspectRatio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choosing_a_ratio_inscribes_the_existing_box_without_moving_its_center() {
+        assert_eq!(
+            AspectRatio::SQUARE.inscribe(PixelRect::new(10, 20, 30, 10)),
+            PixelRect::new(20, 20, 10, 10)
+        );
+        let ratio = AspectRatio {
+            width: 4,
+            height: 3,
+        };
+        let original = PixelRect::new(-8, 7, 24, 24);
+        let fitted = ratio.inscribe(original);
+        assert_eq!(fitted, PixelRect::new(-8, 10, 24, 18));
+        assert_eq!(ratio.inscribe(fitted), fitted);
+        assert_eq!(
+            ratio.inscribe(PixelRect::new(2, 3, 0, 0)),
+            PixelRect::new(2, 3, 0, 0)
+        );
+    }
 
     #[test]
     fn fixed_ratio_drags_anchor_the_start_and_stay_inside_crop_limits() {

@@ -114,7 +114,11 @@ impl Workspace {
         let mask_baked = self
             .warp_overlay
             .as_ref()
-            .is_some_and(|warp| Arc::ptr_eq(&warp.sprite, &raw.sprite));
+            .is_some_and(|warp| Arc::ptr_eq(&warp.sprite, &raw.sprite))
+            || self
+                .scale_overlay
+                .as_ref()
+                .is_some_and(|scale| Arc::ptr_eq(&scale.sprite, &raw.sprite));
         let job = cx.background_executor().spawn(async move {
             let image = composite(
                 &content,

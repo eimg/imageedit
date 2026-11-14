@@ -42,6 +42,9 @@ Windows downloads are unsigned. The macOS app is ad hoc signed and not notarized
 
 Open an image or PDF, or create a new image. Choose a tool and adjust its options
 beside the canvas. Hover the **?** for gestures and shortcuts.
+Fold secondary option sections with the mouse or keyboard to leave more room for Layers and Paths;
+their headers summarize active settings. Oval Select uses **1:1** for circles.
+Aspect-ratio choices also reshape the current selection or crop box.
 
 Crop and paint strokes can start outside the canvas; crop stays within the image.
 Crop ignores drags whose area stays entirely outside the image.

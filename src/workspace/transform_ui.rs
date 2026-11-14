@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*, px, rgb};
+use gpui::{Context, Div, Pixels, Point, Window, div, point, prelude::*};
 use image::RgbaImage;
 
 use super::Workspace;
@@ -586,39 +586,38 @@ impl Workspace {
     pub(super) fn rotation_pivot_options(&self, cx: &Context<Self>) -> Div {
         use super::numeric::NumericField;
         use super::tooltip::tooltip;
-        use super::view::{MUTED, TransformPointControl, transform_point_grid};
+        use super::view::{TransformPointControl, transform_point_grid};
         let selected = self.warp.as_ref().and_then(|session| {
             (0..9).find(|index| session.pivot_anchor(*index) == Some(session.pivot))
         });
         let grid = transform_point_grid(TransformPointControl::Rotation, selected, cx);
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
+        let body = div().flex().flex_col().gap_1().child(
+            div().flex().gap_2().child(grid).child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child("Pivot"),
-            )
-            .child(
-                div().flex().gap_2().child(grid).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            self.numeric_chip(NumericField::RotatePivotX, Some("X"), cx)
-                                .tooltip(tooltip("Pivot X in canvas pixels")),
-                        )
-                        .child(
-                            self.numeric_chip(NumericField::RotatePivotY, Some("Y"), cx)
-                                .tooltip(tooltip("Pivot Y in canvas pixels")),
-                        ),
-                ),
-            )
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        self.numeric_chip(NumericField::RotatePivotX, Some("X"), cx)
+                            .tooltip(tooltip("Pivot X in canvas pixels")),
+                    )
+                    .child(
+                        self.numeric_chip(NumericField::RotatePivotY, Some("Y"), cx)
+                            .tooltip(tooltip("Pivot Y in canvas pixels")),
+                    ),
+            ),
+        );
+        self.tool_option_section(
+            super::settings_ui::ToolSection::RotationPivot,
+            "PIVOT",
+            self.warp.as_ref().map_or_else(String::new, |session| {
+                format!("{:.1}, {:.1}", session.pivot.0, session.pivot.1)
+            }),
+            body,
+            cx,
+        )
     }
 
     pub(super) fn perspective_point(&self, index: u8) -> Option<(f64, f64)> {
@@ -690,23 +689,15 @@ impl Workspace {
     pub(super) fn perspective_corner_options(&self, cx: &Context<Self>) -> Div {
         use super::numeric::NumericField;
         use super::tooltip::tooltip;
-        use super::view::{
-            MUTED, TransformPointControl, action_row, choice_button, transform_point_grid,
-        };
+        use super::view::{TransformPointControl, choice_button, transform_point_grid};
         let index = self
             .warp
             .as_ref()
             .map_or(0, |session| session.selected_corner);
-        div()
+        let body = div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child("Corner"),
-            )
             .child(
                 div()
                     .flex()
@@ -742,14 +733,21 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(action_row([
-                choice_button("Reset Corner", false).on_click(
-                    cx.listener(|this, _, window, cx| this.reset_perspective(false, window, cx)),
-                ),
-                choice_button("Reset All", false).on_click(
-                    cx.listener(|this, _, window, cx| this.reset_perspective(true, window, cx)),
-                ),
-            ]))
+            .child(choice_button("Reset Corner", false).on_click(
+                cx.listener(|this, _, window, cx| this.reset_perspective(false, window, cx)),
+            ));
+        self.tool_option_section(
+            super::settings_ui::ToolSection::PerspectiveCorner,
+            "CORNER",
+            ["Top left", "Top right", "Bottom right", "Bottom left"][index].to_owned(),
+            body,
+            cx,
+        )
+        .child(
+            choice_button("Reset All", false).on_click(
+                cx.listener(|this, _, window, cx| this.reset_perspective(true, window, cx)),
+            ),
+        )
     }
 
     pub(super) fn set_warp_mirror(
@@ -784,6 +782,8 @@ impl Workspace {
         self.preferences.warp_resample = resample;
         if self.warp.is_some() {
             self.request_warp_preview(window, cx);
+        } else if self.scale_drag.is_some() {
+            self.request_scale_preview(window, cx);
         }
         cx.notify();
     }

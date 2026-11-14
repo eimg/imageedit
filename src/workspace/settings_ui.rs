@@ -9,6 +9,81 @@ use anyhow::{Result, ensure};
 use gpui::{Context, Window};
 use std::{path::PathBuf, time::Duration};
 
+/// Disclosure state is workspace layout, independent of tool settings/reset.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct ToolSections {
+    edges: bool,
+    stroke: bool,
+    clone_source: bool,
+    text_spacing: bool,
+    text_layout: bool,
+    rotation_pivot: bool,
+    perspective_corner: bool,
+    gradient_stops: bool,
+}
+
+impl Default for ToolSections {
+    fn default() -> Self {
+        Self {
+            edges: false,
+            stroke: false,
+            clone_source: false,
+            text_spacing: false,
+            text_layout: false,
+            rotation_pivot: false,
+            perspective_corner: false,
+            // Custom mode should expose its editor on first use.
+            gradient_stops: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ToolSection {
+    Edges,
+    Stroke,
+    CloneSource,
+    TextSpacing,
+    TextLayout,
+    RotationPivot,
+    PerspectiveCorner,
+    GradientStops,
+}
+
+impl ToolSection {
+    fn value(self, sections: &mut ToolSections) -> &mut bool {
+        match self {
+            Self::Edges => &mut sections.edges,
+            Self::Stroke => &mut sections.stroke,
+            Self::CloneSource => &mut sections.clone_source,
+            Self::TextSpacing => &mut sections.text_spacing,
+            Self::TextLayout => &mut sections.text_layout,
+            Self::RotationPivot => &mut sections.rotation_pivot,
+            Self::PerspectiveCorner => &mut sections.perspective_corner,
+            Self::GradientStops => &mut sections.gradient_stops,
+        }
+    }
+
+    pub(super) fn expanded(self, sections: &ToolSections) -> bool {
+        match self {
+            Self::Edges => sections.edges,
+            Self::Stroke => sections.stroke,
+            Self::CloneSource => sections.clone_source,
+            Self::TextSpacing => sections.text_spacing,
+            Self::TextLayout => sections.text_layout,
+            Self::RotationPivot => sections.rotation_pivot,
+            Self::PerspectiveCorner => sections.perspective_corner,
+            Self::GradientStops => sections.gradient_stops,
+        }
+    }
+
+    pub(super) fn toggle(self, sections: &mut ToolSections) {
+        let value = self.value(sections);
+        *value = !*value;
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Preferences {
@@ -19,6 +94,7 @@ pub(super) struct Preferences {
     pub(super) snap_guides: bool,
     pub(super) grid_spacing: u32,
     pub(super) show_layer_bounds: bool,
+    // Accepted from older settings and normalized to the shared 1:1 ratio.
     pub(super) oval_circle: bool,
     pub(super) selection_radius: u32,
     pub(super) selection_antialias: bool,
@@ -60,6 +136,7 @@ pub(super) struct Preferences {
     pub(super) toolbox_width: f32,
     pub(super) toolbox_folded: bool,
     pub(super) move_snapping_expanded: bool,
+    pub(super) tool_sections: ToolSections,
     pub(super) effects: effects::Preferences,
 }
 
@@ -114,6 +191,7 @@ impl Default for Preferences {
             toolbox_width: view::TOOLBOX_DEFAULT_WIDTH,
             toolbox_folded: false,
             move_snapping_expanded: false,
+            tool_sections: ToolSections::default(),
             effects: Default::default(),
         }
     }
@@ -168,7 +246,7 @@ impl Preferences {
 impl settings::Preferences for Preferences {
     fn merge_groups() -> &'static [&'static [&'static str]] {
         &[
-            &["selection_ratio"],
+            &["selection_ratio", "oval_circle"],
             &["crop_ratio"],
             &[
                 "gradient_custom",
@@ -194,6 +272,11 @@ impl settings::Preferences for Preferences {
     }
 
     fn reconcile_patch(&mut self) {
+        if self.oval_circle {
+            self.selection_ratio = Some(crate::constraints::AspectRatio::SQUARE);
+            self.selection_ratio_value = crate::constraints::AspectRatio::SQUARE;
+            self.oval_circle = false;
+        }
         self.effects.reconcile_last();
     }
 
@@ -584,7 +667,6 @@ pub(super) mod tests {
             "snap_grid",
             "snap_guides",
             "show_layer_bounds",
-            "oval_circle",
             "selection_antialias",
             "free_antialias",
             "wand_antialias",
@@ -653,6 +735,9 @@ pub(super) mod tests {
         value["jpeg_quality"] = json!(81);
         value["pdf_export_dpi"] = json!(360);
         value["toolbox_width"] = json!(225.5);
+        for expanded in value["tool_sections"].as_object_mut().unwrap().values_mut() {
+            *expanded = json!(!expanded.as_bool().unwrap());
+        }
         let mut effects = vec![Value::Null; 10];
         let last = effects::Effect::Filter(crate::filters::FilterSpec::Shadow {
             radius: 8,
@@ -697,6 +782,48 @@ pub(super) mod tests {
             assert!(wire["preferences"].get(field).is_none(), "{field}");
         }
         assert!(wire["preferences"]["effects"].get("pending").is_none());
+    }
+
+    #[test]
+    fn legacy_circle_settings_load_as_the_shared_square_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Older files have no disclosure state and may have Circle overriding
+        // a different saved ratio. Startup applies pending patches, even empty ones.
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "preferences": {
+                    "oval_circle": true,
+                    "selection_ratio": {"width": 4, "height": 3},
+                    "selection_ratio_value": {"width": 4, "height": 3}
+                },
+                "colors": crate::color_memory::Memory::default()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut snapshot = settings::load::<Preferences>(&path).unwrap();
+        Patch::default().apply(&mut snapshot).unwrap();
+        assert!(!snapshot.preferences.oval_circle);
+        assert_eq!(
+            snapshot.preferences.selection_ratio,
+            Some(crate::constraints::AspectRatio::SQUARE)
+        );
+        assert_eq!(
+            snapshot.preferences.selection_ratio_value,
+            crate::constraints::AspectRatio::SQUARE
+        );
+        assert!(!ToolSection::Edges.expanded(&snapshot.preferences.tool_sections));
+        assert!(ToolSection::GradientStops.expanded(&snapshot.preferences.tool_sections));
+        // A later explicit ratio choice must survive writing over the legacy file.
+        let mut changed = snapshot.preferences.clone();
+        changed.selection_ratio = None;
+        let mut patch = Patch::default();
+        patch.record(&snapshot.preferences, &changed).unwrap();
+        let saved = settings::save::<Preferences>(&path, &patch).unwrap();
+        assert_eq!(saved.preferences.selection_ratio, None);
     }
 
     #[test]

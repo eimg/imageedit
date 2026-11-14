@@ -52,6 +52,45 @@ enum SelectionHit {
     Edge(SelectionEdges),
 }
 
+/// Latest requested ratio while a selection-only commit is in flight.
+/// Its context must survive that exact commit before another edit can run.
+#[derive(Clone, Copy)]
+pub(super) struct PendingAspectRatio {
+    tab: usize,
+    layer: crate::document::LayerId,
+    tool: Tool,
+    generation: u64,
+    crop: bool,
+    ratio: Option<crate::constraints::AspectRatio>,
+}
+
+impl PendingAspectRatio {
+    fn new(
+        tab: &super::Tab,
+        tool: Tool,
+        crop: bool,
+        ratio: Option<crate::constraints::AspectRatio>,
+    ) -> Self {
+        Self {
+            tab: tab.id,
+            layer: tab.active_layer,
+            tool,
+            generation: tab.history.generation(),
+            crop,
+            ratio,
+        }
+    }
+
+    fn accepts(self, tab: &super::Tab, tool: Tool, generation: u64, published: bool) -> bool {
+        self.tab == tab.id
+            && self.layer == tab.active_layer
+            && self.tool == tool
+            && self.generation == generation
+            && !tab.busy()
+            && generation.checked_add(u64::from(published)) == Some(tab.history.generation())
+    }
+}
+
 impl Workspace {
     fn creation_feather_radius(&self) -> u32 {
         if self.preferences.selection_feather_enabled {
@@ -98,6 +137,81 @@ impl Workspace {
             })
     }
 
+    pub(super) fn set_aspect_ratio(
+        &mut self,
+        crop: bool,
+        ratio: Option<crate::constraints::AspectRatio>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A typed selection edit may itself start the commit we must wait for.
+        self.commit_numeric_edit(window, cx);
+        if let Some(tab) = self.active_tab().filter(|tab| tab.editing) {
+            self.pending_aspect_ratio = Some(PendingAspectRatio::new(
+                tab,
+                self.preferences.tool,
+                crop,
+                ratio,
+            ));
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.busy()) {
+            return;
+        }
+        self.pending_aspect_ratio = None;
+        if crop {
+            self.preferences.crop_ratio = ratio;
+            if let Some(ratio) = ratio {
+                self.preferences.crop_ratio_value = ratio;
+                self.crop = self.crop.map(|crop| ratio_crop(crop, ratio));
+            }
+        } else {
+            self.preferences.oval_circle = false;
+            self.preferences.selection_ratio = ratio;
+            if let Some(ratio) = ratio {
+                self.preferences.selection_ratio_value = ratio;
+                if self.selection_shape_rect().is_some() {
+                    self.update_selection(
+                        move |current, size| refit_selection(current, ratio, size),
+                        window,
+                        cx,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn finish_pending_aspect_ratio(
+        &mut self,
+        id: usize,
+        generation: u64,
+        change: super::Change,
+        published: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .pending_aspect_ratio
+            .as_ref()
+            .is_none_or(|pending| pending.tab != id)
+        {
+            return;
+        }
+        let pending = self.pending_aspect_ratio.take().unwrap();
+        if !matches!(change, super::Change::Selection)
+            || self.form.is_some()
+            || self.dialog_open
+            || self.numeric_edit.is_some()
+            || self.active_tab().is_none_or(|tab| {
+                !pending.accepts(tab, self.preferences.tool, generation, published)
+            })
+        {
+            return;
+        }
+        self.set_aspect_ratio(pending.crop, pending.ratio, window, cx);
+    }
+
     pub(super) fn set_selection_antialias(
         &mut self,
         antialias: bool,
@@ -119,6 +233,7 @@ impl Workspace {
     }
 
     pub(super) fn clear_selection_gesture(&mut self) {
+        self.pending_aspect_ratio = None;
         if self
             .numeric_edit
             .as_ref()
@@ -846,39 +961,20 @@ impl Workspace {
         );
     }
 
-    pub(super) fn set_oval_circle(
-        &mut self,
-        circle: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.preferences.oval_circle = circle;
-        if circle {
-            let state = self
-                .active_tab()
-                .filter(|tab| !tab.busy())
-                .map(|tab| (tab.document.content.size(), tab.selection.clone()));
-            if let Some(((width, height), selection)) = state {
-                if let Some(circle) = circle_selection(&selection, width, height).map(|shape| {
-                    shape.with_antialias(self.active_selection_antialias(), width, height)
-                }) {
-                    if circle != selection {
-                        self.commit_selection(circle, window, cx);
-                    }
-                } else if !matches!(selection, Selection::Unrestricted | Selection::Empty) {
-                    self.select_none(window, cx);
-                }
-            }
-        }
-        cx.notify();
-    }
-
     pub(super) fn nudge_selection_radius(
         &mut self,
         delta: i32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.commit_numeric_with_followup(
+            super::numeric::NumericFollowup::SelectionRadius(delta),
+            window,
+            cx,
+        ) || self.active_tab().is_some_and(|tab| tab.busy())
+        {
+            return;
+        }
         let max = self.selection_shape_rect().map_or_else(
             || {
                 self.active_document().map_or(1, |document| {
@@ -899,21 +995,16 @@ impl Workspace {
             let Some(tab) = self.active_tab() else {
                 return;
             };
-            let (width, height) = tab.document.content.size();
-            let shape = Selection::rounded_rect_quality(
+            let shape = editable_selection_for_rect(
+                selection.as_ref().unwrap(),
                 rect,
-                self.preferences.selection_radius,
-                width,
-                height,
-                selection
-                    .as_ref()
-                    .filter(|selection| matches!(selection, Selection::RoundedRect(_)))
-                    .map_or(
-                        self.preferences.selection_antialias,
-                        Selection::is_antialiased,
-                    ),
+                Some(self.preferences.selection_radius),
+                self.preferences.selection_antialias,
+                tab.document.content.size(),
             );
-            self.commit_placed_selection(shape, window, cx);
+            if let Some(shape) = shape {
+                self.commit_placed_selection(shape, window, cx);
+            }
         }
         cx.notify();
     }
@@ -987,6 +1078,93 @@ fn wand_source(
     })
 }
 
+pub(super) fn editable_selection_for_rect(
+    current: &Selection,
+    rect: PixelRect,
+    radius: Option<u32>,
+    default_antialias: bool,
+    size: (u32, u32),
+) -> Option<Selection> {
+    if let Some(mut geometry) = current.feather_geometry() {
+        if !geometry.ellipse
+            && let Some(radius) = radius
+        {
+            geometry.radius = radius.min(rect.width.min(rect.height) / 2);
+        }
+        return Some(geometry.shape(rect, size.0, size.1));
+    }
+    match current {
+        Selection::Rect(_) | Selection::RoundedRect(_) if radius.is_some() => {
+            Some(Selection::rounded_rect_quality(
+                rect,
+                radius?,
+                size.0,
+                size.1,
+                if matches!(current, Selection::RoundedRect(_)) {
+                    current.is_antialiased()
+                } else {
+                    default_antialias
+                },
+            ))
+        }
+        Selection::Rect(_) | Selection::RoundedRect(_) | Selection::Ellipse(_) => {
+            Some(placed_selection(current.clone(), rect, size.0, size.1))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn ratio_crop(crop: CropRect, ratio: crate::constraints::AspectRatio) -> CropRect {
+    let rect = ratio.inscribe(PixelRect::new(
+        i64::from(crop.x),
+        i64::from(crop.y),
+        crop.width,
+        crop.height,
+    ));
+    CropRect {
+        x: rect.x as u32,
+        y: rect.y as u32,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn refit_selection(
+    current: Selection,
+    ratio: crate::constraints::AspectRatio,
+    size: (u32, u32),
+) -> Selection {
+    let rect = current
+        .feather_geometry()
+        .map(|geometry| geometry.rect)
+        .or_else(|| match &current {
+            Selection::Rect(rect) => Some(*rect),
+            Selection::Ellipse(shape) => Some(shape.rect()),
+            Selection::RoundedRect(shape) => Some(shape.rect()),
+            _ => None,
+        });
+    let Some(rect) = rect else {
+        return current;
+    };
+    let next = editable_selection_for_rect(
+        &current,
+        ratio.inscribe(rect),
+        None,
+        current.is_antialiased(),
+        size,
+    );
+    match next {
+        Some(next) => {
+            if let Some(geometry) = current.feather_geometry() {
+                next.feather(geometry.feather, size.0, size.1)
+            } else {
+                next
+            }
+        }
+        None => current,
+    }
+}
+
 fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
     if let Some(geometry) = selection
         .feather_geometry()
@@ -999,31 +1177,6 @@ fn rect_for_radius(selection: &Selection) -> Option<PixelRect> {
         Selection::RoundedRect(shape) => Some(shape.rect()),
         _ => None,
     }
-}
-
-fn circle_selection(selection: &Selection, width: u32, height: u32) -> Option<Selection> {
-    let rect = match selection {
-        Selection::Rect(rect) => *rect,
-        Selection::Ellipse(ellipse) => ellipse.rect(),
-        Selection::RoundedRect(shape) => shape.rect(),
-        _ => return None,
-    };
-    Some(Selection::ellipse_rect_quality(
-        centered_square(rect),
-        width,
-        height,
-        selection.is_antialiased(),
-    ))
-}
-
-fn centered_square(rect: PixelRect) -> PixelRect {
-    let side = rect.width.min(rect.height);
-    PixelRect::new(
-        rect.x + i64::from((rect.width - side) / 2),
-        rect.y + i64::from((rect.height - side) / 2),
-        side,
-        side,
-    )
 }
 
 pub(super) fn selection_op(modifiers: &gpui::Modifiers) -> SelectionOp {
@@ -1257,6 +1410,201 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radius_zero_roundtrip_keeps_curve_quality_and_feather() {
+        let rect = PixelRect::new(5, 5, 24, 18);
+        for feather in [0, 3] {
+            let original =
+                Selection::rounded_rect_quality(rect, 4, 64, 64, true).feather(feather, 64, 64);
+            let square = editable_selection_for_rect(&original, rect, Some(0), false, (64, 64))
+                .unwrap()
+                .feather(feather, 64, 64);
+            assert!(square.is_antialiased());
+            // Retained AA is metadata: a zero-radius rectangle still has hard
+            // geometric edges, before the unchanged feather is applied.
+            let expected_square = Selection::Rect(rect).feather(feather, 64, 64);
+            for y in 0..64 {
+                for x in 0..64 {
+                    assert_eq!(
+                        square.coverage(x, y, 64, 64),
+                        expected_square.coverage(x, y, 64, 64)
+                    );
+                }
+            }
+            let rounded = editable_selection_for_rect(&square, rect, Some(4), false, (64, 64))
+                .unwrap()
+                .feather(feather, 64, 64);
+            assert_eq!(rounded, original);
+        }
+    }
+
+    #[test]
+    fn latest_ratio_waits_for_the_selection_commit_and_validates_its_context() {
+        use crate::constraints::AspectRatio;
+        let mut tab = super::super::tests::opacity_tab();
+        tab.document =
+            crate::document::Document::blank("Ratio".into(), 64, 64, image::Rgba([255; 4]));
+        tab.active_layer = tab.document.content.preferred_active_layer();
+        tab.selection = Selection::Rect(PixelRect::new(10, 10, 24, 18));
+        let generation = tab.history.generation();
+        tab.editing = true;
+        let mut pending = Some(PendingAspectRatio::new(
+            &tab,
+            Tool::Select,
+            false,
+            Some(AspectRatio::SQUARE),
+        ));
+        let latest = AspectRatio {
+            width: 2,
+            height: 1,
+        };
+        pending.replace(PendingAspectRatio::new(
+            &tab,
+            Tool::Select,
+            false,
+            Some(latest),
+        ));
+        let pending = pending.unwrap();
+        assert_eq!(pending.ratio, Some(latest));
+        assert!(!pending.accepts(&tab, Tool::Select, generation, false));
+        let state = tab.state();
+        let first = refit_selection(state.selection, AspectRatio::SQUARE, state.content.size());
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            Dirty::Unpainted,
+        )
+        .unwrap();
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Selection,
+                Some((state.content, state.active_layer, first, patch)),
+                1
+            )
+            .0
+        );
+        assert!(pending.accepts(&tab, Tool::Select, generation, true));
+        assert_eq!(
+            pending
+                .ratio
+                .map(|ratio| refit_selection(tab.selection.clone(), ratio, (64, 64))),
+            Some(Selection::Rect(PixelRect::new(13, 14, 18, 9)))
+        );
+        assert!(!pending.accepts(&tab, Tool::OvalSelect, generation, true));
+        assert!(!pending.accepts(&tab, Tool::Select, generation + 1, true));
+        tab.id += 1;
+        assert!(!pending.accepts(&tab, Tool::Select, generation, true));
+        tab.id -= 1;
+        let layer = tab.active_layer;
+        tab.active_layer = crate::document::LayerId(layer.0 + 1);
+        assert!(!pending.accepts(&tab, Tool::Select, generation, true));
+        tab.active_layer = layer;
+        tab.history.commit(tab.state(), 2, false);
+        assert!(!pending.accepts(&tab, Tool::Select, generation, true));
+    }
+
+    #[test]
+    fn ratio_changes_preserve_curve_quality_and_feather_without_compounding_it() {
+        let rect = PixelRect::new(-4, 6, 24, 12);
+        let target = PixelRect::new(2, 6, 12, 12);
+        for (source, expected) in [
+            (Selection::Rect(rect), Selection::Rect(target)),
+            (
+                Selection::ellipse_rect_quality(rect, 64, 64, true),
+                Selection::ellipse_rect_quality(target, 64, 64, true),
+            ),
+            (
+                Selection::rounded_rect_quality(rect, 4, 64, 64, true),
+                Selection::rounded_rect_quality(target, 4, 64, 64, true),
+            ),
+        ] {
+            for feather in [0, 3] {
+                let source = source.clone().feather(feather, 64, 64);
+                let expected = expected.clone().feather(feather, 64, 64);
+                let fitted =
+                    refit_selection(source, crate::constraints::AspectRatio::SQUARE, (64, 64));
+                assert_eq!(fitted, expected);
+                assert_eq!(
+                    refit_selection(
+                        fitted.clone(),
+                        crate::constraints::AspectRatio::SQUARE,
+                        (64, 64)
+                    ),
+                    fitted
+                );
+            }
+        }
+        let arbitrary = Selection::from_coverage(8, 8, |x, y| if x == y { 128 } else { 0 });
+        assert_eq!(
+            refit_selection(
+                arbitrary.clone(),
+                crate::constraints::AspectRatio::SQUARE,
+                (8, 8)
+            ),
+            arbitrary
+        );
+    }
+
+    #[test]
+    fn typed_geometry_and_stepped_radius_keep_feather_and_antialias_quality() {
+        let size = (64, 64);
+        let source = Selection::rounded_rect_quality(PixelRect::new(3, 4, 24, 18), 4, 64, 64, true)
+            .feather(3, 64, 64);
+        let target = PixelRect::new(10, 12, 30, 20);
+        for radius in [None, Some(0), Some(6)] {
+            let preview =
+                editable_selection_for_rect(&source, target, radius, false, size).unwrap();
+            let committed = preview.feather(source.feather_geometry().unwrap().feather, 64, 64);
+            let expected =
+                Selection::rounded_rect_quality(target, radius.unwrap_or(4), 64, 64, true)
+                    .feather(3, 64, 64);
+            assert_eq!(committed, expected);
+        }
+        let ellipse = Selection::ellipse_rect_quality(PixelRect::new(2, 4, 20, 10), 64, 64, true)
+            .feather(2, 64, 64);
+        let edited = editable_selection_for_rect(&ellipse, target, None, false, size)
+            .unwrap()
+            .feather(2, 64, 64);
+        assert_eq!(
+            edited,
+            Selection::ellipse_rect_quality(target, 64, 64, true).feather(2, 64, 64)
+        );
+    }
+
+    #[test]
+    fn custom_crop_ratios_preview_from_the_original_box_and_stay_inside_it() {
+        let baseline = CropRect {
+            x: 8,
+            y: 10,
+            width: 80,
+            height: 60,
+        };
+        let narrow = ratio_crop(
+            baseline,
+            crate::constraints::AspectRatio {
+                width: 1,
+                height: 3,
+            },
+        );
+        assert_eq!(
+            (narrow.x, narrow.y, narrow.width, narrow.height),
+            (38, 10, 20, 60)
+        );
+        let final_ratio = crate::constraints::AspectRatio {
+            width: 16,
+            height: 9,
+        };
+        let final_box = ratio_crop(baseline, final_ratio);
+        assert_eq!(
+            (final_box.x, final_box.y, final_box.width, final_box.height),
+            (8, 17, 80, 45)
+        );
+        assert_ne!(final_box, ratio_crop(narrow, final_ratio));
+    }
 
     #[test]
     fn reset_defaults_make_new_regions_hard_without_flattening_existing_curves() {
@@ -1706,23 +2054,6 @@ mod tests {
             placed_selection(Selection::Rect(hole), PixelRect::new(0, 0, 8, 8), 8, 8),
             Selection::Full
         );
-    }
-
-    #[test]
-    fn circle_toggle_uses_the_inscribed_square() {
-        assert_eq!(
-            centered_square(PixelRect::new(0, 0, 10, 6)),
-            PixelRect::new(2, 0, 6, 6)
-        );
-        assert_eq!(
-            circle_selection(
-                &Selection::ellipse_rect(PixelRect::new(0, 0, 10, 6), 20, 20),
-                20,
-                20
-            ),
-            Some(Selection::ellipse_rect(PixelRect::new(2, 0, 6, 6), 20, 20))
-        );
-        assert_eq!(circle_selection(&Selection::Unrestricted, 20, 20), None);
     }
 
     #[test]

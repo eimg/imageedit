@@ -63,8 +63,14 @@ to image pixels so free and fixed-ratio crop boxes stay inside the image.
 Creation waits until the drag area overlaps the image; a wholly outside drag
 leaves the existing crop unchanged.
 Crop has Free, 1:1, 4:3, 16:9, Image, and custom integer aspect ratios. A fixed
-ratio constrains creation, handle resize, and numeric dimension edits; choosing
-a ratio alone leaves the current box unchanged. Sample or set swatches and fill
+ratio constrains creation, handle resize, and numeric dimension edits. Choosing
+a fixed ratio or editing Ratio W/H also fits the current crop or editable geometric
+selection inside its original bounds, centered with pixel rounding. Free releases
+the constraint without reshaping it. Typed ratio previews use the field-start
+geometry; empty input/Escape restores the ratio and geometry. Selection changes
+commit one selection-only undo step; crop stays a draft until Apply. During a
+selection commit, the latest ratio click waits for completion and validates the
+original tab/layer/tool/generation; switching context discards the queued choice. Sample or set swatches and fill
 connected regions on the active layer.
 One shared recent list holds 12 unique RGB colors across tabs and all color
 pickers. Accepting foreground/background, Text, Drop Shadow, and gradient-stop
@@ -75,15 +81,17 @@ Reset leaves recents intact. Gradient alpha stays separate from RGB memory.
 Rectangle, oval, circle,
 freehand or polygon, and wand selections limit fill and Clear to Transparency,
 and Crop to Selection uses the selection bounds. Rectangle Select and Oval Select
-are separate tools. Oval Select has a Circle option for an exact circle, and
+are separate tools. Oval Select uses the shared 1:1 aspect ratio for an exact circle, and
 Rectangle Select has a corner radius control with minus and plus buttons, and
 the X/Y and Width/Height fields accept typed values for editable geometric
 selections. Empty text or Escape restores the numeric edit. Selection and Crop
 share ratio geometry from `src/constraints.rs`: dimensions round to pixels,
 resizes stay bounded, side handles center the untouched axis, and corner handles
 keep their opposite corner. Fixed-ratio handles stop at minimum size rather than
-crossing their opposite edge. Circle overrides the oval ratio. Rectangle and
+crossing their opposite edge. Legacy Circle settings become the shared 1:1 ratio. Rectangle and
 oval tools remember a shared ratio across restarts; Crop has a separate one.
+A rounded rectangle retains its antialias quality through radius zero and back;
+zero-radius coverage stays rectangular even when that quality bit is retained.
 Antialias edges defaults off and smooths oval/circle and rounded-rectangle
 coverage with a 4×4 subpixel sample, using fast interior/exterior checks. It
 updates a current editable curve in one selection-only undo step. Masks retain
@@ -215,7 +223,11 @@ quads remain editable with Apply disabled. The Scale
 Layer tool draws a frame around the active layer and previews scaling from a dragged
 border or corner; the tool uses Shift+S. Apply or Return on the canvas commits
 all preview adjustments in one undo step; Cancel or Escape on the canvas discards
-them. Repeated drags and numeric edits always resample the original pixels only at Apply.
+them. Repeated drags and numeric edits keep the original pixels for the final Apply.
+Scale previews resample from that same source in coalesced background jobs, with a
+1024-pixel maximum edge, using the selected Nearest/Bilinear/Bicubic method.
+Changing resampling refreshes the current draft; previews preserve masks/opacity
+and reject stale sessions. Apply alone writes the full-resolution result.
 Like warp tools, Scale owns an explicit preview session: Apply and Cancel remove
 its frame and editing controls. Selecting the tool or changing tabs/layers starts
 a session; after dismissal, a canvas click or reselecting Scale starts another.
@@ -559,8 +571,12 @@ document is a single plain layer without paths, guides, or editable text.
   usable. Close/Quit defers while a library write is active, resumes the normal
   close checks after success, and stays open on failure. No idle polling is used.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
-  the live GPU-scaled preview, and the commit that resamples the layer. It prepares
-  the preview in the background and rejects results after Apply or cancellation.
+  the live resampled preview, and the commit that resamples the layer. It coalesces
+  bounded previews from original pixels/masks in the background, follows the current
+  resampling choice, and rejects results after Apply, cancellation, or context changes.
+  If the first preview completes during a drag, its same-session/same-resampling
+  sprite follows the latest frame while the newest target renders; subsequent
+  publication requires the exact latest request.
   Release retains the draft; later pointer/numeric gestures capture the current
   target as their baseline while preserving the original source for one Apply.
   Frame and draft sizes exist only during the transform session; tool preferences persist separately; completion never
@@ -636,7 +652,7 @@ document is a single plain layer without paths, guides, or editable text.
 a rectangle, an ellipse, a rounded rectangle, the inverse of a rectangle, or a
 canvas-bounded coverage mask. `src/workspace/selection.rs` drags the rectangle
 or oval, resizes it from its handles, moves it from inside, and clears it on a
-click outside. Oval Select has a Circle option. Rectangle Select has a corner
+click outside. Oval Select uses 1:1 for circles. Rectangle Select has a corner
 radius control with minus and plus buttons. X/Y and Width/Height fields edit
 the position and size with live preview. Selection and Crop share constrained
 ratio geometry in `src/constraints.rs`; each has its own persistent preference.
@@ -863,7 +879,16 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   its tool options align the layer to canvas edges or center it with icon
   buttons. Move's Snapping disclosure starts collapsed, retains its persistent
   state, shows the active snap modes while folded, and never changes settings
-  when folded. Tool options use their natural height up to half the inspector,
+  when folded. Selection Edges, paint Stroke settings, Clone Source, Text Spacing/Layout,
+  Rotate Pivot, and Perspective Corner use persistent disclosures with setting summaries.
+  These start collapsed; Gradient Color Stops starts expanded and opens when choosing Custom.
+  Focused disclosure headers use a dedicated action/key context so Return/Space
+  toggle the section before canvas Apply bindings can run.
+  Gradient library management folds with its list. Folding finishes inline numeric edits,
+  preserves settings, and stays independent of tool resets and document history.
+  Text Color comes first; selection actions come last, including for Wand. Transform
+  Apply/Cancel, Perspective Reset All, errors, and text overflow notices stay outside folds.
+  Tool options use their natural height up to half the inspector,
   scrolling independently from Layers/Paths in the remaining space.
   The right inspector is 272 px wide to accommodate visible per-row lock controls.
   The resizable toolbox starts at the same total width, sharing the inspector
@@ -911,7 +936,9 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   Close/Quit flushes outstanding settings before normal unsaved-image handling.
   If that retry fails, the error explains that another explicit Close/Quit can
   exit without saving preferences; changes/resets enable another save attempt.
-  Preference changes never dirty a document or enter its undo history.
+  Preference-only changes never dirty a document or enter its undo history.
+  Ratio controls also reshape current editable selections in selection-only history;
+  crop and transform parameter changes update their uncommitted previews.
   `src/workspace/tool_reset.rs` owns current/all-tool reset scopes and availability.
   Tool Options has a reset arrow; Tools has Reset Current Tool and confirmed
   Reset All Tool Settings. Shared tool options reset together (geometric ratio/AA,

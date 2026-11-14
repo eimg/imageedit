@@ -105,6 +105,7 @@ impl Workspace {
                 event.position,
                 window.scale_factor(),
                 event.modifiers.shift,
+                window,
                 cx,
             );
             self.end_scale_drag(cx);

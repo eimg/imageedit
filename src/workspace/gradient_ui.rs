@@ -138,6 +138,11 @@ impl Workspace {
             self.preferences.gradient_custom = Some(self.dynamic_ramp());
         }
         self.preferences.gradient_use_custom = true;
+        if !super::settings_ui::ToolSection::GradientStops.expanded(&self.preferences.tool_sections)
+        {
+            super::settings_ui::ToolSection::GradientStops
+                .toggle(&mut self.preferences.tool_sections);
+        }
         self.gradient_settings_changed(window, cx);
     }
 

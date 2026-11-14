@@ -29,10 +29,9 @@ impl Preferences {
                 reset!(selection_ratio);
                 reset!(selection_ratio_value);
                 reset!(selection_antialias);
+                reset!(oval_circle);
                 if tool == Tool::Select {
                     reset!(selection_radius);
-                } else {
-                    reset!(oval_circle);
                 }
             }
             Tool::FreeSelect => reset!(free_antialias),
@@ -303,6 +302,7 @@ mod tests {
             "toolbox_folded",
             "move_snapping_expanded",
             "gradient_presets_expanded",
+            "tool_sections",
             "pdf_preferences",
             "jpeg_quality",
             "pdf_export_dpi",

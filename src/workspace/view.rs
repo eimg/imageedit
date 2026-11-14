@@ -20,8 +20,8 @@ use crate::commands::{
     InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, NudgeLayer, OPEN_HINT, OpenImage,
     PreviousTab, Redo, ResetColors, ResetCurrentTool, SaveImage, SaveImageAs, SaveProjectAs,
     SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
-    ToggleLayerBoundary, ToggleSnapGrid, ToggleSnapGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
-    ZoomWindow,
+    ToggleLayerBoundary, ToggleSnapGrid, ToggleSnapGuides, ToggleToolOptions, Tool, Undo, Zoom,
+    ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -31,6 +31,7 @@ use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
 use super::files::{ExportFormat, SaveMode};
 use super::numeric::NumericField;
+use super::settings_ui::ToolSection;
 use super::tooltip::{help_icon, tooltip, tooltip_with_detail};
 use super::{Change, Tab, Workspace};
 
@@ -845,27 +846,13 @@ impl Workspace {
     }
 
     fn selection_numeric_options(&self, cx: &Context<Self>) -> Div {
-        let mut options = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(section_label("SHAPE"));
+        let mut options = div().flex().flex_col().gap_2();
         if self.preferences.tool == Tool::Select {
-            options = options.child(self.selection_radius_row(cx));
+            options = options
+                .child(section_label("SHAPE"))
+                .child(self.selection_radius_row(cx));
         }
-        if self.preferences.tool == Tool::OvalSelect {
-            options = options.child(
-                toggle_button("Circle", self.preferences.oval_circle).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        let circle = !this.preferences.oval_circle;
-                        this.set_oval_circle(circle, window, cx);
-                    },
-                )),
-            );
-        }
-        if !(self.preferences.tool == Tool::OvalSelect && self.preferences.oval_circle) {
-            options = options.child(self.aspect_options(false, cx));
-        }
+        options = options.child(self.aspect_options(false, cx));
         if self.selection_shape_rect().is_some() {
             options = options
                 .child(section_label("POSITION"))
@@ -884,8 +871,7 @@ impl Workspace {
 
     fn selection_creation_options(&self, cx: &Context<Self>) -> Div {
         let antialias = self.active_selection_antialias();
-        div().flex().flex_col().gap_2()
-            .child(section_label("EDGES"))
+        let body = div().flex().flex_col().gap_2()
             .when(matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect), |panel| panel.child(
                 toggle_button("Antialias edges", antialias).on_click(cx.listener(
                     move |this, _, window, cx| this.set_selection_antialias(!antialias, window, cx),
@@ -915,7 +901,33 @@ impl Workspace {
                 })))
             .when(self.preferences.selection_feather_enabled, |panel| panel.child(
                 self.numeric_chip(NumericField::SelectionFeatherRadius, Some("Feather radius (px)"), cx)
-            ))
+            ));
+        let mut summary = Vec::new();
+        let antialias = match self.preferences.tool {
+            Tool::FreeSelect => self.preferences.free_antialias,
+            Tool::MagicWand => self.preferences.wand_antialias,
+            _ => antialias,
+        };
+        if antialias {
+            summary.push("AA".to_owned());
+        }
+        if self.preferences.selection_feather_enabled {
+            summary.push(format!(
+                "Feather {} px",
+                self.preferences.selection_feather_radius
+            ));
+        }
+        self.tool_option_section(
+            ToolSection::Edges,
+            "EDGES",
+            if summary.is_empty() {
+                "Hard".to_owned()
+            } else {
+                summary.join(" · ")
+            },
+            body,
+            cx,
+        )
     }
 
     fn aspect_options(&self, crop: bool, cx: &Context<Self>) -> Div {
@@ -923,7 +935,7 @@ impl Workspace {
         let active = if crop {
             self.preferences.crop_ratio
         } else {
-            self.preferences.selection_ratio
+            self.effective_selection_ratio()
         };
         let image = self.active_tab().map(|tab| AspectRatio {
             width: tab.document.width(),
@@ -953,19 +965,8 @@ impl Workspace {
             .filter(|(label, _)| *label != "Image" || image.is_some())
             .map(|(label, ratio)| {
                 choice_button(label, active == ratio).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        if crop {
-                            this.preferences.crop_ratio = ratio;
-                            if let Some(ratio) = ratio {
-                                this.preferences.crop_ratio_value = ratio;
-                            }
-                        } else {
-                            this.preferences.selection_ratio = ratio;
-                            if let Some(ratio) = ratio {
-                                this.preferences.selection_ratio_value = ratio;
-                            }
-                        }
-                        cx.notify();
+                    move |this, _, window, cx| {
+                        this.set_aspect_ratio(crop, ratio, window, cx);
                     },
                 ))
             });
@@ -1236,6 +1237,7 @@ impl Workspace {
                                         event.position,
                                         window.scale_factor(),
                                         event.modifiers.shift,
+                                        window,
                                         cx,
                                     );
                                     this.extend_warp_drag(
@@ -1790,19 +1792,7 @@ impl Workspace {
                                         | Tool::FreeSelect
                                         | Tool::MagicWand
                                 ),
-                                |panel| {
-                                    let enabled = self.selection_command_enabled(
-                                        super::selection::SelectionCommand::None,
-                                    );
-                                    panel.child(self.selection_creation_options(cx)).child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(section_label("SELECTION"))
-                                            .child(selection_actions(enabled)),
-                                    )
-                                },
+                                |panel| panel.child(self.selection_creation_options(cx)),
                             )
                             .when(
                                 self.preferences.tool == Tool::MagicWand || (self.preferences.tool == Tool::BucketFill && self.preferences.fill_mode == crate::document::FillMode::Connected),
@@ -1841,7 +1831,7 @@ impl Workspace {
                             })
                             .when(self.preferences.tool == Tool::CloneStamp, |panel| {
                                 let aligned = self.preferences.clone_aligned;
-                                panel.child(section_label("SOURCE"))
+                                let body = div().flex().flex_col().gap_2()
                                 .child(toggle_button("Sample All Layers", self.preferences.clone_sample_all).on_click(cx.listener(|this, _, _, cx| {
                                     this.set_clone_sampling(!this.preferences.clone_sample_all, cx);
                                 })))
@@ -1851,13 +1841,25 @@ impl Workspace {
                                 })))
                                 .child(toggle_button("Aligned", aligned).on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_clone_aligned(!aligned, cx);
-                                })))
+                                })));
+                                let summary = format!("{} · {}{}",
+                                    if self.preferences.clone_sample_all { "All layers" } else { "Active layer" },
+                                    if aligned { "Aligned" } else { "Unaligned" },
+                                    if self.preferences.clone_show_source { "" } else { " · Marker off" });
+                                panel.child(info_note("Alt-click to set the source."))
+                                    .child(self.tool_option_section(ToolSection::CloneSource, "SOURCE", summary, body, cx))
                             })
                             .when(self.preferences.tool == Tool::MagicWand, |panel| {
                                 let sample_all = self.preferences.wand_sample_all;
                                 panel.child(toggle_button("Sample All Layers", sample_all).on_click(
                                     cx.listener(move |this, _, _, cx| { this.preferences.wand_sample_all = !sample_all; cx.notify(); }),
                                 ))
+                            })
+                            .when(matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect | Tool::FreeSelect | Tool::MagicWand), |panel| {
+                                let enabled = self.selection_command_enabled(super::selection::SelectionCommand::None);
+                                panel.child(div().flex().flex_col().gap_2()
+                                    .child(section_label("SELECTION"))
+                                    .child(selection_actions(enabled)))
                             })
                             .when(self.preferences.tool == Tool::Text, |panel| self.text_options(panel, cx))
                             .when(self.preferences.tool == Tool::Gradient, |panel| {
@@ -2087,12 +2089,6 @@ impl Workspace {
                                             super::paint_ui::BrushField::Size,
                                             cx,
                                         ))
-                                        .child(brush_row(
-                                            self,
-                                            "Spacing",
-                                            super::paint_ui::BrushField::Spacing,
-                                            cx,
-                                        ))
                                         .when(self.preferences.tool != Tool::Pencil, |panel| {
                                             panel.child(brush_row(
                                                 self,
@@ -2105,6 +2101,15 @@ impl Workspace {
                                             self,
                                             if matches!(self.preferences.tool, Tool::Blur | Tool::Sharpen) { "Strength" } else { "Opacity" },
                                             super::paint_ui::BrushField::Opacity,
+                                            cx,
+                                        ))
+                                        .child(self.tool_option_section(
+                                            ToolSection::Stroke, "STROKE", self.stroke_options_summary(),
+                                            div().flex().flex_col().gap_2()
+                                        .child(brush_row(
+                                            self,
+                                            "Spacing",
+                                            super::paint_ui::BrushField::Spacing,
                                             cx,
                                         ))
                                         .child(toggle_button("Buildup", self.brush_buildup()).on_click(cx.listener(|this, _, _, cx| {
@@ -2126,7 +2131,7 @@ impl Workspace {
                                                 ].map(|(label, mode)| choice_button(label, selected == mode).on_click(cx.listener(move |this, _, _, cx| {
                                                     this.set_brush_smoothing(mode, cx);
                                                 })))).w_full()))
-                                        })
+                                        }), cx))
                                 },
                             ),
 
@@ -2142,8 +2147,10 @@ impl Workspace {
         {
             let selected = self.preferences.gradient_selected_stop;
             let interior = selected > 0 && selected + 1 < ramp.stops().len();
-            panel = panel
-                .child(section_label("COLOR STOPS"))
+            let stops = div()
+                .flex()
+                .flex_col()
+                .gap_2()
                 .child(div().flex().flex_wrap().gap_1().children(
                     ramp.stops().iter().enumerate().map(|(index, stop)| {
                         div()
@@ -2203,6 +2210,13 @@ impl Workspace {
                             button.opacity(0.45).cursor(CursorStyle::Arrow)
                         }),
                 ]));
+            panel = panel.child(self.tool_option_section(
+                ToolSection::GradientStops,
+                "COLOR STOPS",
+                format!("{} stops", ramp.stops().len()),
+                stops,
+                cx,
+            ));
         }
         let can_save = self.gradient_store.ready()
             && self.gradient_library.presets().len() < crate::gradient::library::MAX_PRESETS;
@@ -2333,35 +2347,122 @@ impl Workspace {
                         },
                     ))
             })
-            .child(action_row([
-                option_action("Save…", false)
-                    .when(can_save, |button| {
-                        button.on_click(cx.listener(|this, _, window, cx| {
-                            this.gradient_preset_form(false, window, cx)
-                        }))
-                    })
-                    .when(!can_save, |button| {
-                        button.opacity(0.45).cursor(CursorStyle::Arrow)
-                    }),
-                option_action("Rename", false)
-                    .when(can_edit, |button| {
-                        button.on_click(cx.listener(|this, _, window, cx| {
-                            this.gradient_preset_form(true, window, cx)
-                        }))
-                    })
-                    .when(!can_edit, |button| {
-                        button.opacity(0.45).cursor(CursorStyle::Arrow)
-                    }),
-                option_action("Delete", false)
-                    .when(can_edit, |button| {
-                        button.on_click(cx.listener(|this, _, window, cx| {
-                            this.delete_gradient_preset(window, cx)
-                        }))
-                    })
-                    .when(!can_edit, |button| {
-                        button.opacity(0.45).cursor(CursorStyle::Arrow)
-                    }),
-            ]))
+            .when(expanded, |panel| {
+                panel.child(action_row([
+                    option_action("Save…", false)
+                        .when(can_save, |button| {
+                            button.on_click(cx.listener(|this, _, window, cx| {
+                                this.gradient_preset_form(false, window, cx)
+                            }))
+                        })
+                        .when(!can_save, |button| {
+                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                        }),
+                    option_action("Rename", false)
+                        .when(can_edit, |button| {
+                            button.on_click(cx.listener(|this, _, window, cx| {
+                                this.gradient_preset_form(true, window, cx)
+                            }))
+                        })
+                        .when(!can_edit, |button| {
+                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                        }),
+                    option_action("Delete", false)
+                        .when(can_edit, |button| {
+                            button.on_click(cx.listener(|this, _, window, cx| {
+                                this.delete_gradient_preset(window, cx)
+                            }))
+                        })
+                        .when(!can_edit, |button| {
+                            button.opacity(0.45).cursor(CursorStyle::Arrow)
+                        }),
+                ]))
+            })
+    }
+
+    pub(super) fn tool_option_section(
+        &self,
+        section: ToolSection,
+        label: &'static str,
+        summary: String,
+        body: Div,
+        cx: &Context<Self>,
+    ) -> Div {
+        let expanded = section.expanded(&self.preferences.tool_sections);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .id(("tool-section", section as usize))
+                    .tab_index(0)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(24.))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(MUTED))
+                    .hover(|row| row.bg(rgb(HOVER)))
+                    .tooltip(tooltip(format!(
+                        "{} {} · {}",
+                        if expanded { "Collapse" } else { "Expand" },
+                        label.to_lowercase(),
+                        summary
+                    )))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.commit_numeric_edit(window, cx);
+                        section.toggle(&mut this.preferences.tool_sections);
+                        cx.notify();
+                    }))
+                    .key_context("ToolDisclosure")
+                    .on_action(cx.listener(move |this, _: &ToggleToolOptions, window, cx| {
+                        this.commit_numeric_edit(window, cx);
+                        section.toggle(&mut this.preferences.tool_sections);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        if expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                    ))
+                    .child(section_label(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_right()
+                            .text_size(px(11.))
+                            .text_ellipsis()
+                            .child(summary),
+                    ),
+            )
+            .when(expanded, |panel| panel.child(body))
+    }
+
+    fn stroke_options_summary(&self) -> String {
+        use super::paint_ui::BrushField;
+        use crate::paint::smoothing::Smoothing;
+        let mut parts = vec![format!(
+            "Spacing {}%",
+            self.brush_value(BrushField::Spacing)
+        )];
+        if self.brush_buildup() {
+            parts.push(format!("Flow {}%", self.brush_value(BrushField::Flow)));
+        }
+        if self.preferences.tool != Tool::Pencil {
+            match self.brush_smoothing() {
+                Smoothing::Off => {}
+                Smoothing::Light => parts.push("Light".into()),
+                Smoothing::Strong => parts.push("Strong".into()),
+            }
+        }
+        parts.join(" · ")
     }
 
     fn move_snapping_options(&self, cx: &Context<Self>) -> Div {

@@ -184,7 +184,17 @@ impl NumericField {
                 | Self::SelectionHeight
                 | Self::SelectionX
                 | Self::SelectionY
+                | Self::SelectionRatioWidth
+                | Self::SelectionRatioHeight
         )
+    }
+
+    fn is_selection_ratio(self) -> bool {
+        matches!(self, Self::SelectionRatioWidth | Self::SelectionRatioHeight)
+    }
+
+    fn is_crop_ratio(self) -> bool {
+        matches!(self, Self::CropRatioWidth | Self::CropRatioHeight)
     }
 
     fn accepts_character(self, ch: char) -> bool {
@@ -277,12 +287,22 @@ pub(super) struct NumericEdit {
     cursor: usize,
     selected: bool,
     original: i64,
-    original_crop: Option<CropRect>,
+    geometry: NumericGeometry,
+}
+
+#[derive(Clone, Copy, Default)]
+struct NumericGeometry {
+    crop: Option<CropRect>,
+    ratio: Option<(
+        Option<crate::constraints::AspectRatio>,
+        crate::constraints::AspectRatio,
+    )>,
 }
 
 pub(super) enum NumericFollowup {
     Key(Keystroke),
     PdfExport,
+    SelectionRadius(i32),
     Focus(NumericField),
     Effect {
         reopen: bool,
@@ -337,7 +357,7 @@ impl NumericEdit {
             text,
             selected: true,
             original: value,
-            original_crop: crop,
+            geometry: NumericGeometry { crop, ratio: None },
         }
     }
 
@@ -554,14 +574,32 @@ impl Workspace {
         let Some(value) = self.numeric_value(field) else {
             return;
         };
-        let original_crop = if field.is_crop() { self.crop } else { None };
+        let original_crop = if field.is_crop() || field.is_crop_ratio() {
+            self.crop
+        } else {
+            None
+        };
         if field.is_scale() && !self.begin_scale_numeric(window, cx) {
             return;
         }
         if field.is_move() && !self.begin_move_numeric(window, cx) {
             return;
         }
-        self.numeric_edit = Some(NumericEdit::new(field, value, original_crop));
+        let mut edit = NumericEdit::new(field, value, original_crop);
+        edit.geometry.ratio = if field.is_selection_ratio() {
+            Some((
+                self.preferences.selection_ratio,
+                self.preferences.selection_ratio_value,
+            ))
+        } else if field.is_crop_ratio() {
+            Some((
+                self.preferences.crop_ratio,
+                self.preferences.crop_ratio_value,
+            ))
+        } else {
+            None
+        };
+        self.numeric_edit = Some(edit);
         self.numeric_focus.focus(window);
         cx.notify();
     }
@@ -670,18 +708,15 @@ impl Workspace {
     }
 
     pub(super) fn apply_numeric_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((field, text, original, original_crop)) = self.numeric_edit.as_ref().map(|edit| {
-            (
-                edit.field,
-                edit.text.clone(),
-                edit.original,
-                edit.original_crop,
-            )
-        }) else {
+        let Some((field, text, original, geometry)) = self
+            .numeric_edit
+            .as_ref()
+            .map(|edit| (edit.field, edit.text.clone(), edit.original, edit.geometry))
+        else {
             return;
         };
         let Some(value) = field.parse(&text) else {
-            self.restore_numeric_values(field, original, original_crop, window, cx);
+            self.restore_numeric_values(field, original, geometry, window, cx);
             cx.notify();
             return;
         };
@@ -692,9 +727,9 @@ impl Workspace {
         if field.is_scale() {
             if let Ok(value) = u32::try_from(value) {
                 if value == 0 {
-                    self.restore_scale_size(cx);
+                    self.restore_scale_size(window, cx);
                 } else {
-                    self.preview_scale_size(field == NumericField::ScaleWidth, value, cx);
+                    self.preview_scale_size(field == NumericField::ScaleWidth, value, window, cx);
                 }
             }
             return;
@@ -752,7 +787,7 @@ impl Workspace {
             }
             NumericField::SelectionWidth | NumericField::SelectionHeight => {
                 if value == 0 {
-                    self.restore_numeric_values(field, original, original_crop, window, cx);
+                    self.restore_numeric_values(field, original, geometry, window, cx);
                     cx.notify();
                     return;
                 }
@@ -800,7 +835,7 @@ impl Workspace {
             }
             NumericField::CropWidth | NumericField::CropHeight => {
                 if value == 0 {
-                    self.restore_numeric_values(field, original, original_crop, window, cx);
+                    self.restore_numeric_values(field, original, geometry, window, cx);
                     cx.notify();
                     return;
                 }
@@ -931,6 +966,10 @@ impl Workspace {
                             this.run_last_effect(reopen, window, cx);
                             None
                         }
+                        NumericFollowup::SelectionRadius(delta) => {
+                            this.nudge_selection_radius(delta, window, cx);
+                            None
+                        }
                         NumericFollowup::PdfExport => {
                             this.pdf_export_form(window, cx);
                             None
@@ -988,23 +1027,35 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.restore_numeric_values(edit.field, edit.original, edit.original_crop, window, cx);
+        self.restore_numeric_values(edit.field, edit.original, edit.geometry, window, cx);
     }
 
     fn restore_numeric_values(
         &mut self,
         field: NumericField,
         original: i64,
-        original_crop: Option<CropRect>,
+        geometry: NumericGeometry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((ratio, value)) = geometry.ratio {
+            if field.is_crop_ratio() {
+                self.preferences.crop_ratio = ratio;
+                self.preferences.crop_ratio_value = value;
+                self.crop = geometry.crop;
+            } else {
+                self.preferences.selection_ratio = ratio;
+                self.preferences.selection_ratio_value = value;
+                self.selection_preview = None;
+            }
+            return;
+        }
         if field.is_tool_option() {
             self.apply_tool_numeric(field, original, window, cx);
             return;
         }
         if field.is_scale() {
-            self.restore_scale_size(cx);
+            self.restore_scale_size(window, cx);
             return;
         }
         if field.is_move() {
@@ -1029,7 +1080,7 @@ impl Workspace {
             NumericField::CropX
             | NumericField::CropY
             | NumericField::CropWidth
-            | NumericField::CropHeight => self.crop = original_crop,
+            | NumericField::CropHeight => self.crop = geometry.crop,
             _ => unreachable!("tool options were restored before selection and crop fields"),
         }
     }
@@ -1061,7 +1112,27 @@ impl Workspace {
                 } else {
                     self.preferences.selection_ratio_value.height = value as u32;
                 }
-                self.preferences.selection_ratio = Some(self.preferences.selection_ratio_value);
+                let ratio = self.preferences.selection_ratio_value;
+                self.preferences.selection_ratio = Some(ratio);
+                self.selection_preview = self.active_tab().and_then(|tab| {
+                    let selection = &tab.selection;
+                    let rect = selection
+                        .feather_geometry()
+                        .map(|geometry| geometry.rect)
+                        .or_else(|| match selection {
+                            Selection::Rect(rect) => Some(*rect),
+                            Selection::RoundedRect(shape) => Some(shape.rect()),
+                            Selection::Ellipse(shape) => Some(shape.rect()),
+                            _ => None,
+                        })?;
+                    super::selection::editable_selection_for_rect(
+                        selection,
+                        ratio.inscribe(rect),
+                        None,
+                        selection.is_antialiased(),
+                        tab.document.content.size(),
+                    )
+                });
             }
             NumericField::CropRatioWidth | NumericField::CropRatioHeight => {
                 if field == NumericField::CropRatioWidth {
@@ -1069,7 +1140,14 @@ impl Workspace {
                 } else {
                     self.preferences.crop_ratio_value.height = value as u32;
                 }
-                self.preferences.crop_ratio = Some(self.preferences.crop_ratio_value);
+                let ratio = self.preferences.crop_ratio_value;
+                self.preferences.crop_ratio = Some(ratio);
+                let baseline = self
+                    .numeric_edit
+                    .as_ref()
+                    .and_then(|edit| edit.geometry.crop)
+                    .or(self.crop);
+                self.crop = baseline.map(|crop| super::selection::ratio_crop(crop, ratio));
             }
             NumericField::BrushSize => self.set_brush_value(BrushField::Size, value as u32, cx),
             NumericField::BrushSpacing => {
@@ -1141,26 +1219,14 @@ impl Workspace {
     fn selection_for_rect(&self, rect: PixelRect, radius: Option<u32>) -> Option<Selection> {
         let tab = self.active_tab()?;
         let (width, height) = tab.document.content.size();
-        let current = self.selection_preview.as_ref().or(Some(&tab.selection))?;
-        match current {
-            Selection::Rect(_) | Selection::RoundedRect(_) if radius.is_some() => {
-                Some(Selection::rounded_rect_quality(
-                    rect,
-                    radius?,
-                    width,
-                    height,
-                    if matches!(current, Selection::RoundedRect(_)) {
-                        current.is_antialiased()
-                    } else {
-                        self.preferences.selection_antialias
-                    },
-                ))
-            }
-            Selection::Rect(_) | Selection::RoundedRect(_) | Selection::Ellipse(_) => Some(
-                super::selection::placed_selection(current.clone(), rect, width, height),
-            ),
-            _ => None,
-        }
+        let current = &tab.selection;
+        super::selection::editable_selection_for_rect(
+            current,
+            rect,
+            radius,
+            self.preferences.selection_antialias,
+            (width, height),
+        )
     }
 
     pub(super) fn numeric_chip(

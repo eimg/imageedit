@@ -42,6 +42,7 @@ actions!(
         ResetColors,
         ResetCurrentTool,
         ResetAllTools,
+        ToggleToolOptions,
         ZoomIn,
         ZoomOut,
         ApplyCrop,
@@ -211,7 +212,7 @@ impl Tool {
             Self::OvalSelect => (
                 "Oval Select",
                 "oval",
-                "Drag an oval, or enable Circle to constrain it to an exact circle.",
+                "Drag an oval, or choose 1:1 to constrain it to an exact circle.",
             ),
             Self::FreeSelect => (
                 "Free Select",
@@ -297,7 +298,7 @@ impl Tool {
                 "Click the image to sample the foreground color from the visible layers. The color swatches are at the top of the toolbox."
             }
             Self::Crop => {
-                "Drag a crop box. Drag inside to move it or drag a handle to resize it. Choose Free or a fixed aspect ratio; edit Ratio W/H for a custom ratio. The ratio applies on the next drag, resize, or dimension edit. X, Y, Width, and Height update immediately; empty text restores the field's original value. Return applies the crop; Escape cancels."
+                "Drag a crop box. Drag inside to move it or drag a handle to resize it. Choose Free or a fixed aspect ratio; edit Ratio W/H for a custom ratio. Choosing a fixed ratio or editing Ratio W/H refits the current box around its center. Free releases the constraint without changing the box. X, Y, Width, and Height update immediately; empty text restores the field's original value. Return applies the crop; Escape cancels."
             }
             Self::Rotate => {
                 "Drag to rotate the active layer or type an angle in degrees. Choose one of nine layer anchors for the pivot, edit its signed canvas X/Y to tenths of a pixel, or drag its circular crosshair. Pivot changes recalculate the original layer at the current angle; choosing a pivot at zero angle does not edit pixels. Center restores the default rotation behavior. Hold Shift while dragging to snap to 15-degree angles around the pivot. Return finishes the numeric edit; Apply or Return on the canvas applies the preview. Escape cancels the numeric edit or preview. The selection stays in canvas coordinates."
@@ -312,10 +313,10 @@ impl Tool {
                 "Drag a border or corner to preview scaling the active layer. Apply or Return on the canvas commits all adjustments as one undo step; Cancel or Escape on the canvas discards them. Both dismiss the frame and editing controls. Click the canvas or select Scale Layer again to start another preview. Type Width or Height for a live preview about the selected Size anchor (Center initially); Return or leaving the field finishes that field, and Escape or empty text restores its previous size. Fit Layer to Canvas previews a proportional fit and centers the whole layer, even when handles are off-screen. It may enlarge smaller layers and uses the selected resampling. The Size anchor affects typed dimensions; handle drags keep their opposite edge or corner. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at Apply. Rasterize editable text before scaling it."
             }
             Self::Select => {
-                "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, Height, and corner radius update immediately; empty text or Escape restores the numeric edit. Choose Free or a fixed aspect ratio; Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Antialias edges smooths rounded corners. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, Height, and corner radius update immediately; empty text or Escape restores the numeric edit. Choose Free or a fixed aspect ratio; Choosing a fixed ratio or editing Ratio W/H refits the current editable selection around its center. Free releases the constraint without changing its shape. Antialias edges smooths rounded corners. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::OvalSelect => {
-                "Drag an oval; enable Circle for a circle, or choose a fixed aspect ratio. Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, and Height update immediately; empty text or Escape restores the numeric edit. Antialias edges smooths the curve. Shift adds, Control subtracts, and Shift-Control intersects."
+                "Drag an oval; choose 1:1 for a circle, or another fixed aspect ratio. Choosing a fixed ratio or editing Ratio W/H refits the current editable selection around its center. Free releases the constraint without changing its shape. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, and Height update immediately; empty text or Escape restores the numeric edit. Antialias edges smooths the curve. Shift adds, Control subtracts, and Shift-Control intersects."
             }
             Self::FreeSelect => {
                 "Click to add vertices or drag to draw a freehand segment. Releasing keeps the outline open. Click its start or press Return to close it; Escape cancels. Shift adds, Control subtracts, and Shift-Control intersects."
@@ -499,7 +500,15 @@ pub const NEW_HINT: &str = if cfg!(target_os = "macos") {
     "Ctrl+N"
 };
 
+pub(super) fn tool_disclosure_bindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("enter", ToggleToolOptions, Some("ToolDisclosure")),
+        KeyBinding::new("space", ToggleToolOptions, Some("ToolDisclosure")),
+    ]
+}
+
 pub fn register(cx: &mut App) {
+    cx.bind_keys(tool_disclosure_bindings());
     let primary = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -965,6 +974,31 @@ fn tool(tool: Tool) -> MenuItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focused_tool_disclosures_take_return_and_space_before_canvas_actions() {
+        use gpui::{KeyContext, Keymap, Keystroke};
+        for tool_context in ["Transform", "ScaleLayer", "Gradient", "Crop", "FreeSelect"] {
+            let mut bindings = vec![
+                KeyBinding::new("enter", ApplyTransform, Some(tool_context)),
+                KeyBinding::new("space", ApplyTransform, Some(tool_context)),
+            ];
+            bindings.extend(tool_disclosure_bindings());
+            let keymap = Keymap::new(bindings);
+            let contexts = [
+                KeyContext::parse(tool_context).unwrap(),
+                KeyContext::parse("ToolDisclosure").unwrap(),
+            ];
+            for key in ["enter", "space"] {
+                let input = [Keystroke::parse(key).unwrap()];
+                let (matches, pending) = keymap.bindings_for_input(&input, &contexts);
+                assert!(!pending);
+                assert!(matches[0].action().as_any().is::<ToggleToolOptions>());
+                let (canvas, _) = keymap.bindings_for_input(&input, &contexts[..1]);
+                assert!(canvas[0].action().as_any().is::<ApplyTransform>());
+            }
+        }
+    }
 
     #[test]
     fn every_tool_is_in_one_group_with_a_distinct_shortcut() {

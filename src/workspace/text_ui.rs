@@ -10,6 +10,7 @@ use super::Workspace;
 use super::dialogs::{Field, FieldMode};
 use super::layers::MovePaint;
 use super::numeric::NumericField;
+use super::settings_ui::ToolSection;
 use super::view::{
     ACCENT, BORDER, CANVAS, HOVER, MUTED, SELECTED, TEXT, choice_button, info_note, option_action,
     option_row, section_label, segmented, step_button, toggle_button,
@@ -697,6 +698,44 @@ impl Workspace {
             .when_some(substituted, |panel, message| {
                 panel.child(info_note(message))
             })
+            .child(section_label("COLOR"))
+            .child(
+                div()
+                    .id("text-color")
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(CANVAS))
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgb(HOVER)))
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(TEXT))
+                            .child(format!("#{color:06X}")),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let swatch = if this.text_draft.is_some() {
+                            TEXT_SWATCH
+                        } else {
+                            0
+                        };
+                        this.color_form(swatch, window, cx);
+                    })),
+            )
             .child(section_label("FONT"))
             .child(self.font_picker(&family, cx))
             .child(
@@ -740,78 +779,115 @@ impl Workspace {
                         },
                     ))),
             ))
-            .child(section_label("SPACING"))
-            .child(option_row(
-                "Letter px",
-                self.numeric_stepper(
-                    NumericField::TextLetterSpacing,
-                    step_button("text-letter-down", "−").on_click(cx.listener(
-                        |this, _, window, cx| this.step_text_spacing(-1.0, 0.0, window, cx),
-                    )),
-                    step_button("text-letter-up", "+").on_click(cx.listener(
-                        |this, _, window, cx| this.step_text_spacing(1.0, 0.0, window, cx),
-                    )),
+            .child(
+                self.tool_option_section(
+                    ToolSection::TextSpacing,
+                    "SPACING",
+                    format!(
+                        "{} px · {}%",
+                        self.numeric_value(NumericField::TextLetterSpacing)
+                            .unwrap_or(0),
+                        self.numeric_value(NumericField::TextLineSpacing)
+                            .unwrap_or(100)
+                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(option_row(
+                            "Letter px",
+                            self.numeric_stepper(
+                                NumericField::TextLetterSpacing,
+                                step_button("text-letter-down", "−").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.step_text_spacing(-1.0, 0.0, window, cx)
+                                    },
+                                )),
+                                step_button("text-letter-up", "+").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.step_text_spacing(1.0, 0.0, window, cx)
+                                    },
+                                )),
+                                cx,
+                            ),
+                        ))
+                        .child(option_row(
+                            "Line %",
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(step_button("text-line-down", "−").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.step_text_spacing(0.0, -0.1, window, cx)
+                                    },
+                                )))
+                                .child(self.numeric_chip(NumericField::TextLineSpacing, None, cx))
+                                .child(step_button("text-line-up", "+").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.step_text_spacing(0.0, 0.1, window, cx)
+                                    },
+                                ))),
+                        )),
                     cx,
                 ),
-            ))
-            .child(option_row(
-                "Line %",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(step_button("text-line-down", "−").on_click(cx.listener(
-                        |this, _, window, cx| this.step_text_spacing(0.0, -0.1, window, cx),
-                    )))
-                    .child(self.numeric_chip(NumericField::TextLineSpacing, None, cx))
-                    .child(step_button("text-line-up", "+").on_click(cx.listener(
-                        |this, _, window, cx| this.step_text_spacing(0.0, 0.1, window, cx),
-                    ))),
-            ))
-            .child(section_label("LAYOUT"))
-            .child(
-                toggle_button("Fixed box", layout.width.is_some()).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        let mut layout = this.text_layout();
-                        if layout.width.is_some() {
-                            layout.width = None;
-                            layout.height = None;
-                        } else {
-                            layout.width = Some(256);
-                            layout.height = Some(128);
-                        }
-                        this.set_text_layout(layout, window, cx);
-                    },
-                )),
             )
-            .when(layout.width.is_some(), |panel| {
-                panel
-                    .child(option_row(
-                        "Width",
-                        self.numeric_chip(NumericField::TextBoxWidth, None, cx),
-                    ))
-                    .child(option_row(
-                        "Height",
-                        self.numeric_chip(NumericField::TextBoxHeight, None, cx),
-                    ))
-                    .child(segmented(
-                        [
-                            (TextAlign::Left, "Left"),
-                            (TextAlign::Center, "Center"),
-                            (TextAlign::Right, "Right"),
-                        ]
-                        .into_iter()
-                        .map(|(align, label)| {
-                            choice_button(label, layout.align == align).on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    let mut layout = this.text_layout();
-                                    layout.align = align;
-                                    this.set_text_layout(layout, window, cx);
-                                },
-                            ))
+            .child(
+                self.tool_option_section(
+                    ToolSection::TextLayout,
+                    "LAYOUT",
+                    layout.width.map_or_else(
+                        || "Auto".to_owned(),
+                        |width| format!("{} × {}", width, layout.height.unwrap_or(0)),
+                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(toggle_button("Fixed box", layout.width.is_some()).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                let mut layout = this.text_layout();
+                                if layout.width.is_some() {
+                                    layout.width = None;
+                                    layout.height = None;
+                                } else {
+                                    layout.width = Some(256);
+                                    layout.height = Some(128);
+                                }
+                                this.set_text_layout(layout, window, cx);
+                            }),
+                        ))
+                        .when(layout.width.is_some(), |panel| {
+                            panel
+                                .child(option_row(
+                                    "Width",
+                                    self.numeric_chip(NumericField::TextBoxWidth, None, cx),
+                                ))
+                                .child(option_row(
+                                    "Height",
+                                    self.numeric_chip(NumericField::TextBoxHeight, None, cx),
+                                ))
+                                .child(segmented(
+                                    [
+                                        (TextAlign::Left, "Left"),
+                                        (TextAlign::Center, "Center"),
+                                        (TextAlign::Right, "Right"),
+                                    ]
+                                    .into_iter()
+                                    .map(|(align, label)| {
+                                        choice_button(label, layout.align == align).on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                let mut layout = this.text_layout();
+                                                layout.align = align;
+                                                this.set_text_layout(layout, window, cx);
+                                            }),
+                                        )
+                                    }),
+                                ))
                         }),
-                    ))
-            })
+                    cx,
+                ),
+            )
             .when(
                 draft.is_some_and(|draft| {
                     draft.layout.height.is_some_and(|height| {
@@ -827,44 +903,6 @@ impl Workspace {
                         "Text extends below the box. Increase its height to show more.",
                     ))
                 },
-            )
-            .child(section_label("COLOR"))
-            .child(
-                div()
-                    .id("text-color")
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(CANVAS))
-                    .cursor_pointer()
-                    .hover(|button| button.bg(rgb(HOVER)))
-                    .child(
-                        div()
-                            .size(px(16.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(color)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(TEXT))
-                            .child(format!("#{color:06X}")),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let swatch = if this.text_draft.is_some() {
-                            TEXT_SWATCH
-                        } else {
-                            0
-                        };
-                        this.color_form(swatch, window, cx);
-                    })),
             )
             .child(section_label("LAYER"))
             .child(

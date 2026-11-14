@@ -29,6 +29,27 @@ pub(super) struct ScaleDrag {
     anchor: crate::transform::Anchor,
 }
 
+#[derive(Clone, Copy)]
+struct ScalePreviewRequest {
+    token: u64,
+    tab: usize,
+    layer: LayerId,
+    generation: u64,
+    target: PixelRect,
+    resample: crate::transform::Resample,
+}
+
+impl ScalePreviewRequest {
+    fn can_publish(self, current: Self, dirty: bool, has_overlay: bool) -> bool {
+        self.token == current.token && self.tab == current.tab
+            && self.layer == current.layer && self.generation == current.generation
+            && self.resample == current.resample
+            // A first, same-session sprite keeps the canvas responsive while
+            // the newest geometry is being rendered. Later results must be exact.
+            && (!has_overlay || (!dirty && self.target == current.target))
+    }
+}
+
 impl ScaleDrag {
     fn begin_pointer(&mut self, edges: ScaleEdges, start: (i64, i64)) {
         self.baseline = self.target;
@@ -197,48 +218,120 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.scale_token = self.scale_token.wrapping_add(1);
+        self.scale_drag = Some(drag);
+        self.request_scale_preview(window, cx);
+    }
+
+    pub(super) fn request_scale_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scale_drag.is_none() {
+            return;
+        }
+        self.scale_preview_dirty = true;
+        self.pump_scale_preview(window, cx);
+        cx.notify();
+    }
+
+    fn pump_scale_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scale_preview_busy || !self.scale_preview_dirty {
+            return;
+        }
+        let Some(drag) = self.scale_drag else {
+            return;
+        };
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let Some(layer) = tab.document.content.layer(drag.layer) else {
+        let Some(layer) = tab.document.content.layer(drag.layer).cloned() else {
             return;
         };
-        let id = drag.layer;
-        let original = drag.original;
-        let content = tab.document.content.clone();
-        let pixels = layer.pixels.clone();
-        let opacity = layer.opacity;
+        let tab_id = tab.id;
+        let generation = tab.history.generation();
+        let base = self
+            .scale_overlay
+            .is_none()
+            .then(|| tab.document.content.clone());
+        let target = drag.target;
+        let resample = self.preferences.warp_resample;
+        self.scale_preview_dirty = false;
+        self.scale_preview_busy = true;
         self.scale_token = self.scale_token.wrapping_add(1);
         let token = self.scale_token;
-        self.scale_drag = Some(drag);
+        let request = ScalePreviewRequest {
+            token,
+            tab: tab_id,
+            layer: drag.layer,
+            generation,
+            target,
+            resample,
+        };
         let job = cx.background_executor().spawn(async move {
-            let (below, above) = content.preview_around(id);
+            let shown = scale_preview_pixels(&layer, (target.width, target.height), resample);
+            let (below, above) = base
+                .as_ref()
+                .map(|content| content.preview_around(drag.layer))
+                .unwrap_or((None, None));
             MovePaint {
                 below: below.as_ref().map(document::preview_render),
                 above: above.as_ref().map(document::preview_render),
-                sprite: document::preview_render(&super::layers::with_layer_opacity(
-                    &pixels, opacity,
-                )),
-                offset: (original.x as i32, original.y as i32),
-                size: (original.width, original.height),
+                sprite: document::preview_render(&shown),
+                offset: (target.x as i32, target.y as i32),
+                size: (target.width, target.height),
             }
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let mut overlay = job.await;
-            let _ = workspace.update_in(cx, |workspace, window, cx| {
-                if workspace.scale_token != token || workspace.scale_drag.is_none() {
+            let _ = workspace.update_in(cx, |this, window, cx| {
+                this.scale_preview_busy = false;
+                let current = this
+                    .scale_drag
+                    .zip(this.active_tab())
+                    .filter(|(drag, tab)| drag.layer == tab.active_layer)
+                    .map(|(drag, tab)| ScalePreviewRequest {
+                        token: this.scale_token,
+                        tab: tab.id,
+                        layer: drag.layer,
+                        generation: tab.history.generation(),
+                        target: drag.target,
+                        resample: this.preferences.warp_resample,
+                    });
+                if let Some(current) = current.filter(|current| {
+                    request.can_publish(
+                        *current,
+                        this.scale_preview_dirty,
+                        this.scale_overlay.is_some(),
+                    )
+                }) {
+                    // An interim sprite follows the latest frame, rather than
+                    // pulling the frame back to the geometry of its old request.
+                    overlay.offset = (current.target.x as i32, current.target.y as i32);
+                    overlay.size = (current.target.width, current.target.height);
+                    if let Some(previous) = this.scale_overlay.replace(overlay) {
+                        // Keep the background partitions when only the sprite changed.
+                        let previous_sprite = previous.sprite;
+                        let overlay = this.scale_overlay.as_mut().unwrap();
+                        if overlay.below.is_none() {
+                            overlay.below = previous.below;
+                        } else {
+                            super::drop_images(previous.below, window, cx);
+                        }
+                        if overlay.above.is_none() {
+                            overlay.above = previous.above;
+                        } else {
+                            super::drop_images(previous.above, window, cx);
+                        }
+                        super::drop_images(std::iter::once(previous_sprite), window, cx);
+                    }
+                } else {
                     super::drop_images(overlay.into_images(), window, cx);
-                    return;
                 }
-                let target = workspace.scale_drag.unwrap().target;
-                overlay.offset = (target.x as i32, target.y as i32);
-                overlay.size = (target.width, target.height);
-                workspace.scale_overlay = Some(overlay);
+                if this.scale_preview_dirty {
+                    this.pump_scale_preview(window, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
     pub(super) fn extend_scale(
@@ -246,6 +339,7 @@ impl Workspace {
         position: Point<Pixels>,
         scale: f32,
         shift: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.scale_drag.filter(|drag| drag.pointer) else {
@@ -261,7 +355,7 @@ impl Workspace {
             pointer,
             self.preferences.scale_lock ^ shift,
         );
-        self.update_scale_target(target, cx);
+        self.update_scale_target(target, window, cx);
     }
 
     pub(super) fn scale_pointer_dragging(&self) -> bool {
@@ -280,18 +374,24 @@ impl Workspace {
             && self.scale_drag.is_some_and(|drag| !drag.pointer)
     }
 
-    pub(super) fn preview_scale_size(&mut self, width: bool, value: u32, cx: &mut Context<Self>) {
+    pub(super) fn preview_scale_size(
+        &mut self,
+        width: bool,
+        value: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.scale_drag.filter(|drag| !drag.pointer) else {
             return;
         };
         match drag.numeric_target(width, value, self.preferences.scale_lock) {
             Ok(target) => {
-                if !self.update_scale_target(target, cx) {
-                    self.restore_scale_size(cx);
+                if !self.update_scale_target(target, window, cx) {
+                    self.restore_scale_size(window, cx);
                 }
             }
             Err(message) => {
-                self.restore_scale_size(cx);
+                self.restore_scale_size(window, cx);
                 self.notice(message, cx);
             }
         }
@@ -313,9 +413,9 @@ impl Workspace {
         }
     }
 
-    pub(super) fn restore_scale_size(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn restore_scale_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(drag) = self.scale_drag {
-            self.update_scale_target(drag.baseline, cx);
+            self.update_scale_target(drag.baseline, window, cx);
         }
     }
 
@@ -337,11 +437,17 @@ impl Workspace {
                 bounds.width,
                 bounds.height,
             ),
+            window,
             cx,
         );
     }
 
-    fn update_scale_target(&mut self, target: PixelRect, cx: &mut Context<Self>) -> bool {
+    fn update_scale_target(
+        &mut self,
+        target: PixelRect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(drag) = self.scale_drag else {
             return false;
         };
@@ -365,7 +471,7 @@ impl Workspace {
             overlay.offset = (target.x as i32, target.y as i32);
             overlay.size = (target.width, target.height);
         }
-        cx.notify();
+        self.request_scale_preview(window, cx);
         true
     }
 
@@ -378,6 +484,7 @@ impl Workspace {
             return;
         };
         self.scale_token = self.scale_token.wrapping_add(1);
+        self.scale_preview_dirty = false;
         let overlay = self.scale_overlay.take();
         if drag.target == drag.original {
             if let Some(overlay) = overlay {
@@ -408,6 +515,7 @@ impl Workspace {
         }
         self.scale_token = self.scale_token.wrapping_add(1);
         self.scale_drag = None;
+        self.scale_preview_dirty = false;
         if let Some(overlay) = self.scale_overlay.take() {
             super::drop_images(overlay.into_images(), window, cx);
         }
@@ -466,6 +574,32 @@ impl Workspace {
             f32::from(start.y.max(end.y)),
         ))
     }
+}
+
+const SCALE_PREVIEW_EDGE: u32 = 1024;
+
+fn scale_preview_pixels(
+    layer: &document::RasterLayer,
+    target: (u32, u32),
+    resample: crate::transform::Resample,
+) -> image::RgbaImage {
+    let edge = target.0.max(target.1).max(1);
+    let size = if edge > SCALE_PREVIEW_EDGE {
+        let scaled = |length: u32| {
+            (u64::from(length) * u64::from(SCALE_PREVIEW_EDGE) / u64::from(edge)).max(1) as u32
+        };
+        (scaled(target.0), scaled(target.1))
+    } else {
+        target
+    };
+    let mut shown = crate::transform::scale_pixels(&layer.pixels, size.0, size.1, resample);
+    if let Some(mask) = layer.mask.as_ref().filter(|mask| mask.enabled) {
+        let mask = crate::transform::scale_pixels(&mask.pixels, size.0, size.1, resample);
+        for (pixel, mask) in shown.pixels_mut().zip(mask.pixels()) {
+            pixel[3] = ((u16::from(pixel[3]) * u16::from(mask[3]) + 127) / 255) as u8;
+        }
+    }
+    super::layers::with_layer_opacity(&shown, layer.opacity)
 }
 
 fn commit_scale(
@@ -644,6 +778,97 @@ impl ScaleEdges {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_scale_preview_can_follow_a_moving_target_but_never_a_stale_session() {
+        use crate::transform::Resample;
+        let job = ScalePreviewRequest {
+            token: 5,
+            tab: 2,
+            layer: LayerId(1),
+            generation: 7,
+            target: PixelRect::new(0, 0, 20, 10),
+            resample: Resample::Bilinear,
+        };
+        let moved = ScalePreviewRequest {
+            target: PixelRect::new(4, 6, 30, 20),
+            ..job
+        };
+        assert!(job.can_publish(moved, true, false));
+        assert!(!job.can_publish(moved, true, true));
+        assert!(!job.can_publish(moved, false, true));
+        assert!(moved.can_publish(moved, false, true));
+        for stale in [
+            ScalePreviewRequest { token: 6, ..moved },
+            ScalePreviewRequest { tab: 3, ..moved },
+            ScalePreviewRequest {
+                layer: LayerId(2),
+                ..moved
+            },
+            ScalePreviewRequest {
+                generation: 8,
+                ..moved
+            },
+            ScalePreviewRequest {
+                resample: Resample::Nearest,
+                ..moved
+            },
+        ] {
+            assert!(!job.can_publish(stale, true, false));
+        }
+    }
+
+    #[test]
+    fn scale_preview_matches_each_commit_sampler_with_mask_and_opacity() {
+        use crate::transform::Resample;
+        use std::sync::Arc;
+        let tab = super::super::tests::opacity_tab();
+        let mut content = tab.document.content.clone();
+        let source = image::RgbaImage::from_fn(3, 2, |x, y| {
+            image::Rgba([(x * 110) as u8, (y * 240) as u8, 75, 255])
+        });
+        content.place_layer(tab.active_layer, source, (0, 0));
+        content.set_opacity(tab.active_layer, 173);
+        let size = content.size();
+        let selection = crate::selection::Selection::from_coverage(size.0, size.1, |x, y| {
+            ((x * 75 + y * 30) % 256) as u8
+        });
+        content.mask_from_selection(tab.active_layer, &selection);
+        let layer = content.layer(tab.active_layer).unwrap().clone();
+        let original = layer.pixels.clone();
+        let mut results = Vec::new();
+        for resample in [Resample::Nearest, Resample::Bilinear, Resample::Bicubic] {
+            let preview = scale_preview_pixels(&layer, (7, 5), resample);
+            let mut committed_content = content.clone();
+            assert!(committed_content.scale_layer(tab.active_layer, 7, 5, resample));
+            let committed = committed_content.layer(tab.active_layer).unwrap();
+            let expected = image::RgbaImage::from_fn(7, 5, |x, y| {
+                committed.masked(*committed.pixels.get_pixel(x, y), x, y)
+            });
+            assert_eq!(
+                preview,
+                super::super::layers::with_layer_opacity(&expected, 173)
+            );
+            results.push(preview);
+        }
+        assert_ne!(results[0], results[1]);
+        assert_ne!(results[1], results[2]);
+        assert!(Arc::ptr_eq(&original, &layer.pixels));
+    }
+
+    #[test]
+    fn scale_preview_bounds_its_output_without_replacing_original_pixels() {
+        let tab = super::super::tests::opacity_tab();
+        let layer = tab.document.content.layer(tab.active_layer).unwrap();
+        let source = layer.pixels.clone();
+        let preview =
+            scale_preview_pixels(layer, (8192, 4096), crate::transform::Resample::Nearest);
+        assert_eq!(
+            preview.dimensions(),
+            (SCALE_PREVIEW_EDGE, SCALE_PREVIEW_EDGE / 2)
+        );
+        assert!(std::sync::Arc::ptr_eq(&source, &layer.pixels));
+    }
 
     fn scale_draft(layer: LayerId) -> ScaleDrag {
         let original = PixelRect::new(0, 0, 2, 2);
