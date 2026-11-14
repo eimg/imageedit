@@ -84,7 +84,13 @@ impl Workspace {
     pub(super) fn pending_edit_name(&self) -> Option<&'static str> {
         if self.has_pending_text() {
             Some("text")
-        } else if self.gradient.is_some() {
+        } else {
+            self.pending_canvas_edit_name()
+        }
+    }
+
+    pub(super) fn pending_canvas_edit_name(&self) -> Option<&'static str> {
+        if self.gradient.is_some() {
             Some("gradient")
         } else if self
             .warp

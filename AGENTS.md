@@ -172,30 +172,41 @@ Layer movement links form one explicit set per document. Every row always shows
 a chain toggle, also available through Layer → Toggle Movement Link. Moving a
 linked layer with the pointer, typed X/Y, arrow nudges, or alignment translates
 all enabled members by the same delta, including hidden layers, in one history
-edit. Moving an unlinked layer does not move that set. A single enabled toggle
-stays enabled. Snapping/alignment use the active layer's geometry.
+edit. A move that reaches any enabled member, including through a shadow
+attachment, includes the complete enabled set and their attached descendants.
+Each layer moves once. Unrelated unlinked moves leave that set alone. A single
+enabled toggle stays enabled. Snapping/alignment use the active layer's geometry.
 New Drop Shadow layers attach directionally to their source without changing
 movement toggles. A source move includes its attached shadows and descendants;
-moving a shadow directly adjusts its own position without pulling its source.
-The adjusted relative offset is preserved on future source moves. Followers are
-included once, even when also explicitly linked. Following an attachment does
-not expand the movement set through that follower's manual links. Shadow rows
-show their source beneath the name; Layer/context menu → Detach from Source
-makes them independent. Attachments do not regenerate shadow pixels after source
+moving a shadow directly adjusts its own position without following the
+attachment upward. An explicitly linked source still joins the move when the
+manual set is reached. The adjusted relative offset is preserved on future
+source moves. Followers are included once, even when also explicitly linked.
+Shadow rows show their source beneath the name; Layer/context menu → Detach from
+Source makes them independent. Layer → Attach to Layer Above attaches or
+reattaches a raster layer without moving pixels; rearrange the stack first to
+choose another source. Self/descendant cycles are rejected. Attachments do not regenerate shadow pixels after source
 edits. Any participating position lock or offset overflow blocks the entire move;
 pointer/nudge attempts name the locked layer.
 Row metadata toggles target stable tab/layer IDs without changing the active
-layer and finish typed geometry/text first. Links and attachments are saved,
+layer and finish typed geometry/text first. Changed canvas previews and active
+pointer gestures disable metadata actions until Apply/Cancel/completion, with
+row tooltips and direct-handler guards preserving the draft. Context-menu opening
+uses the same guard before selecting a different row. Typed Move fields retain
+their commit/followup behavior. Links and attachments are saved,
 undoable project metadata. Duplicates start unlinked and unattached. Deletion/crop
 prune missing endpoints; Merge Down detaches both inputs and the result while
 preserving unrelated memberships/attachments. Individual scaling, rotation,
 pixel edits, opacity, visibility, and stacking stay independent. Image-wide
 transforms still affect all layers.
 Right-click selects the target row and opens a compact context menu containing
-Rename, Duplicate, Delete, Alpha Lock, and relevant Rasterize Text/Detach from
-Source actions. Broader transforms, alignment, masks, and effect actions stay in
-the application menu/panel. Visibility, position lock, and movement link stay in
-the row and application menu. Disabled context actions have reason tooltips.
+Rename, Duplicate, Alpha Lock, and relevant Rasterize Text/Detach from Source
+actions, with Delete always last. Broader transforms, alignment, masks, and effect
+actions stay in the application menu/panel. Visibility, position lock, and movement link stay in
+the row and application menu. The flat menu stores explicit row actions only;
+there is no submenu state/navigation or application-menu filtering. Disabled
+Duplicate explanations share the model's layer-count, memory, and ID admission
+checks; locked/hidden/text properties do not misidentify a capacity failure.
 The popup supports arrows, Home/End, Return, Escape, and scrolling.
 It finishes numeric/text edits first, waits for the selected
 layer's rendered handlers, and validates stable IDs/generation before dispatch.
@@ -769,8 +780,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   at most one nonempty set, including a singleton. `shadow_attachments` contains
   child/source ID pairs. Both fields omit empty values. Readers validate existing
   IDs, unique memberships/children, and acyclic attachments before decoding pixels.
-  Version 9's disjoint groups migrate into one movement set; shadows in older
-  projects remain manual links, with no inferred attachments. Link/attachment-free
+  Version 9's disjoint groups migrate into one movement set; a consumed-on-open
+  session flag shows a notice when multiple groups were combined. The flag is not
+  saved or treated as image history. Shadows in older projects remain manual
+  links, with no inferred attachments. Link/attachment-free
   projects retain earlier writer versions when their other metadata permits it.
   Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.

@@ -395,6 +395,57 @@ mod tests {
     }
 
     #[test]
+    fn reattaching_a_shadow_is_one_undoable_edit_and_preserves_pixels() {
+        let mut session = Session::new(true, 8);
+        session.fill(100, &LIMITS);
+        let source = session.current.active_layer;
+        session.edit(
+            |content| {
+                content
+                    .place_drop_shadow(
+                        source,
+                        crate::filters::FilterSpec::Shadow {
+                            radius: 1,
+                            offset: (2, 3),
+                            opacity: 160,
+                            color: Rgba([0, 0, 0, 255]),
+                        },
+                    )
+                    .is_ok()
+            },
+            &LIMITS,
+        );
+        let shadow = session.current.content.shadow_attachments()[0].0;
+        session.edit(
+            |content| content.detach_shadow(shadow) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        let pixels = session
+            .current
+            .content
+            .layer(shadow)
+            .unwrap()
+            .pixels
+            .clone();
+        let offset = session.current.content.layer(shadow).unwrap().offset;
+        session.history.mark_saved(session.history.revision());
+        session.edit(
+            |content| content.attach_layer_above(shadow) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        assert!(session.history.is_dirty());
+        assert_eq!(session.current.content.shadow_source(shadow), Some(source));
+        assert!(session.undo());
+        assert!(!session.history.is_dirty());
+        assert_eq!(session.current.content.shadow_source(shadow), None);
+        assert!(session.redo());
+        assert_eq!(session.current.content.shadow_source(shadow), Some(source));
+        let layer = session.current.content.layer(shadow).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&pixels, &layer.pixels));
+        assert_eq!(layer.offset, offset);
+    }
+
+    #[test]
     fn masks_and_retained_effects_undo_to_saved_state_and_share_backing_buffers() {
         let mut session = Session::new(true, 2);
         session.fill(100, &LIMITS);

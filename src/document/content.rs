@@ -138,6 +138,7 @@ pub struct DocumentContent {
     // Bottom to top. Constructors and edits keep at least one layer.
     pub(super) layers: Vec<RasterLayer>,
     pub(super) layer_links: Vec<Vec<LayerId>>,
+    pub(super) merged_legacy_links: bool,
     pub(super) shadow_attachments: Vec<(LayerId, LayerId)>,
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
@@ -326,6 +327,7 @@ impl DocumentContent {
             }],
             paths: Vec::new(),
             layer_links: Vec::new(),
+            merged_legacy_links: false,
             shadow_attachments: Vec::new(),
             active_path: None,
             guides: Vec::new(),
@@ -375,6 +377,7 @@ impl DocumentContent {
             layers,
             paths: Vec::new(),
             layer_links: Vec::new(),
+            merged_legacy_links: false,
             shadow_attachments: Vec::new(),
             active_path: None,
             guides: Vec::new(),
@@ -985,17 +988,30 @@ impl DocumentContent {
         self.can_add_layer() && self.fits_stack(0, self.canvas_bytes())
     }
 
+    pub fn duplicate_layer_unavailable_reason(&self, id: LayerId) -> Option<&'static str> {
+        let Some(layer) = self.layer(id) else {
+            return Some("The layer is no longer available");
+        };
+        if !self.can_add_layer() {
+            return Some("The image has reached its 128-layer limit");
+        }
+        if self.next_layer_id().is_none() {
+            return Some("This image cannot contain another layer");
+        }
+        if !self.fits_stack(
+            0,
+            layer
+                .storage()
+                .map(|pixels| pixels.as_raw().len() as u64)
+                .sum(),
+        ) {
+            return Some("Duplicating this layer would exceed the image's memory limit");
+        }
+        None
+    }
+
     pub fn can_duplicate_layer(&self, id: LayerId) -> bool {
-        self.can_add_layer()
-            && self.layer(id).is_some_and(|layer| {
-                self.fits_stack(
-                    0,
-                    layer
-                        .storage()
-                        .map(|pixels| pixels.as_raw().len() as u64)
-                        .sum(),
-                )
-            })
+        self.duplicate_layer_unavailable_reason(id).is_none()
     }
 
     // Inserts a canvas-sized layer above `above`, or at the top if it is missing.
@@ -4905,6 +4921,41 @@ mod tests {
         });
         assert!(!content.can_merge_down(middle));
         assert!(!content.can_merge_down(upper));
+    }
+
+    #[test]
+    fn duplicate_reports_memory_and_id_limits_without_blame_on_layer_properties() {
+        let pixels = Arc::new(RgbaImage::new(2048, 1024));
+        let mut template =
+            DocumentContent::single_layer("Layer".into(), RgbaImage::new(1, 1)).layers[0].clone();
+        template.pixels = pixels;
+        template.visible = false;
+        template.locks.position = true;
+        let layers = (0..64)
+            .map(|id| {
+                let mut layer = template.clone();
+                layer.id = LayerId(id);
+                layer
+            })
+            .collect();
+        let mut content = DocumentContent::from_layers(2048, 1024, layers).unwrap();
+        assert_eq!(content.stack_bytes(), MAX_STACK_BYTES);
+        assert!(
+            content
+                .duplicate_layer_unavailable_reason(LayerId(0))
+                .unwrap()
+                .contains("memory limit")
+        );
+        assert!(content.duplicate_layer(LayerId(0)).is_none());
+        content.layers.truncate(1);
+        content.layers[0].id = LayerId(u64::MAX);
+        assert!(
+            content
+                .duplicate_layer_unavailable_reason(LayerId(u64::MAX))
+                .is_some()
+        );
+        assert!(!content.can_duplicate_layer(LayerId(u64::MAX)));
+        assert!(content.duplicate_layer(LayerId(u64::MAX)).is_none());
     }
 
     #[test]

@@ -631,7 +631,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_document(&mut self, document: Document, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_document(
+        &mut self,
+        mut document: Document,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let history = History::new(document.path.is_some());
         if let Some(path) = &document.path {
             if let Some(index) = self.tabs.iter().position(|tab| {
@@ -643,6 +648,10 @@ impl Workspace {
             }
             cx.add_recent_document(path);
         }
+        let notice = document
+            .content
+            .take_link_migration_notice()
+            .map(str::to_owned);
         self.tabs.push(Tab {
             stroke_anchor: None,
             id: self.next_id,
@@ -654,7 +663,7 @@ impl Workspace {
             editing: false,
             saving: None,
             exporting: false,
-            notice: None,
+            notice,
             building_level: None,
             selection: Selection::Unrestricted,
             pending_text: None,

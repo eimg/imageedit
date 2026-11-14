@@ -25,6 +25,7 @@ impl DocumentContent {
                     .all(|id| self.layer(*id).is_some() && seen.insert(*id))),
             "Invalid layer links"
         );
+        self.merged_legacy_links = groups.len() > 1;
         // Older files can have several groups. Their enabled members become
         // the one explicit movement set; never infer attachments from names.
         let mut joined: Vec<_> = groups.into_iter().flatten().collect();
@@ -35,6 +36,12 @@ impl DocumentContent {
             vec![joined]
         };
         Ok(())
+    }
+
+    pub fn take_link_migration_notice(&mut self) -> Option<&'static str> {
+        std::mem::take(&mut self.merged_legacy_links).then_some(
+            "This project used separate link groups. Their enabled layers now form one movement set; use the chain toggles to choose which layers move together.",
+        )
     }
 
     #[cfg(test)]
@@ -114,6 +121,33 @@ impl DocumentContent {
         Ok(())
     }
 
+    pub fn attachment_above(&self, child: LayerId) -> Option<LayerId> {
+        let index = self.layer_index(child)?;
+        let parent = self.layers.get(index + 1)?.id;
+        if self.layer(child)?.text.is_some() || self.shadow_source(child) == Some(parent) {
+            return None;
+        }
+        // Reparenting is safe only when the proposed source is not below the
+        // child in the attachment graph. Stack order alone cannot prove this.
+        let mut ancestor = parent;
+        while let Some(next) = self.shadow_source(ancestor) {
+            if next == child {
+                return None;
+            }
+            ancestor = next;
+        }
+        Some(parent)
+    }
+
+    pub fn attach_layer_above(&mut self, child: LayerId) -> Dirty {
+        let Some(parent) = self.attachment_above(child) else {
+            return Dirty::None;
+        };
+        self.shadow_attachments.retain(|(id, _)| *id != child);
+        self.shadow_attachments.push((child, parent));
+        Dirty::Unpainted
+    }
+
     pub fn detach_shadow(&mut self, id: LayerId) -> Dirty {
         let before = self.shadow_attachments.len();
         self.shadow_attachments.retain(|(child, _)| *child != id);
@@ -136,8 +170,9 @@ impl DocumentContent {
         });
     }
 
-    // Start with explicitly linked members only when the moved layer is linked.
-    // Then follow attachments downward. Moving a shadow never pulls its source.
+    // Resolve the complete move: follow attachments downward, and include the
+    // whole explicit set whenever any reached layer is linked. Never follow an
+    // attachment upward; sources move only if independently included by links.
     pub fn movement_layers(&self, id: LayerId) -> Vec<LayerId> {
         if self.layer(id).is_none() {
             return vec![];
@@ -149,6 +184,11 @@ impl DocumentContent {
         let mut index = 0;
         while index < members.len() {
             let parent = members[index];
+            for &linked in self.linked_layers(parent) {
+                if !members.contains(&linked) {
+                    members.push(linked);
+                }
+            }
             for &(child, source) in &self.shadow_attachments {
                 if source == parent && !members.contains(&child) {
                     members.push(child);
@@ -331,6 +371,68 @@ mod tests {
         assert_eq!(
             content.layer(shadow).unwrap().offset,
             (offset.0 + 5, offset.1)
+        );
+    }
+
+    #[test]
+    fn following_a_linked_shadow_moves_the_whole_set_and_its_descendants_once() {
+        let mut content = scene();
+        let a = content.top_layer_id();
+        let b = content.add_layer(a, "B".into(), Rgba([20; 4])).unwrap();
+        content.place_drop_shadow(a, shadow_spec()).unwrap();
+        let shadow_a = content.shadow_attachments()[0].0;
+        content.place_drop_shadow(b, shadow_spec()).unwrap();
+        let shadow_b = content.shadow_attachments()[1].0;
+        content.link_layers(shadow_a, b);
+        let original = content.clone();
+        assert!(content.linked_layers(a).is_empty());
+        content.move_linked_layers(a, (3, -2));
+        for layer in content.layers() {
+            let before = original.layer(layer.id).unwrap();
+            assert_eq!(layer.offset, (before.offset.0 + 3, before.offset.1 - 2));
+            assert!(Arc::ptr_eq(&layer.pixels, &before.pixels));
+        }
+        content.set_layer_locks(
+            shadow_b,
+            LayerLocks {
+                alpha: false,
+                position: true,
+            },
+        );
+        assert_eq!(content.move_blocker(a), Some(shadow_b));
+        assert_eq!(content.move_linked_layers(a, (4, 0)), Dirty::None);
+        assert_eq!(content.layer(a).unwrap().offset, (3, -2));
+        content.set_layer_locks(shadow_b, LayerLocks::default());
+        content.set_offset(shadow_b, (i32::MAX, 0));
+        assert_eq!(content.move_linked_layers(a, (4, -2)), Dirty::None);
+        assert_eq!(content.layer(a).unwrap().offset, (3, -2));
+    }
+
+    #[test]
+    fn reattachment_preserves_placement_and_rejects_cycles() {
+        let mut content = scene();
+        let source = content.top_layer_id();
+        content.place_drop_shadow(source, shadow_spec()).unwrap();
+        let shadow = content.shadow_attachments()[0].0;
+        content.detach_shadow(shadow);
+        let offset = content.layer(shadow).unwrap().offset;
+        let original = content.clone();
+        assert_eq!(content.attachment_above(shadow), Some(source));
+        assert_eq!(content.attach_layer_above(shadow), Dirty::Unpainted);
+        assert_eq!(content.layer(shadow).unwrap().offset, offset);
+        assert!(Arc::ptr_eq(
+            &content.layer(shadow).unwrap().pixels,
+            &original.layer(shadow).unwrap().pixels
+        ));
+        assert_eq!(content.attach_layer_above(shadow), Dirty::None);
+        // Reorder the source below its own shadow; attaching upward would cycle.
+        content.move_layer(source, 0);
+        assert_eq!(content.attachment_above(source), None);
+        assert_eq!(content.attach_layer_above(source), Dirty::None);
+        content.move_linked_layers(source, (2, 1));
+        assert_eq!(
+            content.layer(shadow).unwrap().offset,
+            (offset.0 + 2, offset.1 + 1)
         );
     }
 

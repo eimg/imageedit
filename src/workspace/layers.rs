@@ -161,6 +161,7 @@ pub(super) enum LayerCommand {
     PositionLock,
     Link,
     DetachShadow,
+    AttachAbove,
     EditEffect,
     RemoveEffect,
     BakeEffect,
@@ -247,12 +248,61 @@ pub(super) fn opacity_from_percent(percent: u32) -> u8 {
     ((percent.min(100) * 255 + 50) / 100) as u8
 }
 
+// Metadata changes must never reach the general edit pipeline with a pending
+// canvas draft. Only typed Move has a commit/followup path that settles first.
+fn metadata_preview_blocker(
+    pending: Option<&'static str>,
+    typed_move: bool,
+) -> Option<&'static str> {
+    match pending {
+        Some("gesture") if typed_move => None,
+        edit => edit,
+    }
+}
+
 impl Workspace {
+    pub(super) fn layer_metadata_preview_blocker(&self) -> Option<&'static str> {
+        if self.selection_drag.is_some() && self.numeric_edit.is_none() {
+            return Some("selection");
+        }
+        let typed_move = self
+            .move_drag
+            .as_ref()
+            .is_some_and(|drag| drag.input == MoveInput::Numeric)
+            && self
+                .numeric_edit
+                .as_ref()
+                .is_some_and(|edit| edit.field.is_move());
+        metadata_preview_blocker(self.pending_canvas_edit_name(), typed_move)
+    }
+
+    pub(super) fn refuse_layer_metadata_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(edit) = self.layer_metadata_preview_blocker() {
+            self.notice(
+                &format!("Apply or cancel the current {edit} before changing layer controls."),
+                cx,
+            );
+            return true;
+        }
+        false
+    }
+
     pub(super) fn layer_command_enabled(&self, command: LayerCommand) -> bool {
         let Some(tab) = self.active_tab() else {
             return false;
         };
         if tab.busy() || self.form.is_some() || self.dialog_open {
+            return false;
+        }
+        if matches!(
+            command,
+            LayerCommand::AlphaLock
+                | LayerCommand::PositionLock
+                | LayerCommand::Link
+                | LayerCommand::DetachShadow
+                | LayerCommand::AttachAbove
+        ) && self.layer_metadata_preview_blocker().is_some()
+        {
             return false;
         }
         let content = &tab.document.content;
@@ -261,6 +311,7 @@ impl Workspace {
         match command {
             LayerCommand::Link => true,
             LayerCommand::DetachShadow => content.shadow_source(tab.active_layer).is_some(),
+            LayerCommand::AttachAbove => content.attachment_above(tab.active_layer).is_some(),
             LayerCommand::AlphaLock => content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.text.is_none()),
@@ -354,6 +405,8 @@ impl Workspace {
         let root = self.bind::<ToggleAlphaLock>(root, LayerCommand::AlphaLock, cx);
         let root = self.bind::<crate::commands::ToggleLayerLink>(root, LayerCommand::Link, cx);
         let root = self.bind::<crate::commands::DetachShadow>(root, LayerCommand::DetachShadow, cx);
+        let root =
+            self.bind::<crate::commands::AttachLayerAbove>(root, LayerCommand::AttachAbove, cx);
         self.bind::<TogglePositionLock>(root, LayerCommand::PositionLock, cx)
     }
 
@@ -427,7 +480,8 @@ impl Workspace {
             LayerCommand::AlphaLock
             | LayerCommand::PositionLock
             | LayerCommand::Link
-            | LayerCommand::DetachShadow => {
+            | LayerCommand::DetachShadow
+            | LayerCommand::AttachAbove => {
                 self.edit_layer_metadata(tab_id, id, command, window, cx);
             }
             LayerCommand::New => self.new_layer_form(window, cx),
@@ -576,8 +630,12 @@ impl Workspace {
                     | LayerCommand::PositionLock
                     | LayerCommand::Link
                     | LayerCommand::DetachShadow
+                    | LayerCommand::AttachAbove
             )
         {
+            return;
+        }
+        if self.refuse_layer_metadata_preview(cx) {
             return;
         }
         if self.commit_numeric_with_followup(
@@ -597,15 +655,23 @@ impl Workspace {
             });
             return;
         }
+        if self.refuse_layer_metadata_preview(cx) {
+            return;
+        }
         let Some(layer) = self.active_document().and_then(|doc| doc.content.layer(id)) else {
             return;
         };
-        if matches!(command, LayerCommand::Link | LayerCommand::DetachShadow) {
+        if matches!(
+            command,
+            LayerCommand::Link | LayerCommand::DetachShadow | LayerCommand::AttachAbove
+        ) {
             self.cancel_move(window, cx);
             self.edit_content(
                 move |content, _, _| {
                     if command == LayerCommand::DetachShadow {
                         content.detach_shadow(id)
+                    } else if command == LayerCommand::AttachAbove {
+                        content.attach_layer_above(id)
                     } else {
                         content.set_layer_linked(id, content.linked_layers(id).is_empty())
                     }
@@ -765,8 +831,12 @@ impl Workspace {
         let content = &tab.document.content;
         let layers = content.layers();
         let tab_id = tab.id;
-        let locks_enabled =
-            !tab.busy() && self.form.is_none() && !self.dialog_open && self.pdf_job.is_none();
+        let metadata_blocker = self.layer_metadata_preview_blocker();
+        let locks_enabled = !tab.busy()
+            && self.form.is_none()
+            && !self.dialog_open
+            && self.pdf_job.is_none()
+            && metadata_blocker.is_none();
         let rows = layers.iter().enumerate().rev().map(|(index, layer)| {
             let id = layer.id;
             let active = id == tab.active_layer;
@@ -863,7 +933,9 @@ impl Workspace {
                                 .flex().items_center().justify_center()
                                 .size(px(24.)).rounded_sm()
                                 .text_color(rgb(if content.linked_layers(id).is_empty() { DISABLED } else { ACCENT }))
-                                .tooltip(tooltip(if content.linked_layers(id).is_empty() {
+                                .tooltip(tooltip(if metadata_blocker.is_some() {
+                                    "Apply or cancel the current canvas edit before changing movement links"
+                                } else if content.linked_layers(id).is_empty() {
                                     "Link movement — enabled layers move together"
                                 } else { "Unlink movement" }))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -902,7 +974,9 @@ impl Workspace {
                             div().id(("lock-position", id.0 as usize))
                                 .flex().items_center().justify_center().size(px(24.)).rounded_sm()
                                 .text_color(rgb(if layer.locks.position { ACCENT } else { DISABLED }))
-                                .tooltip(tooltip(if layer.locks.position {
+                                .tooltip(tooltip(if metadata_blocker.is_some() {
+                                    "Apply or cancel the current canvas edit before changing position locks"
+                                } else if layer.locks.position {
                                     "Unlock Position — moves and transforms are blocked"
                                 } else { "Lock Position — prevent moves and transforms" }))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1783,6 +1857,28 @@ fn paint_slider(bounds: Bounds<Pixels>, opacity: u8, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_guard_keeps_canvas_drafts_and_only_allows_the_typed_move_commit_path() {
+        for draft in [
+            "scale",
+            "transform",
+            "gradient",
+            "crop",
+            "free selection",
+            "selection",
+            "effect",
+        ] {
+            assert_eq!(metadata_preview_blocker(Some(draft), false), Some(draft));
+            assert_eq!(metadata_preview_blocker(Some(draft), true), Some(draft));
+        }
+        assert_eq!(
+            metadata_preview_blocker(Some("gesture"), false),
+            Some("gesture")
+        );
+        assert_eq!(metadata_preview_blocker(Some("gesture"), true), None);
+        assert_eq!(metadata_preview_blocker(None, false), None);
+    }
 
     #[test]
     fn layer_lock_changes_undo_without_rebuilding_or_modifying_pixels() {

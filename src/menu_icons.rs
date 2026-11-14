@@ -57,7 +57,7 @@ pub(crate) fn for_action(action: &dyn Action) -> Option<&'static str> {
         PasteImage => "paste", PasteAsLayer => "paste", NewFromClipboard => "paste",
         NewLayer => "plus", DuplicateLayer => "duplicate", DeleteLayer => "trash",
         MergeDown => "merge", RaiseLayer => "arrow-up", LowerLayer => "arrow-down",
-        ToggleLayerLink => "link", DetachShadow => "unlink",
+        ToggleLayerLink => "link", DetachShadow => "unlink", AttachLayerAbove => "link",
         ToggleLayerVisibility => "eye", ToggleAlphaLock => "lock-alpha", TogglePositionLock => "lock-position", ScaleLayer => "scale", FitLayerToCanvas => "scale", ScaleImage => "scale",
         ApplyCrop => "crop", CropToSelection => "crop", CropImageToContent => "crop",
         CropLayerToContent => "crop", StrokePath => "stroke", StrokeSelection => "stroke",

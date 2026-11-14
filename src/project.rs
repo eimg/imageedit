@@ -960,6 +960,11 @@ mod tests {
         assert_eq!(restored.layer_links().len(), 1);
         assert_eq!(restored.linked_layers(LayerId(7)).len(), 4);
         assert!(restored.shadow_attachments().is_empty());
+        let mut restored = restored;
+        assert!(restored.take_link_migration_notice().is_some());
+        assert!(restored.take_link_migration_notice().is_none());
+        let mut reopened = read_bytes(&write_bytes(&restored).unwrap()).unwrap();
+        assert!(reopened.take_link_migration_notice().is_none());
     }
 
     #[test]

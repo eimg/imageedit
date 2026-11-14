@@ -1,13 +1,73 @@
-//! Compact layer-row actions reuse the application menu action handlers.
+//! A flat menu of layer-row conveniences, dispatched through shared actions.
 use gpui::{
-    Context, Keystroke, MouseButton, OwnedMenu, OwnedMenuItem, Pixels, Point, ScrollHandle, Window,
-    anchored, deferred, div, prelude::*, px, rgb,
+    Action, Context, Keystroke, MouseButton, Pixels, Point, ScrollHandle, Window, anchored,
+    deferred, div, prelude::*, px, rgb,
 };
 
 use super::tooltip::tooltip;
-use super::view::{BORDER, CHROME, DISABLED, HOVER, SELECTED, TEXT, icon};
+use super::view::{BORDER, CHROME, DISABLED, SELECTED, TEXT, icon};
 use super::{Workspace, numeric::NumericFollowup};
-use crate::{commands::*, document::LayerId};
+use crate::{
+    commands::*,
+    document::{DocumentContent, LayerId},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowAction {
+    Rename,
+    Duplicate,
+    AlphaLock,
+    Detach,
+    Rasterize,
+    Delete,
+}
+
+impl RowAction {
+    fn action(self) -> Box<dyn Action> {
+        match self {
+            Self::Rename => Box::new(RenameLayer),
+            Self::Duplicate => Box::new(DuplicateLayer),
+            Self::AlphaLock => Box::new(ToggleAlphaLock),
+            Self::Detach => Box::new(DetachShadow),
+            Self::Rasterize => Box::new(RasterizeText),
+            Self::Delete => Box::new(DeleteLayer),
+        }
+    }
+
+    fn label(self, alpha_locked: bool) -> &'static str {
+        match self {
+            Self::Rename => "Rename Layer…",
+            Self::Duplicate => "Duplicate Layer",
+            Self::AlphaLock if alpha_locked => "Unlock Alpha",
+            Self::AlphaLock => "Lock Alpha",
+            Self::Detach => "Detach from Source",
+            Self::Rasterize => "Rasterize Text Layer",
+            Self::Delete => "Delete Layer",
+        }
+    }
+
+    fn disabled_reason(self, content: &DocumentContent, id: LayerId) -> Option<&'static str> {
+        let Some(layer) = content.layer(id) else {
+            return Some("The layer is no longer available");
+        };
+        match self {
+            Self::Duplicate => content.duplicate_layer_unavailable_reason(id),
+            Self::AlphaLock if layer.text.is_some() => {
+                Some("Rasterize the text layer before locking alpha")
+            }
+            Self::Delete if content.layers().len() == 1 => {
+                Some("The image must keep at least one layer")
+            }
+            Self::Detach if content.shadow_source(id).is_none() => {
+                Some("This layer is no longer attached")
+            }
+            Self::Rasterize if layer.text.is_none() => {
+                Some("This layer has already been rasterized")
+            }
+            _ => None,
+        }
+    }
+}
 
 pub(super) struct LayerMenu {
     tab: usize,
@@ -15,28 +75,17 @@ pub(super) struct LayerMenu {
     generation: u64,
     ready: bool,
     position: Point<Pixels>,
-    menu: OwnedMenu,
-    parents: Vec<usize>,
+    items: Vec<RowAction>,
     selected: Option<usize>,
     scroll: ScrollHandle,
 }
 
 impl LayerMenu {
-    fn current(&self) -> Option<&OwnedMenu> {
-        let mut menu = &self.menu;
-        for &index in &self.parents {
-            let OwnedMenuItem::Submenu(child) = menu.items.get(index)? else {
-                return None;
-            };
-            menu = child;
-        }
-        Some(menu)
-    }
-
     fn valid(&self, workspace: &Workspace) -> bool {
         workspace.form.is_none()
             && !workspace.dialog_open
             && workspace.pdf_job.is_none()
+            && workspace.layer_metadata_preview_blocker().is_none()
             && workspace.active_tab().is_some_and(|tab| {
                 tab.id == self.tab
                     && tab.active_layer == self.layer
@@ -44,14 +93,6 @@ impl LayerMenu {
                     && tab.history.generation() == self.generation
                     && tab.document.content.layer(self.layer).is_some()
             })
-    }
-}
-
-fn available(item: &OwnedMenuItem, window: &Window, cx: &mut gpui::App) -> bool {
-    match item {
-        OwnedMenuItem::Action { action, .. } => window.is_action_available(action.as_ref(), cx),
-        OwnedMenuItem::Submenu(menu) => menu.items.iter().any(|item| available(item, window, cx)),
-        _ => false,
     }
 }
 
@@ -71,6 +112,10 @@ impl Workspace {
             || self.dialog_open
             || self.pdf_job.is_some()
         {
+            return;
+        }
+        // Guard before selecting a different row: selection cancels previews.
+        if self.refuse_layer_metadata_preview(cx) {
             return;
         }
         if self.commit_numeric_with_followup(
@@ -101,53 +146,32 @@ impl Workspace {
         let Some(layer) = content.layer(layer_id) else {
             return;
         };
-        let mut menu = crate::commands::application_menus(cfg!(target_os = "macos"))
-            .into_iter()
-            .find(|menu| menu.name == "Layer")
-            .unwrap()
-            .owned();
-        // Keep row-local conveniences only; the application menu owns the
-        // broader image-editing operations and nested menus.
-        menu.items.retain(|item| match item {
-            OwnedMenuItem::Action { action, .. } => {
-                let action = action.as_any();
-                action.is::<RenameLayer>()
-                    || action.is::<DuplicateLayer>()
-                    || action.is::<DeleteLayer>()
-                    || action.is::<ToggleAlphaLock>()
-                    || (action.is::<DetachShadow>() && content.shadow_source(layer_id).is_some())
-                    || (action.is::<RasterizeText>() && layer.text.is_some())
-            }
-            _ => false,
-        });
-        for item in &mut menu.items {
-            if let OwnedMenuItem::Action { name, action, .. } = item
-                && action.as_any().is::<ToggleAlphaLock>()
-            {
-                *name = if layer.locks.alpha {
-                    "Unlock Alpha"
-                } else {
-                    "Lock Alpha"
-                }
-                .into();
-            }
+        let mut items = vec![
+            RowAction::Rename,
+            RowAction::Duplicate,
+            RowAction::AlphaLock,
+        ];
+        if content.shadow_source(layer_id).is_some() {
+            items.push(RowAction::Detach);
         }
+        if layer.text.is_some() {
+            items.push(RowAction::Rasterize);
+        }
+        items.push(RowAction::Delete);
         self.layer_menu = Some(LayerMenu {
             tab: tab_id,
             layer: layer_id,
             generation: tab.history.generation(),
             ready: false,
             position,
-            menu,
-            parents: vec![],
+            items,
             selected: None,
             scroll: ScrollHandle::new(),
         });
         #[cfg(any(target_os = "linux", test))]
         self.linux_menu.close();
         self.focus.focus(window);
-        // Availability uses GPUI's rendered dispatch tree. Let the selected row
-        // and its action handlers render before exposing the popup's choices.
+        // Dispatch must use the handlers for the selected row after it renders.
         let entity = cx.weak_entity();
         window.on_next_frame(move |_, cx| {
             let _ = entity.update(cx, |workspace, cx| {
@@ -186,13 +210,17 @@ impl Workspace {
                 self.layer_menu = None;
             }
             "up" | "down" | "home" | "end" => {
+                let content = &self.active_tab().unwrap().document.content;
                 let choices: Vec<_> = menu
-                    .current()
-                    .unwrap()
                     .items
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, item)| available(item, window, cx).then_some(i))
+                    .filter_map(|(i, action)| {
+                        action
+                            .disabled_reason(content, menu.layer)
+                            .is_none()
+                            .then_some(i)
+                    })
                     .collect();
                 let selected = menu
                     .selected
@@ -217,10 +245,9 @@ impl Workspace {
                     menu.scroll.scroll_to_item(i);
                 }
             }
-            "left" => self.layer_menu_back(),
-            "right" | "enter" | "return" | "space" => {
+            "enter" | "return" | "space" => {
                 if let Some(index) = menu.selected {
-                    self.activate_layer_menu(index, key.key == "right", window, cx);
+                    self.activate_layer_menu(index, window, cx);
                 }
             }
             _ => {}
@@ -229,62 +256,40 @@ impl Workspace {
         true
     }
 
-    fn layer_menu_back(&mut self) {
-        if let Some(menu) = self.layer_menu.as_mut() {
-            menu.selected = menu.parents.pop();
-            menu.scroll = ScrollHandle::new();
-        }
-    }
-
-    fn activate_layer_menu(
-        &mut self,
-        index: usize,
-        submenu_only: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(menu) = self.layer_menu.as_ref().filter(|menu| menu.valid(self)) else {
-            self.layer_menu = None;
-            return;
-        };
-        let Some(item) = menu
-            .current()
-            .and_then(|menu| menu.items.get(index))
-            .cloned()
+    fn activate_layer_menu(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self
+            .layer_menu
+            .as_ref()
+            .filter(|menu| menu.ready && menu.valid(self))
         else {
             return;
         };
-        if !menu.ready || !available(&item, window, cx) {
+        let Some(&item) = menu.items.get(index) else {
+            return;
+        };
+        if item
+            .disabled_reason(&self.active_tab().unwrap().document.content, menu.layer)
+            .is_some()
+        {
             return;
         }
-        match item {
-            OwnedMenuItem::Submenu(_) => {
-                let menu = self.layer_menu.as_mut().unwrap();
-                menu.parents.push(index);
-                menu.selected = menu
-                    .current()
-                    .unwrap()
-                    .items
-                    .iter()
-                    .position(|item| available(item, window, cx));
-                menu.scroll = ScrollHandle::new();
+        let menu = self.layer_menu.take().unwrap();
+        let entity = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            let valid = entity
+                .update(cx, |workspace, _| {
+                    menu.valid(workspace)
+                        && workspace.active_tab().is_some_and(|tab| {
+                            item.disabled_reason(&tab.document.content, menu.layer)
+                                .is_none()
+                        })
+                })
+                .unwrap_or(false);
+            let action = item.action();
+            if valid && window.is_action_available(action.as_ref(), cx) {
+                window.dispatch_action(action, cx);
             }
-            OwnedMenuItem::Action { action, .. } if !submenu_only => {
-                let menu = self.layer_menu.take().unwrap();
-                // Recheck stable target and generation after the next render has
-                // installed handlers for the right-clicked layer.
-                let entity = cx.weak_entity();
-                window.defer(cx, move |window, cx| {
-                    let valid = entity
-                        .update(cx, |workspace, _| menu.valid(workspace))
-                        .unwrap_or(false);
-                    if valid && window.is_action_available(action.as_ref(), cx) {
-                        window.dispatch_action(action, cx);
-                    }
-                });
-            }
-            _ => {}
-        }
+        });
         cx.notify();
     }
 
@@ -300,13 +305,11 @@ impl Workspace {
         {
             self.layer_menu = None;
         }
-        let state = self.layer_menu.as_ref()?;
-        if !state.ready {
-            return None;
-        }
-        let menu = state.current()?;
+        let state = self.layer_menu.as_ref().filter(|menu| menu.ready)?;
+        let content = &self.active_tab()?.document.content;
+        let alpha_locked = content.layer(state.layer)?.locks.alpha;
         let popup = div()
-            .w(px(310.))
+            .w(px(260.))
             .max_h((window.viewport_size().height - px(16.)).max(px(60.)))
             .flex()
             .flex_col()
@@ -319,30 +322,6 @@ impl Workspace {
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .when(!state.parents.is_empty(), |popup| {
-                popup.child(
-                    div()
-                        .id("layer-menu-back")
-                        .h(px(28.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .hover(|row| row.bg(rgb(HOVER)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.layer_menu_back();
-                                cx.notify();
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(icon("chevron-left", 14.))
-                        .child(menu.name.clone()),
-                )
-            })
             .child(
                 div()
                     .id("layer-menu-items")
@@ -350,26 +329,9 @@ impl Workspace {
                     .overflow_y_scroll()
                     .track_scroll(&state.scroll)
                     .py_1()
-                    .children(menu.items.iter().enumerate().map(|(index, item)| {
-                        if matches!(item, OwnedMenuItem::Separator) {
-                            return div()
-                                .h(px(7.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .child(div().w_full().h(px(1.)).bg(rgb(BORDER)))
-                                .into_any_element();
-                        }
-                        let enabled = available(item, window, cx);
-                        let (name, symbol, submenu) = match item {
-                            OwnedMenuItem::Action { name, action, .. } => (
-                                name.clone(),
-                                crate::menu_icons::for_action(action.as_ref()),
-                                false,
-                            ),
-                            OwnedMenuItem::Submenu(menu) => (menu.name.to_string(), None, true),
-                            _ => return div().into_any_element(),
-                        };
+                    .children(state.items.iter().enumerate().map(|(index, &item)| {
+                        let reason = item.disabled_reason(content, state.layer);
+                        let enabled = reason.is_none();
                         div()
                             .id(("layer-menu-item", index))
                             .h(px(28.))
@@ -381,9 +343,7 @@ impl Workspace {
                             .when(enabled && state.selected == Some(index), |row| {
                                 row.bg(rgb(SELECTED))
                             })
-                            .when(!enabled, |row| {
-                                row.tooltip(tooltip(self.layer_menu_disabled_reason(item)))
-                            })
+                            .when_some(reason, |row, reason| row.tooltip(tooltip(reason)))
                             .on_hover(cx.listener(move |this, hovered, _, cx| {
                                 if *hovered && enabled {
                                     if let Some(menu) = this.layer_menu.as_mut() {
@@ -395,17 +355,17 @@ impl Workspace {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, window, cx| {
-                                    this.activate_layer_menu(index, false, window, cx);
+                                    this.activate_layer_menu(index, window, cx);
                                     cx.stop_propagation();
                                 }),
                             )
                             .child(
-                                div()
-                                    .w(px(16.))
-                                    .children(symbol.map(|symbol| icon(symbol, 14.))),
+                                div().w(px(16.)).children(
+                                    crate::menu_icons::for_action(item.action().as_ref())
+                                        .map(|symbol| icon(symbol, 14.)),
+                                ),
                             )
-                            .child(div().flex_1().child(name))
-                            .when(submenu, |row| row.child(icon("chevron-right", 14.)))
+                            .child(item.label(alpha_locked))
                             .into_any_element()
                     })),
             );
@@ -449,55 +409,40 @@ impl Workspace {
             .into_any_element(),
         )
     }
+}
 
-    fn layer_menu_disabled_reason(&self, item: &OwnedMenuItem) -> String {
-        let layer = self
-            .active_tab()
-            .and_then(|tab| tab.document.content.layer(tab.active_layer));
-        if let OwnedMenuItem::Action { action, .. } = item {
-            if action.as_any().is::<DeleteLayer>() {
-                return "The image must keep at least one layer".into();
-            }
-            if action.as_any().is::<ToggleAlphaLock>()
-                && layer.is_some_and(|layer| layer.text.is_some())
-            {
-                return "Rasterize the text layer before locking alpha".into();
-            }
-            if action.as_any().is::<RaiseLayer>() {
-                return "This layer is already at the top".into();
-            }
-            if action.as_any().is::<LowerLayer>() {
-                return "This layer is already at the bottom".into();
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{LayerLocks, MAX_LAYERS};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn duplicate_explains_capacity_even_for_hidden_position_locked_layers() {
+        let mut content = DocumentContent::single_layer("Base".into(), RgbaImage::new(1, 1));
+        let base = content.top_layer_id();
+        let mut layer = base;
+        for _ in 1..MAX_LAYERS {
+            layer = content
+                .add_layer(layer, "Layer".into(), Rgba([0; 4]))
+                .unwrap();
         }
-        if let Some(tab) = self.active_tab() {
-            let align = matches!(item, OwnedMenuItem::Submenu(menu) if menu.name == "Align")
-                || matches!(item, OwnedMenuItem::Action { action, .. } if action.as_any().is::<AlignLayer>());
-            if align
-                && let Some(blocker) = tab
-                    .document
-                    .content
-                    .move_blocker(tab.active_layer)
-                    .and_then(|id| tab.document.content.layer(id))
-            {
-                return format!(
-                    "Unlock Position on \"{}\" before moving these layers",
-                    blocker.name
-                );
-            }
-        }
-        if self.pending_edit_name().is_some() {
-            return "Finish the current canvas preview first".into();
-        }
-        if layer.is_some_and(|layer| layer.locks.position) {
-            return "Unlock Position to change layer geometry".into();
-        }
-        if layer.is_some_and(|layer| layer.text.is_some()) {
-            return "Rasterize the text layer to use this action".into();
-        }
-        if layer.is_some_and(|layer| !layer.visible) {
-            return "Show the layer to use this action".into();
-        }
-        "Unavailable for this layer or the current image state".into()
+        content.set_visible(base, false);
+        content.set_layer_locks(
+            base,
+            LayerLocks {
+                position: true,
+                alpha: false,
+            },
+        );
+        let reason = RowAction::Duplicate
+            .disabled_reason(&content, base)
+            .unwrap();
+        assert!(reason.contains("layer limit"));
+        assert!(!content.can_duplicate_layer(base));
+        content.delete_layer(layer).unwrap();
+        assert_eq!(RowAction::Duplicate.disabled_reason(&content, base), None);
+        assert!(content.can_duplicate_layer(base));
+        content.duplicate_layer(base).unwrap();
     }
 }
