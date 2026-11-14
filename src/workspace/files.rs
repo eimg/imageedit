@@ -5,7 +5,9 @@ use gpui::{Context, PathPromptOptions, PromptButton, PromptLevel, Window};
 use image::Rgba;
 
 use super::Workspace;
-use crate::document::{Document, FileFormat, export_image, file_name, save_format, save_image};
+use crate::document::{
+    Document, FileFormat, export_image, export_pdf, file_name, save_format, save_image,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SaveMode {
@@ -23,15 +25,39 @@ enum SaveRoute {
 #[derive(Clone, Copy)]
 enum WriteKind {
     Save(FileFormat),
-    Export {
+    Export(ExportFormat),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ExportFormat {
+    Raster {
         format: FileFormat,
         jpeg_quality: u8,
     },
+    Pdf {
+        dpi: u32,
+    },
+}
+
+impl ExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Raster { format, .. } => format.extension(),
+            Self::Pdf { .. } => "pdf",
+        }
+    }
+
+    fn matches_path(self, path: &Path) -> bool {
+        match self {
+            Self::Raster { format, .. } => save_format(path).ok() == Some(format),
+            Self::Pdf { .. } => crate::pdf::is_pdf_path(path),
+        }
+    }
 }
 
 impl WriteKind {
     fn destination_reserved(self, source_tab: bool, open: bool, writing: bool) -> bool {
-        writing || (open && (!source_tab || matches!(self, Self::Export { .. })))
+        writing || (open && (!source_tab || matches!(self, Self::Export(_))))
     }
 
     fn validate_document(self, document: &Document) -> Result<()> {
@@ -220,14 +246,13 @@ impl Workspace {
 
     pub(super) fn export(
         &mut self,
-        format: FileFormat,
-        jpeg_quality: u8,
+        format: ExportFormat,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.finish_text(window, cx) {
             self.defer_after_text(move |this, window, cx| {
-                this.export(format, jpeg_quality, window, cx);
+                this.export(format, window, cx);
             });
             return;
         }
@@ -241,7 +266,7 @@ impl Workspace {
             return;
         }
         let id = tab.id;
-        let mut suggested = suggested_name(&tab.document, format);
+        let mut suggested = suggested_export_name(&tab.document, format);
         if tab.document.path.is_some() && suggested == tab.document.name {
             let stem = Path::new(&suggested)
                 .file_stem()
@@ -252,10 +277,7 @@ impl Workspace {
         self.prompt_destination(suggested, window, cx, move |workspace, path, window, cx| {
             match prepare_export(&path, format) {
                 Ok(path) => {
-                    let kind = WriteKind::Export {
-                        format,
-                        jpeg_quality,
-                    };
+                    let kind = WriteKind::Export(format);
                     workspace.write_file(id, path, kind, window, cx)
                 }
                 Err(error) => workspace
@@ -344,17 +366,18 @@ impl Workspace {
 
         let tab = &mut self.tabs[index];
         tab.saving = Some(path.clone());
-        tab.exporting = matches!(kind, WriteKind::Export { .. });
+        tab.exporting = matches!(kind, WriteKind::Export(_));
         tab.notice = None;
         let revision = tab.history.revision();
         let content = tab.document.content.clone();
         let job = cx.background_executor().spawn(async move {
             let result = match kind {
                 WriteKind::Save(format) => save_image(&content, &path, format),
-                WriteKind::Export {
+                WriteKind::Export(ExportFormat::Raster {
                     format,
                     jpeg_quality,
-                } => export_image(&content, &path, format, jpeg_quality),
+                }) => export_image(&content, &path, format, jpeg_quality),
+                WriteKind::Export(ExportFormat::Pdf { dpi }) => export_pdf(&content, &path, dpi),
             };
             (path, result)
         });
@@ -377,13 +400,13 @@ impl Workspace {
                         tab.history.mark_saved(revision);
                         workspace.update_title(window);
                     }
-                    (WriteKind::Export { .. }, Ok(())) => {
+                    (WriteKind::Export(_), Ok(())) => {
                         tab.notice = Some(format!("Exported {name}"));
                     }
                     (WriteKind::Save(_), Err(error)) => workspace
                         .errors
                         .push(format!("Could not save {name}: {error:#}")),
-                    (WriteKind::Export { .. }, Err(error)) => workspace
+                    (WriteKind::Export(_), Err(error)) => workspace
                         .errors
                         .push(format!("Could not export {name}: {error:#}")),
                 }
@@ -529,14 +552,40 @@ fn prepare_destination(path: &Path, project_only: bool) -> Result<(PathBuf, File
     Ok((destination_for_format(path, format)?, format))
 }
 
-fn prepare_export(path: &Path, format: FileFormat) -> Result<PathBuf> {
+fn suggested_export_name(document: &Document, format: ExportFormat) -> String {
+    if let ExportFormat::Raster { format, .. } = format {
+        return suggested_name(document, format);
+    }
+    let name = Path::new(&document.name);
+    if crate::pdf::is_pdf_path(name) {
+        return document.name.clone();
+    }
+    let stem = document
+        .path
+        .as_deref()
+        .or_else(|| save_format(name).ok().map(|_| name))
+        .and_then(Path::file_stem)
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&document.name);
+    if crate::pdf::is_pdf_path(Path::new(stem)) {
+        stem.to_owned()
+    } else {
+        format!("{stem}.pdf")
+    }
+}
+
+fn prepare_export(path: &Path, format: ExportFormat) -> Result<PathBuf> {
     anyhow::ensure!(
-        save_format(path).ok() == Some(format),
-        "Use a .{} filename to export a {} image.",
+        format.matches_path(path),
+        "Use a .{} filename for this export.",
         format.extension(),
-        format.label()
     );
-    destination_for_format(path, format)
+    let destination = canonical_destination(path)?;
+    anyhow::ensure!(
+        format.matches_path(&destination),
+        "The destination resolves to a file with a different extension."
+    );
+    Ok(destination)
 }
 
 fn destination_for_format(path: &Path, format: FileFormat) -> Result<PathBuf> {
@@ -583,10 +632,10 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            WriteKind::Export {
+            WriteKind::Export(ExportFormat::Raster {
                 format: FileFormat::Png,
                 jpeg_quality: 92
-            }
+            })
             .validate_document(&document)
             .is_ok()
         );
@@ -631,18 +680,25 @@ mod tests {
     #[test]
     fn writes_respect_open_files_and_in_flight_destinations() {
         let save = WriteKind::Save(FileFormat::Png);
-        let export = WriteKind::Export {
+        let export = WriteKind::Export(ExportFormat::Raster {
             format: FileFormat::Png,
             jpeg_quality: 92,
-        };
+        });
         assert!(!save.destination_reserved(true, true, false));
         assert!(save.destination_reserved(false, true, false));
         assert!(export.destination_reserved(true, true, false));
         assert!(export.destination_reserved(false, true, false));
-        for kind in [save, export] {
+        for kind in [
+            save,
+            export,
+            WriteKind::Export(ExportFormat::Pdf { dpi: 300 }),
+        ] {
             assert!(kind.destination_reserved(false, false, true));
             assert!(!kind.destination_reserved(false, false, false));
         }
+        let pdf = WriteKind::Export(ExportFormat::Pdf { dpi: 300 });
+        assert!(pdf.destination_reserved(true, true, false));
+        assert!(pdf.destination_reserved(false, true, false));
     }
 
     #[cfg(unix)]
@@ -654,7 +710,51 @@ mod tests {
         let alias = directory.path().join("alias.png");
         std::os::unix::fs::symlink(&project, &alias).unwrap();
         assert!(prepare_destination(&alias, false).is_err());
-        assert!(prepare_export(&alias, FileFormat::Png).is_err());
+        assert!(
+            prepare_export(
+                &alias,
+                ExportFormat::Raster {
+                    format: FileFormat::Png,
+                    jpeg_quality: 92
+                }
+            )
+            .is_err()
+        );
+        let pdf_alias = directory.path().join("alias.pdf");
+        std::os::unix::fs::symlink(&project, &pdf_alias).unwrap();
+        assert!(prepare_export(&pdf_alias, ExportFormat::Pdf { dpi: 300 }).is_err());
+    }
+
+    #[test]
+    fn pdf_is_export_only_and_keeps_sensible_source_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let format = ExportFormat::Pdf { dpi: 300 };
+        let pdf = directory.path().join("export.PDF");
+        assert!(prepare_export(&pdf, format).is_ok());
+        assert!(prepare_destination(&pdf, false).is_err());
+        assert!(prepare_export(&directory.path().join("export.png"), format).is_err());
+        let mut document = Document::from_content(
+            "source.pdf".into(),
+            crate::document::DocumentContent::single_layer(
+                "Page 1".into(),
+                image::RgbaImage::new(1, 1),
+            ),
+        );
+        for (name, expected) in [
+            ("source.pdf", "source.pdf"),
+            ("source.PNG", "source.pdf"),
+            ("art.lime", "art.pdf"),
+            ("source.pdf.lime", "source.pdf"),
+            ("Untitled 1", "Untitled 1.pdf"),
+            ("source (2)", "source (2).pdf"),
+        ] {
+            document.name = name.into();
+            assert_eq!(suggested_export_name(&document, format), expected);
+        }
+        document.path = Some(directory.path().join("saved.lime"));
+        assert_eq!(suggested_export_name(&document, format), "saved.pdf");
+        document.path = Some(directory.path().join("saved.pdf.lime"));
+        assert_eq!(suggested_export_name(&document, format), "saved.pdf");
     }
 
     #[test]
@@ -676,11 +776,19 @@ mod tests {
             directory.path().canonicalize().unwrap().join("a.png")
         );
 
-        assert!(prepare_export(&path("a.imageedit"), FileFormat::Png).is_err());
-        assert!(prepare_export(&path("a.lime"), FileFormat::Png).is_err());
-        assert!(prepare_export(&path("a.png"), FileFormat::Jpeg).is_err());
-        assert!(prepare_export(&path("a.jpeg"), FileFormat::Jpeg).is_ok());
-        assert!(prepare_export(&path("missing/a.png"), FileFormat::Png).is_err());
+        let png = ExportFormat::Raster {
+            format: FileFormat::Png,
+            jpeg_quality: 92,
+        };
+        let jpeg = ExportFormat::Raster {
+            format: FileFormat::Jpeg,
+            jpeg_quality: 92,
+        };
+        assert!(prepare_export(&path("a.imageedit"), png).is_err());
+        assert!(prepare_export(&path("a.lime"), png).is_err());
+        assert!(prepare_export(&path("a.png"), jpeg).is_err());
+        assert!(prepare_export(&path("a.jpeg"), jpeg).is_ok());
+        assert!(prepare_export(&path("missing/a.png"), png).is_err());
     }
 
     #[test]

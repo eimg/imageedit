@@ -282,6 +282,7 @@ pub(super) struct NumericEdit {
 
 pub(super) enum NumericFollowup {
     Key(Keystroke),
+    PdfExport,
     Focus(NumericField),
     Effect {
         reopen: bool,
@@ -915,6 +916,10 @@ impl Workspace {
                             this.run_last_effect(reopen, window, cx);
                             None
                         }
+                        NumericFollowup::PdfExport => {
+                            this.pdf_export_form(window, cx);
+                            None
+                        }
                         NumericFollowup::FitLayer { layer } => {
                             if this
                                 .active_tab()
@@ -1390,6 +1395,67 @@ mod tests {
         tab.id += 1;
         assert!(!pending.accepts_completion(&tab, id, generation, true));
         assert!(matches!(pending.followup, NumericFollowup::Key(queued) if queued == key));
+    }
+
+    #[test]
+    fn pdf_export_waits_for_a_geometry_commit_and_preserves_its_saved_revision() {
+        let mut tab = super::super::tests::opacity_tab();
+        let id = tab.id;
+        let generation = tab.history.generation();
+        let pending = PendingNumeric {
+            tab: id,
+            generation,
+            followup: NumericFollowup::PdfExport,
+        };
+        let mut state = tab.state();
+        let pixels = state
+            .content
+            .layer(state.active_layer)
+            .unwrap()
+            .pixels
+            .as_ref()
+            .clone();
+        let dirty = state
+            .content
+            .place_layer(state.active_layer, pixels, (1, 0));
+        let patch = crate::document::RenderedCanvas::prepare_patch(
+            &tab.document.canvas.pixels,
+            tab.document.canvas.preview.has_transparency,
+            tab.document.canvas.level_caches(),
+            &state.content,
+            dirty,
+        )
+        .unwrap();
+        tab.editing = true;
+        assert!(!pending.accepts_completion(&tab, id, generation, true));
+        assert!(
+            tab.publish_change(
+                generation,
+                super::super::Change::Edit,
+                Some((state.content, state.active_layer, state.selection, patch)),
+                1,
+            )
+            .0
+        );
+        assert!(pending.accepts_completion(&tab, id, generation, true));
+        assert_eq!(
+            tab.document.content.layer(tab.active_layer).unwrap().offset,
+            (1, 0)
+        );
+        let revision = tab.history.revision();
+        let directory = tempfile::tempdir().unwrap();
+        crate::document::export_pdf(
+            &tab.document.content,
+            &directory.path().join("moved.pdf"),
+            72,
+        )
+        .unwrap();
+        assert_eq!(tab.history.revision(), revision);
+        assert!(tab.history.is_dirty());
+        assert!(!pending.accepts_completion(&tab, id, generation, false));
+        assert!(!pending.accepts_completion(&tab, id, generation + 1, true));
+        tab.id += 1;
+        assert!(!pending.accepts_completion(&tab, id, generation, true));
     }
 
     #[test]

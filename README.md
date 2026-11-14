@@ -93,7 +93,7 @@ Separate images keep each page's own size, and Open as Layers keeps the existing
 canvas size. Successful imports remember DPI and page background for the session;
 new-document imports also remember Layers/Images and canvas sizing. Canceling
 or failing an import leaves those defaults unchanged. Page choices reset for each
-file. A PDF import becomes a new unsaved Lime project; PDF is not a save or export format. Encrypted PDFs are
+file. A PDF import becomes a new unsaved Lime project; use Export as PDF to write a flattened copy. Encrypted PDFs are
 not supported. Open as Layers accepts one PDF at a time. Multiple PDFs opened
 together keep their import dialogs queued. Pages are rasterized at the chosen
 DPI; PDF text and vector objects do not become editable text or paths.
@@ -114,13 +114,25 @@ Pick a tool on the left and adjust its settings on the right. Hover the **?**
 beside a tool name for gestures and shortcuts.
 
 Save as **`.lime`** to keep layers, editable text, and paths. Use **Export** for
-a flattened PNG, JPEG, or WebP copy. Apply or cancel an active preview before saving.
+a flattened PNG, JPEG, WebP, or single-page PDF copy. Apply or cancel an active preview before saving.
 Finish or cancel an unfinished free selection first. If an image gains layers
 while the save dialog is open, save it as a `.lime` project or export a copy.
 Smooth scaling keeps the colors of nearly transparent pixels intact; show a
 hidden layer before dragging its Scale Layer frame.
 Reduced previews and layer thumbnails also preserve transparent edge colors.
 Save and Undo shortcuts finish an active numeric selection edit first.
+
+**File → Export as PDF…** places the entire current canvas on one PDF page,
+with visible layers and text flattened into a lossless image. Transparent areas
+become white, and no margins or paper-size fitting are added. Resolution defaults
+to **300 DPI** and is remembered for the session; changing it changes the physical
+page size shown in the dialog without resizing the canvas pixels. Enter 1–1200 DPI;
+large canvases need a higher minimum to keep each page edge within 200 inches.
+Export leaves the project's layers, history, and saved state unchanged. PDF is
+export-only, so Save/Save As still use the existing project and raster formats.
+Typed geometry and text finish before the export dialog opens; apply or cancel
+other canvas previews first.
+Multipage output, searchable text, and vector PDF export are not supported.
 
 With **Scale Layer** (Shift+S), type Width or Height to preview a resize.
 **Size anchor** chooses which of nine points stays fixed during numeric resizing;
@@ -498,7 +510,7 @@ not a long-term backup history.
 
 Raster imports read embedded RGB/grayscale ICC profiles and convert pixels to
 sRGB; invalid or unsupported profiles return an error. Untagged images are
-assumed sRGB. PNG, JPEG, and WebP exports embed an sRGB profile. The macOS Metal
+assumed sRGB. PNG, JPEG, WebP, and PDF exports embed an sRGB profile. The macOS Metal
 surface is tagged sRGB for Core Animation's display conversion. Windows uses the
 standard SDR sRGB display path; per-monitor profile behavior still needs Windows
 verification. The working pixels remain **8-bit RGBA**. CMYK profiles, selectable

@@ -363,8 +363,8 @@ with a checker only within the fitted bitmap, and remain independent of import
 DPI. Per-page errors expose details and Retry previews. Dismissing the form
 cancels preview work and releases published images.
 PDF imports use the
-normal image and stack budgets and become unsaved `.lime` projects; PDF is not a
-save or export format. Encrypted PDFs are unsupported, and Open as Layers accepts
+normal image and stack budgets and become unsaved `.lime` projects; PDF is
+export-only, never a Save format. Encrypted PDFs are unsupported, and Open as Layers accepts
 one PDF at a time. PDF read/inspection/render/preparation jobs show progress and
 accept Cancel or Escape. Cancellation is cooperative: an in-progress parser,
 page render, or image-preparation call finishes before cancellation settles;
@@ -395,8 +395,19 @@ numeric positions and arrow nudges bypass snapping. Grid spacing (1–4096 px) a
 overlay/snap preferences are session settings. Save and Save As handle
 Lime (`.lime`) projects (legacy `.imageedit` files remain readable),
 PNG, JPEG, and WebP. A project stores the layer stack, paths, guides, and text with lossless pixels.
-Export writes flattened PNG, JPEG, or WebP copies to a separate destination
-and preserves the tab’s saved state. Raster Save is offered only while a
+Export writes flattened PNG, JPEG, WebP, or single-page PDF copies to a separate destination
+and preserves the tab’s saved state. PDF exports the complete current canvas as a
+lossless RGB image over white with embedded sRGB. Its dialog shows physical page
+size and accepts 1–1200 DPI (300 initially, remembered for the session), with a
+canvas-dependent minimum to stay within 200 inches per page edge. DPI changes
+page size without resampling. Layers and text are flattened; multipage, paper
+layouts, searchable text, and vector output are deferred. `src/pdf/export.rs`
+uses `pdf-writer` and row-wise Deflate compression; `document::export_pdf` shares
+atomic writes and the workspace's existing background export route and pending
+edit checks. The PDF menu finishes inline geometry before text and defers through
+`NumericFollowup::PdfExport` when its background commit must land first, validating
+tab and generation before reopening. PDF filenames stay excluded from `save_format`.
+Raster Save is offered only while a
 document is a single plain layer without paths, guides, or editable text.
 
 ## Code map

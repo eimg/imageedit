@@ -24,6 +24,7 @@ use image::RgbaImage;
 
 use crate::document::{Document, MAX_STACK_BYTES};
 
+pub mod export;
 mod pages;
 mod worker;
 pub use worker::run_if_requested;

@@ -38,6 +38,30 @@ fn text_hit_x(pointer: Pixels, left: Pixels, scroll_offset: Pixels) -> Pixels {
     pointer - left - px(9.) - scroll_offset
 }
 
+fn input_field(kind: &mut FormKind, input: PdfInput) -> Option<&mut Field> {
+    match kind {
+        FormKind::PdfExport { dpi, .. } if matches!(input, PdfInput::Dpi) => Some(dpi),
+        FormKind::PdfImport {
+            dpi,
+            page_selection,
+            active,
+            all_pages,
+            ..
+        } => Some(match input {
+            PdfInput::Dpi => {
+                *active = 0;
+                dpi
+            }
+            PdfInput::Pages => {
+                *active = 1;
+                *all_pages = false;
+                page_selection
+            }
+        }),
+        _ => None,
+    }
+}
+
 impl Workspace {
     pub(super) fn pdf_input_view(
         &self,
@@ -126,26 +150,8 @@ impl Workspace {
         let Some(form) = self.form.as_mut() else {
             return;
         };
-        let FormKind::PdfImport {
-            dpi,
-            page_selection,
-            active,
-            all_pages,
-            ..
-        } = &mut form.kind
-        else {
+        let Some(field) = input_field(&mut form.kind, drag.input) else {
             return;
-        };
-        let field = match drag.input {
-            PdfInput::Dpi => {
-                *active = 0;
-                dpi
-            }
-            PdfInput::Pages => {
-                *active = 1;
-                *all_pages = false;
-                page_selection
-            }
         };
         let run = TextRun {
             len: field.text.len(),
@@ -182,17 +188,8 @@ impl Workspace {
         self.place_pdf_input_cursor(&drag, event.position, event.modifiers.shift, window, cx);
         if let Some(form) = self.form.as_mut() {
             if event.click_count >= 2 {
-                if let FormKind::PdfImport {
-                    dpi,
-                    page_selection,
-                    ..
-                } = &mut form.kind
-                {
-                    match drag.input {
-                        PdfInput::Dpi => dpi,
-                        PdfInput::Pages => page_selection,
-                    }
-                    .select_all();
+                if let Some(field) = input_field(&mut form.kind, drag.input) {
+                    field.select_all();
                     if let Some(scroll) = &drag.scroll {
                         scroll.scroll_to_item(0);
                     }

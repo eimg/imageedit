@@ -801,6 +801,19 @@ pub fn export_image(
     })
 }
 
+pub fn export_pdf(content: &DocumentContent, path: &Path, dpi: u32) -> Result<()> {
+    crate::pdf::export::page_size(content.size(), dpi)?;
+    write_atomically(path, |writer| {
+        crate::pdf::export::write(writer, &content.composite(), dpi)
+    })
+}
+
+pub(crate) fn rgb_over_white(pixel: Rgba<u8>) -> [u8; 3] {
+    let [r, g, b, a] = pixel.0;
+    let alpha = u16::from(a);
+    [r, g, b].map(|channel| ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8)
+}
+
 // Writes beside the destination and replaces it only after a complete, synced write.
 fn write_atomically(
     path: &Path,
@@ -848,11 +861,7 @@ fn write_raster(
         }
         FileFormat::Jpeg => {
             let rgb = RgbImage::from_fn(width, height, |x, y| {
-                let [r, g, b, a] = pixels.get_pixel(x, y).0;
-                let alpha = u16::from(a);
-                image::Rgb([r, g, b].map(|channel| {
-                    ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
-                }))
+                image::Rgb(rgb_over_white(*pixels.get_pixel(x, y)))
             });
             let mut encoder = codecs::jpeg::JpegEncoder::new_with_quality(writer, jpeg_quality);
             encoder.set_icc_profile(crate::color_management::srgb_profile()?)?;
@@ -1299,6 +1308,83 @@ mod tests {
         assert!(export_image(&document.content, &missing, FileFormat::Png, 92).is_err());
         assert!(!missing.exists());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn pdf_export_composites_layers_without_changing_the_project_and_replaces_safely() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("source.lime");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/projects/v6-two-layers.imageedit"
+        );
+        std::fs::copy(fixture, &project).unwrap();
+        let original = std::fs::read(&project).unwrap();
+        let mut document = Document::open(&project).unwrap();
+        let top_id = document.content.top_layer_id();
+        let hidden = document.content.duplicate_layer(top_id).unwrap();
+        document.content.set_visible(hidden, false);
+        let top = &mut document.content.layers[1];
+        top.visible = true;
+        top.offset = (-1, 1);
+        top.opacity = 173;
+        top.blend_mode = content::BlendMode::Multiply;
+        top.mask = Some(content::LayerMask {
+            enabled: true,
+            pixels: Arc::new(RgbaImage::from_fn(
+                top.pixels.width(),
+                top.pixels.height(),
+                |x, _| Rgba([255, 255, 255, if x == 0 { 0 } else { 128 }]),
+            )),
+        });
+        let composite = document.content.composite();
+        let layer_pixels: Vec<_> = document
+            .content
+            .layers()
+            .iter()
+            .map(|layer| layer.pixels.clone())
+            .collect();
+        let path = directory.path().join("export.pdf");
+        export_pdf(&document.content, &path, 72).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let control = crate::pdf::PdfControl::default();
+        let source = crate::pdf::read_source(&path, &control, |_| {}).unwrap();
+        assert_eq!(source.info.pages, 1);
+        let options = crate::pdf::PdfOptions {
+            path: path.clone(),
+            pages: vec![1],
+            dpi: 72,
+            mode: crate::pdf::PdfMode::Separate,
+            background: crate::pdf::PdfBackground::Transparent,
+            canvas: crate::pdf::PdfCanvas::FirstPage,
+        };
+        let rendered = crate::pdf::render_pages(&source, &options, &control, |_| {})
+            .unwrap()
+            .remove(0);
+        assert_eq!(rendered.dimensions(), composite.dimensions());
+        for (actual, expected) in rendered.pixels().zip(composite.pixels()) {
+            assert_eq!(actual[3], 255);
+            for (actual, expected) in actual.0.into_iter().zip(rgb_over_white(*expected)) {
+                assert!(actual.abs_diff(expected) <= 1);
+            }
+        }
+        assert_eq!(
+            document.path.as_ref(),
+            Some(&project.canonicalize().unwrap())
+        );
+        assert_eq!(document.format, FileFormat::Project);
+        assert_eq!(document.content.layers().len(), 3);
+        assert_eq!(*composite, *document.content.composite());
+        for (layer, original) in document.content.layers().iter().zip(layer_pixels) {
+            assert!(Arc::ptr_eq(&layer.pixels, &original));
+        }
+        assert_eq!(std::fs::read(&project).unwrap(), original);
+        assert!(export_pdf(&document.content, &path, 0).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let missing = directory.path().join("missing/export.pdf");
+        assert!(export_pdf(&document.content, &missing, 300).is_err());
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]

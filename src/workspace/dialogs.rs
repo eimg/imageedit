@@ -11,6 +11,7 @@ use gpui::{
 use super::Workspace;
 use super::adjust_ui::AdjustKind;
 use super::color::{ColorControl, Hsv, control};
+use super::files::ExportFormat;
 use super::filter_ui::FilterKind;
 use super::layers::{opacity_from_percent, opacity_percent};
 use super::pdf_ui::PdfTarget;
@@ -61,6 +62,10 @@ enum FormKind {
     },
     JpegQuality {
         quality: Field,
+    },
+    PdfExport {
+        dpi: Field,
+        canvas: (u32, u32),
     },
     NewLayer {
         name: Field,
@@ -627,6 +632,29 @@ impl Workspace {
             let quality = Field::new(self.jpeg_quality.to_string());
             self.show_form(FormKind::JpegQuality { quality }, window, cx);
         }
+    }
+
+    pub(super) fn pdf_export_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open || self.form.is_some() || self.pdf_job.is_some() {
+            return;
+        }
+        if self.commit_numeric_with_followup(super::numeric::NumericFollowup::PdfExport, window, cx)
+        {
+            return;
+        }
+        if self.finish_text(window, cx) {
+            self.defer_after_text(Self::pdf_export_form);
+            return;
+        }
+        if self.refuse_pending_file_edit(cx) {
+            return;
+        }
+        let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
+            return;
+        };
+        let canvas = tab.document.content.size();
+        let dpi = Field::new(self.pdf_export_dpi.to_string());
+        self.show_form(FormKind::PdfExport { dpi, canvas }, window, cx);
     }
 
     pub(super) fn new_layer_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1241,7 +1269,25 @@ impl Workspace {
                 };
                 self.jpeg_quality = quality;
                 self.dismiss_form(window, cx);
-                self.export(FileFormat::Jpeg, quality, window, cx);
+                self.export(
+                    ExportFormat::Raster {
+                        format: FileFormat::Jpeg,
+                        jpeg_quality: quality,
+                    },
+                    window,
+                    cx,
+                );
+            }
+            FormKind::PdfExport { dpi, canvas } => {
+                let dpi = dpi.text.parse().unwrap_or(0);
+                if let Err(error) = pdf::export::page_size(*canvas, dpi) {
+                    form.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
+                self.pdf_export_dpi = dpi;
+                self.dismiss_form(window, cx);
+                self.export(ExportFormat::Pdf { dpi }, window, cx);
             }
             FormKind::NewLayer { name, fill } => {
                 let name = name.text.trim();
@@ -1542,6 +1588,9 @@ impl Workspace {
                     }
                     FormKind::JpegQuality { quality } => {
                         quality.handle_key(event, FieldMode::Digits { max: 3 }, cx)
+                    }
+                    FormKind::PdfExport { dpi, .. } => {
+                        dpi.handle_key(event, FieldMode::Digits { max: 4 }, cx)
                     }
                     FormKind::NewLayer { name, .. }
                     | FormKind::RenameLayer { name, .. }
@@ -2149,6 +2198,32 @@ impl Workspace {
                                 .child("Higher values keep more detail and make larger files. Transparent areas become white."),
                         ),
                 ),
+                FormKind::PdfExport { dpi, canvas } => {
+                    let size = pdf::export::page_size(*canvas, dpi.text.parse().unwrap_or(0));
+                    can_accept = size.is_ok();
+                    let summary = match size {
+                        Ok((width, height)) => format!(
+                            "Page size: {:.1} × {:.1} mm ({:.2} × {:.2} in)",
+                            width * 25.4 / 72., height * 25.4 / 72.,
+                            width / 72., height / 72.,
+                        ),
+                        Err(error) => error.to_string(),
+                    };
+                    (
+                        "Export as PDF",
+                        "Choose File…",
+                        div().flex().flex_col().gap_3()
+                            .child("Exports the current canvas as a single image-based PDF page.")
+                            .child(div().child("Resolution (DPI)").child(
+                                self.pdf_input_view(pdf_input::PdfInput::Dpi, dpi, true, None, cx).mt_1()
+                            ))
+                            .child(div().text_sm().text_color(rgb(if can_accept { MUTED } else { 0xffb8ad })).child(summary))
+                            .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                "{} × {} pixels, lossless, white background. Resolution changes page size without resizing pixels. Text and visible layers are flattened.",
+                                canvas.0, canvas.1,
+                            ))),
+                    )
+                }
                 FormKind::NewLayer { name, fill } => {
                     let fills = div().flex().gap_2().children(
                         [

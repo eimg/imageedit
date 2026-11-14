@@ -11,6 +11,7 @@ actions!(
         ExportPng,
         ExportJpeg,
         ExportWebp,
+        ExportPdf,
         Undo,
         Redo,
         NewLayer,
@@ -691,6 +692,7 @@ pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
         MenuItem::action("Export as PNG…", ExportPng),
         MenuItem::action("Export as JPEG…", ExportJpeg),
         MenuItem::action("Export as WebP…", ExportWebp),
+        MenuItem::action("Export as PDF…", ExportPdf),
     ];
     if !macos {
         file.extend([MenuItem::separator(), MenuItem::action("Exit", Quit)]);
@@ -1069,6 +1071,7 @@ mod tests {
             "Export as PNG…",
             "Export as JPEG…",
             "Export as WebP…",
+            "Export as PDF…",
             "menu:Edit",
             "Undo",
             "Redo",
@@ -1237,7 +1240,7 @@ mod tests {
             .collect();
         let export = expected_windows
             .iter()
-            .position(|label| *label == "Export as WebP…")
+            .position(|label| *label == "Export as PDF…")
             .unwrap();
         expected_windows.insert(export + 1, "Exit");
         expected_windows.extend(["menu:Help", "Check for Updates…"]);

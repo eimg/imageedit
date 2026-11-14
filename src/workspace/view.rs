@@ -16,7 +16,7 @@ use crate::commands::{
     AlignLayer, ApplyCrop, ApplyGradient, ApplyTransform, BackgroundColor, BrushSizeDown,
     BrushSizeUp, CancelCrop, CancelFreeSelect, CancelGradient, CancelMove, CancelPath,
     CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, DeletePathAnchor,
-    ExportJpeg, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
+    ExportJpeg, ExportPdf, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
     InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, NudgeLayer, OPEN_HINT, OpenImage,
     PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
     ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary,
@@ -28,7 +28,7 @@ use crate::transform::{Mirror, Resample};
 
 use super::canvas_tools::PreviewGeometry;
 use super::cursor::CanvasCursor;
-use super::files::SaveMode;
+use super::files::{ExportFormat, SaveMode};
 use super::numeric::NumericField;
 use super::tooltip::{help_icon, tooltip, tooltip_with_detail};
 use super::{Change, DEFAULT_COLORS, Tab, Workspace};
@@ -238,13 +238,30 @@ impl Render for Workspace {
                         this.save(SaveMode::ProjectAs, window, cx)
                     }))
                     .on_action(cx.listener(|this, _: &ExportPng, window, cx| {
-                        this.export(FileFormat::Png, 0, window, cx)
+                        this.export(
+                            ExportFormat::Raster {
+                                format: FileFormat::Png,
+                                jpeg_quality: 0,
+                            },
+                            window,
+                            cx,
+                        )
                     }))
                     .on_action(
                         cx.listener(|this, _: &ExportJpeg, window, cx| this.jpeg_form(window, cx)),
                     )
                     .on_action(cx.listener(|this, _: &ExportWebp, window, cx| {
-                        this.export(FileFormat::WebP, 0, window, cx)
+                        this.export(
+                            ExportFormat::Raster {
+                                format: FileFormat::WebP,
+                                jpeg_quality: 0,
+                            },
+                            window,
+                            cx,
+                        )
+                    }))
+                    .on_action(cx.listener(|this, _: &ExportPdf, window, cx| {
+                        this.pdf_export_form(window, cx)
                     }))
                     .when(self.tool == Tool::Crop, |root| {
                         root.key_context("Crop")
