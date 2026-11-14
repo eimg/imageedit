@@ -175,6 +175,22 @@ impl From<WireBlendMode> for BlendMode {
 // and optional effect coverage, in manifest order. Recovery metadata is optional
 // in version 9 and is written only to separate crash-recovery projects.
 pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
+    read_inner(&mut reader, None).map(|(content, _)| content)
+}
+
+/// Recovery must admit the decoded stack and its prepared canvas before
+/// allocating pixels. Include the encoded input as decoding scratch space.
+pub(crate) fn read_for_recovery(
+    mut reader: impl BufRead + Seek,
+    budget: u64,
+) -> Result<(DocumentContent, u64)> {
+    read_inner(&mut reader, Some(budget))
+}
+
+fn read_inner(
+    mut reader: impl BufRead + Seek,
+    recovery_budget: Option<u64>,
+) -> Result<(DocumentContent, u64)> {
     let mut magic = [0; MAGIC.len()];
     reader
         .read_exact(&mut magic)
@@ -208,6 +224,16 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         .checked_sub(start)
         .context("Project was truncated while opening")?;
     reader.seek(SeekFrom::Start(start))?;
+    let recovery_bytes = if let Some(budget) = recovery_budget {
+        let bytes = recovery_memory_bytes(&manifest, length, remaining);
+        ensure!(
+            bytes <= budget,
+            "The recovery memory limit was reached; this copy was left on disk"
+        );
+        bytes
+    } else {
+        0
+    };
     let mut payload_budget = MAX_PAYLOAD_BYTES;
     let mut layers = Vec::with_capacity(manifest.layers.len());
     for entry in manifest.layers {
@@ -326,7 +352,39 @@ pub fn read(mut reader: impl BufRead + Seek) -> Result<DocumentContent> {
         .collect();
     content.set_paths(paths, manifest.active_path.map(crate::paths::PathId))?;
     content.set_guides(manifest.guides)?;
-    Ok(content)
+    Ok((content, recovery_bytes))
+}
+
+fn recovery_memory_bytes(manifest: &Manifest, manifest_bytes: u32, payload_bytes: u64) -> u64 {
+    let canvas = u64::from(manifest.width) * u64::from(manifest.height) * 4;
+    let layers: u64 = manifest
+        .layers
+        .iter()
+        .map(|layer| {
+            u64::from(layer.width)
+                * u64::from(layer.height)
+                * 4
+                * (1 + u64::from(layer.mask_enabled.is_some())
+                    + layer
+                        .effect
+                        .as_ref()
+                        .map_or(0, |effect| 1 + u64::from(effect.coverage)))
+        })
+        .sum();
+    // Each fine tile has both cached RGBA pixels and a BGRA render image.
+    // Count unclipped aprons conservatively; canvas and preview may also share
+    // buffers, but admission must remain safe when they do not.
+    let tile = crate::preview::TILE_FINE;
+    let apron = u64::from(crate::preview::FILTER_APRON) * 2;
+    let tile_width = u64::from(manifest.width) + u64::from(manifest.width.div_ceil(tile)) * apron;
+    let tile_height =
+        u64::from(manifest.height) + u64::from(manifest.height.div_ceil(tile)) * apron;
+    layers
+        + canvas * 2
+        + tile_width * tile_height * 4 * 2
+        + manifest.layers.len() as u64 * 64 * 64 * 4
+        + u64::from(manifest_bytes) * 2
+        + payload_bytes
 }
 
 pub fn write(writer: impl Write, content: &DocumentContent) -> Result<()> {

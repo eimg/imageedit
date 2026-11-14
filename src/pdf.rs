@@ -52,6 +52,20 @@ pub enum PdfBackground {
     Transparent,
 }
 
+impl PdfBackground {
+    fn flatten_background(self, image: &mut RgbaImage) {
+        if self == Self::White {
+            // Renderer rounding at antialiased edges can leave alpha at 254
+            // even over its white backdrop. White output must stay opaque.
+            for pixel in image.pixels_mut() {
+                if pixel[3] != 255 {
+                    *pixel = crate::document::source_over(image::Rgba([255; 4]), *pixel, 255);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PdfCanvas {
     #[default]
@@ -411,8 +425,9 @@ fn render_each(
         Document::validate_size(width, height)
             .with_context(|| format!("Page {page_number} at {} DPI is too large", options.dpi))?;
         let bytes = pixmap.take_rgba8(ImageAlphaType::Alpha);
-        let image = RgbaImage::from_raw(width, height, bytes)
+        let mut image = RgbaImage::from_raw(width, height, bytes)
             .with_context(|| format!("Page {page_number} could not be rendered."))?;
+        options.background.flatten_background(&mut image);
         total_bytes = total_bytes.saturating_add(u64::from(width) * u64::from(height) * 4);
         ensure!(
             total_bytes <= MAX_STACK_BYTES,
@@ -919,6 +934,28 @@ mod tests {
                     .and_then(|pdf| info_from_pdf(&pdf, &PdfControl::default()))
                     .is_err()
             );
+        }
+        let white = render_thumbnails(
+            &source,
+            &[1, 2],
+            PdfBackground::White,
+            &PdfControl::default(),
+        )
+        .unwrap();
+        for thumbnail in white {
+            assert!(
+                thumbnail
+                    .pixels
+                    .unwrap()
+                    .pixels()
+                    .all(|pixel| pixel[3] == 255)
+            );
+        }
+        let mut white_options = options.clone();
+        white_options.background = PdfBackground::White;
+        white_options.dpi = 150;
+        for page in render_pages(&source, &white_options, &PdfControl::default(), |_| {}).unwrap() {
+            assert!(page.pixels().all(|pixel| pixel[3] == 255));
         }
     }
 

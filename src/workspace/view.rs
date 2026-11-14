@@ -58,6 +58,7 @@ impl Render for Workspace {
         self.schedule_pending_open(window, cx);
         self.request_preview_level(window, cx);
         self.refresh_composite_preview(window, cx);
+        self.refresh_effect_preview_resolution(window, cx);
         self.refresh_recovery(window, cx);
         let interactive = self.form.is_none() && !self.dialog_open && self.pdf_job.is_none();
         let active = self.active_tab();
@@ -154,10 +155,15 @@ impl Render for Workspace {
                     let was_path = this.tool == Tool::Path;
                     // Typed text commits on its own; a transform tool starts once it lands.
                     let committing = changed && this.finish_text(window, cx);
-                    if committing && matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
+                    if committing
+                        && matches!(
+                            tool,
+                            Tool::ScaleLayer | Tool::Rotate | Tool::Flip | Tool::Perspective
+                        )
+                    {
                         this.defer_after_text(|this, window, cx| {
                             this.cancel_warp(window, cx);
-                            this.begin_warp(window, cx);
+                            this.begin_layer_transform_preview(window, cx);
                         });
                     }
                     if changed {
@@ -183,9 +189,14 @@ impl Render for Workspace {
                         this.cancel_scale(window, cx);
                         this.cancel_path_gesture(cx);
                     }
-                    if changed || matches!(tool, Tool::Rotate | Tool::Flip | Tool::Perspective) {
+                    if changed
+                        || matches!(
+                            tool,
+                            Tool::ScaleLayer | Tool::Rotate | Tool::Flip | Tool::Perspective
+                        )
+                    {
                         this.cancel_warp(window, cx);
-                        this.begin_warp(window, cx);
+                        this.begin_layer_transform_preview(window, cx);
                     }
                     cx.notify();
                 }))
@@ -257,9 +268,13 @@ impl Render for Workspace {
                             }))
                     })
                     .when(self.tool == Tool::ScaleLayer, |root| {
-                        root.key_context("ScaleLayer").on_action(cx.listener(
-                            |this, _: &CancelMove, window, cx| this.cancel_scale(window, cx),
-                        ))
+                        root.key_context("ScaleLayer")
+                            .on_action(cx.listener(|this, _: &ApplyTransform, window, cx| {
+                                this.finish_scale(window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &CancelTransform, window, cx| {
+                                this.cancel_scale(window, cx)
+                            }))
                     })
                     .when(
                         matches!(
@@ -1340,7 +1355,27 @@ impl Workspace {
                             )
                     })
                     .when(self.tool == Tool::FreeSelect && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                        let over_node = self.canvas_cursor.position.get().is_some_and(|pointer| {
+                            PreviewGeometry::for_tab(tab, self.viewport.get(), scale).is_some_and(
+                                |geometry| {
+                                    super::selection::free_node_at(
+                                        &self.free_points,
+                                        &self.free_nodes,
+                                        &geometry,
+                                        pointer,
+                                    )
+                                    .is_some()
+                                },
+                            )
+                        });
+                        area.cursor(if self.free_node_drag.is_some() {
+                            CursorStyle::ClosedHand
+                        } else if over_node {
+                            CursorStyle::OpenHand
+                        } else {
+                            CursorStyle::Crosshair
+                        })
+                        .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.begin_free(
@@ -1468,6 +1503,8 @@ impl Workspace {
                             gradient: self.gradient_frame(),
                             stroke: self.stroke_paint(),
                             free_path: self.free_points.clone(),
+                            free_nodes: self.free_nodes.clone(),
+                            free_node_drag: self.free_node_drag.map(|(index, _)| index),
                             polygon: self.tool == Tool::FreeSelect,
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
@@ -1547,7 +1584,7 @@ impl Workspace {
                         .child(
                             div()
                                 .text_color(rgb(MUTED))
-                                .child("Drop a Lime project, PNG, JPEG, or WebP here."),
+                                .child("Drop a Lime project, PNG, JPEG, WebP, or PDF here."),
                         )
                         .child(
                             div()
@@ -1795,7 +1832,7 @@ impl Workspace {
                                     .child(section_label("CROP"))
                                     .child(self.crop_fields(cx))
                                     .child(action_row([
-                                        option_action("Apply Crop", true).on_click(
+                                        option_action("Apply", true).on_click(
                                             |_, window, cx| {
                                                 window.dispatch_action(Box::new(ApplyCrop), cx)
                                             },
@@ -1826,7 +1863,7 @@ impl Workspace {
                                             .child(self.move_snapping_options(cx))
                                     })
                             })
-                            .when(self.tool == Tool::ScaleLayer, |panel| {
+                            .when(self.tool == Tool::ScaleLayer && self.scale_drag.is_some(), |panel| {
                                 let size = self.scale_size();
                                 let locked = self.scale_lock;
                                 let resample = self.warp_resample;
@@ -1858,13 +1895,14 @@ impl Workspace {
                                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                             .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::commands::FitLayerToCanvas), cx)))
                                         .when(!self.can_fit_active_layer(), |button| button.text_color(rgb(DISABLED)))
-                                        .tooltip(tooltip("Scale the whole layer proportionally and center it inside the canvas. Uses the selected resampling; may enlarge smaller layers. Requires a visible raster layer with unlocked position and enough project memory.")))
+                                        .tooltip(tooltip("Preview a proportional fit inside the canvas, then Apply. Uses the selected resampling; may enlarge smaller layers. Requires a visible raster layer with unlocked position and enough project memory.")))
                                     .child(section_label("RESAMPLE"))
                                     .child(segmented([
                                         resample_choice("Nearest", Resample::Nearest, resample, cx),
                                         resample_choice("Bilinear", Resample::Bilinear, resample, cx),
                                         resample_choice("Bicubic", Resample::Bicubic, resample, cx),
                                     ]))
+                                    .child(transform_actions(self.can_apply_scale()))
                             })
                             .when_some(self.warp_status(), |panel, status| {
                                 let horizontal = status.horizontal;
@@ -1924,25 +1962,7 @@ impl Workspace {
                                                 ),
                                             ]))
                                     })
-                                    .child(action_row([
-                                        option_action("Apply", true)
-                                            .when(can_apply, |button| {
-                                                button.on_click(|_, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(ApplyTransform),
-                                                        cx,
-                                                    );
-                                                })
-                                            })
-                                            .when(!can_apply, |button| {
-                                                button
-                                                    .opacity(0.45)
-                                                    .cursor(CursorStyle::Arrow)
-                                            }),
-                                        option_action("Cancel", false).on_click(|_, window, cx| {
-                                            window.dispatch_action(Box::new(CancelTransform), cx)
-                                        }),
-                                    ]))
+                                    .child(transform_actions(can_apply))
                             })
                             .when(
                                 matches!(
@@ -2803,6 +2823,23 @@ pub(super) fn action_row(children: impl IntoIterator<Item = gpui::Stateful<Div>>
         .children(children.into_iter().map(|child| child.flex_1()))
 }
 
+fn transform_actions(can_apply: bool) -> Div {
+    action_row([
+        option_action("Apply", true)
+            .when(can_apply, |button| {
+                button.on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ApplyTransform), cx);
+                })
+            })
+            .when(!can_apply, |button| {
+                button.opacity(0.45).cursor(CursorStyle::Arrow)
+            }),
+        option_action("Cancel", false).on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(CancelTransform), cx);
+        }),
+    ])
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum TransformPointControl {
     Rotation,
@@ -3111,6 +3148,8 @@ struct CanvasDecorations {
     gradient: Option<super::gradient_ui::GradientFrame>,
     stroke: Vec<super::paint_ui::StrokePaint>,
     free_path: Vec<Point<f32>>,
+    free_nodes: Vec<usize>,
+    free_node_drag: Option<usize>,
     polygon: bool,
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
@@ -3139,6 +3178,8 @@ fn image_preview(
         gradient,
         stroke,
         free_path,
+        free_nodes,
+        free_node_drag,
         polygon,
         paths,
         active_path,
@@ -3241,7 +3282,15 @@ fn image_preview(
                 visible,
                 selection.outline_edges(),
             );
-            paint_free_outline(window, &geometry, viewport, &free_path, polygon);
+            paint_free_outline(
+                window,
+                &geometry,
+                viewport,
+                &free_path,
+                &free_nodes,
+                free_node_drag,
+                polygon,
+            );
             if path_handles {
                 paint_path_handles(
                     window,
@@ -3260,7 +3309,7 @@ fn image_preview(
                 paint_text_caret(window, &geometry, width, height, visible, caret);
             }
             if let Some(frame) = scale_frame {
-                paint_scale_frame(window, &geometry, width, height, visible, frame);
+                paint_scale_frame(window, &geometry, width, height, viewport, frame);
             }
             if let Some(frame) = warp {
                 paint_warp_frame(window, &geometry, viewport, width, height, frame);
@@ -3727,6 +3776,8 @@ fn paint_free_outline(
     geometry: &PreviewGeometry,
     viewport: Bounds<Pixels>,
     points: &[Point<f32>],
+    nodes: &[usize],
+    dragging: Option<usize>,
     polygon: bool,
 ) {
     let Some(first) = points.first().map(|point| geometry.project(*point)) else {
@@ -3735,11 +3786,12 @@ fn paint_free_outline(
     let pointer = window.mouse_position();
     let can_close = polygon && points.len() >= 3;
     let near_start = can_close && super::selection::near_polygon_start(first, pointer);
-    let tail = (polygon && viewport.contains(&pointer)).then_some(if near_start {
-        first
-    } else {
-        pointer
-    });
+    let hovered = super::selection::free_node_at(points, nodes, geometry, pointer);
+    let tail = (polygon
+        && dragging.is_none()
+        && (hovered.is_none() || near_start)
+        && viewport.contains(&pointer))
+    .then_some(if near_start { first } else { pointer });
 
     window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
         for (weight, color) in [(3., rgb(0x12151c)), (1., rgb(0xffffff))] {
@@ -3756,14 +3808,24 @@ fn paint_free_outline(
             }
         }
         if polygon {
-            window.paint_quad(fill(
-                Bounds::centered_at(first, size(px(8.), px(8.))),
-                rgb(0x12151c),
-            ));
-            window.paint_quad(fill(
-                Bounds::centered_at(first, size(px(6.), px(6.))),
-                rgb(if near_start { ACCENT } else { 0xffffff }),
-            ));
+            for &index in nodes {
+                let Some(point) = points.get(index) else {
+                    continue;
+                };
+                let center = geometry.project(*point);
+                window.paint_quad(fill(
+                    Bounds::centered_at(center, size(px(8.), px(8.))),
+                    rgb(0x12151c),
+                ));
+                window.paint_quad(fill(
+                    Bounds::centered_at(center, size(px(6.), px(6.))),
+                    rgb(if dragging == Some(index) || hovered == Some(index) {
+                        ACCENT
+                    } else {
+                        0xffffff
+                    }),
+                ));
+            }
         }
     });
 }
@@ -4003,27 +4065,9 @@ fn paint_warp_frame(
                 }
             }
         }
-        let scale = window.scale_factor();
         for (index, grip) in frame.grips.iter().take(frame.grip_count).enumerate() {
             let center = project(*grip);
-            let active = frame.active_grip == Some(index);
-            paint_contrast_square(
-                window,
-                f32::from(center.x),
-                f32::from(center.y),
-                if active { 11. } else { 7. },
-                scale,
-            );
-            if active {
-                window.paint_quad(gpui::quad(
-                    Bounds::centered_at(center, gpui::size(px(9.), px(9.))),
-                    px(0.),
-                    rgb(0xffffff),
-                    px(2.),
-                    rgb(ACCENT),
-                    gpui::BorderStyle::Solid,
-                ));
-            }
+            paint_control_handle(window, center, frame.active_grip == Some(index));
         }
     });
 }
@@ -4048,8 +4092,6 @@ fn paint_handles(
     let bottom = f32::from(top_left.y.max(bottom_right.y));
     let mid_x = (left + right) / 2.;
     let mid_y = (top + bottom) / 2.;
-    let scale = window.scale_factor();
-    let handle = 5.;
     for (x, y) in [
         (left, top),
         (mid_x, top),
@@ -4060,7 +4102,28 @@ fn paint_handles(
         (mid_x, bottom),
         (right, bottom),
     ] {
-        paint_contrast_square(window, x, y, handle, scale);
+        paint_control_handle(window, point(px(x), px(y)), false);
+    }
+}
+
+// Shared screen-sized grips for transforms, crop, and geometric selections.
+fn paint_control_handle(window: &mut Window, center: Point<Pixels>, active: bool) {
+    paint_contrast_square(
+        window,
+        f32::from(center.x),
+        f32::from(center.y),
+        if active { 11. } else { 7. },
+        window.scale_factor(),
+    );
+    if active {
+        window.paint_quad(gpui::quad(
+            Bounds::centered_at(center, size(px(9.), px(9.))),
+            px(0.),
+            rgb(0xffffff),
+            px(2.),
+            rgb(ACCENT),
+            gpui::BorderStyle::Solid,
+        ));
     }
 }
 
@@ -4262,12 +4325,29 @@ fn paint_scale_frame(
     if bounds.intersect(&visible).is_empty() {
         return;
     }
+    let outline = [
+        (rect.x as f64, rect.y as f64),
+        (rect.right() as f64, rect.y as f64),
+        (rect.right() as f64, rect.bottom() as f64),
+        (rect.x as f64, rect.bottom() as f64),
+    ];
+    paint_warp_frame(
+        window,
+        geometry,
+        visible,
+        width,
+        height,
+        super::transform_ui::WarpFrame {
+            outline,
+            axis: None,
+            grips: outline,
+            grip_count: 0,
+            invalid: false,
+            pivot: None,
+            active_grip: None,
+        },
+    );
     window.with_content_mask(Some(ContentMask { bounds: visible }), |window| {
-        window.paint_quad(gpui::outline(
-            bounds,
-            rgba(0xacc6ffb0),
-            gpui::BorderStyle::Solid,
-        ));
         paint_handles(window, geometry, width, height, rect);
     });
 }

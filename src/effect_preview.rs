@@ -7,6 +7,20 @@ use crate::document::{self, DocumentContent, LayerId};
 use crate::filters::{self, FilterSpec};
 use crate::selection::Selection;
 
+const MAX_DISPLAY_EDGE: u32 = 1024;
+
+// Fit the image to the actual logical preview box, then account for Retina/DPI.
+// Never enlarge the source or let a large screen create unbounded background work.
+pub fn display_edge(canvas: (u32, u32), bounds: (f32, f32), scale: f32) -> u32 {
+    let fit = (bounds.0 / canvas.0.max(1) as f32).min(bounds.1 / canvas.1.max(1) as f32);
+    let edge = canvas.0.max(canvas.1) as f32 * fit * scale;
+    if edge.is_finite() {
+        (edge.ceil() as u32).clamp(1, MAX_DISPLAY_EDGE)
+    } else {
+        MAX_DISPLAY_EDGE
+    }
+}
+
 // An immutable dialog snapshot. Work and allocations are bounded by the preview
 // edge, even when a layer is much larger than (or far outside) the canvas.
 pub struct EffectPreview {
@@ -14,6 +28,7 @@ pub struct EffectPreview {
     layer: LayerId,
     selection: Selection,
     size: (u32, u32),
+    sampling_size: (u32, u32),
     original: OnceLock<RgbaImage>,
 }
 
@@ -32,13 +47,28 @@ struct ShadowPreview {
 impl EffectPreview {
     pub fn new(content: DocumentContent, layer: LayerId, selection: Selection, edge: u32) -> Self {
         let (w, h) = content.size();
+        let edge = edge.clamp(1, MAX_DISPLAY_EDGE);
         Self {
             content,
             layer,
             selection,
-            size: adjustments::preview_size(w, h, edge.max(1)),
+            size: adjustments::preview_size(w, h, edge),
+            sampling_size: adjustments::preview_size(w, h, edge * 2),
             original: OnceLock::new(),
         }
+    }
+
+    pub fn resized(&self, edge: u32) -> Option<Self> {
+        let edge = edge.clamp(1, MAX_DISPLAY_EDGE);
+        let (w, h) = self.content.size();
+        (adjustments::preview_size(w, h, edge) != self.size).then(|| {
+            Self::new(
+                self.content.clone(),
+                self.layer,
+                self.selection.clone(),
+                edge,
+            )
+        })
     }
 
     pub fn original(&self) -> &RgbaImage {
@@ -90,11 +120,11 @@ impl EffectPreview {
             {
                 for (x, y, pixel) in region.pixels.enumerate_pixels_mut() {
                     let sx = (region.origin.0 - i64::from(layer.offset.0) - i64::from(offset.0)
-                        + (f64::from(x) / region.scale).floor() as i64)
+                        + ((f64::from(x) + 0.5) / region.scale).floor() as i64)
                         .clamp(0, i64::from(mask.pixels.width()) - 1)
                         as u32;
                     let sy = (region.origin.1 - i64::from(layer.offset.1) - i64::from(offset.1)
-                        + (f64::from(y) / region.scale).floor() as i64)
+                        + ((f64::from(y) + 0.5) / region.scale).floor() as i64)
                         .clamp(0, i64::from(mask.pixels.height()) - 1)
                         as u32;
                     pixel[3] = ((u16::from(pixel[3]) * u16::from(mask.pixels.get_pixel(sx, sy)[3])
@@ -170,7 +200,8 @@ impl EffectPreview {
     fn region(&self, radius: u32, offset: (i32, i32)) -> Option<Region> {
         let layer = self.content.layer(self.layer)?;
         let canvas = self.content.size();
-        let scale = f64::from(self.size.0.max(self.size.1)) / f64::from(canvas.0.max(canvas.1));
+        let scale = f64::from(self.sampling_size.0.max(self.sampling_size.1))
+            / f64::from(canvas.0.max(canvas.1));
         let pad = i64::from(filters::kernel_support(radius));
         let origin = (
             i64::from(layer.offset.0) + i64::from(offset.0),
@@ -188,8 +219,8 @@ impl EffectPreview {
         let w = ((right - left) as f64 * scale).ceil().max(1.) as u32;
         let h = ((bottom - top) as f64 * scale).ceil().max(1.) as u32;
         let pixels = RgbaImage::from_fn(w, h, |x, y| {
-            let sx = (left + (f64::from(x) / scale).floor() as i64).min(right - 1) as u32;
-            let sy = (top + (f64::from(y) / scale).floor() as i64).min(bottom - 1) as u32;
+            let sx = (left + ((f64::from(x) + 0.5) / scale).floor() as i64).min(right - 1) as u32;
+            let sy = (top + ((f64::from(y) + 0.5) / scale).floor() as i64).min(bottom - 1) as u32;
             *layer.pixels.get_pixel(sx, sy)
         });
         Some(Region {
@@ -209,7 +240,7 @@ impl EffectPreview {
         map: impl Fn(Rgba<u8>, i64, i64) -> Rgba<u8>,
         shadow: Option<&ShadowPreview>,
     ) -> RgbaImage {
-        let (w, h) = self.size;
+        let (w, h) = self.sampling_size;
         let canvas = self.content.size();
         let mut image = RgbaImage::new(w, h);
         for layer in self.content.layers() {
@@ -260,18 +291,30 @@ impl EffectPreview {
                     if layer.id == self.layer {
                         pixel = map(pixel, cx, cy);
                     }
+                    pixel = layer.masked(pixel, sx as u32, sy as u32);
                     let destination = image.get_pixel_mut(x, y);
                     *destination =
                         document::blend(*destination, pixel, layer.opacity, layer.blend_mode);
                 }
             }
         }
-        image
+        if image.dimensions() == self.size {
+            image
+        } else {
+            // Reduce the completed composition, including selection/mask edges, in
+            // premultiplied alpha so invisible RGB cannot tint visible edges.
+            crate::transform::scale_pixels(
+                &image,
+                self.size.0,
+                self.size.1,
+                crate::transform::Resample::Bilinear,
+            )
+        }
     }
 }
 
 fn sample(index: u32, source: u32, target: u32) -> u32 {
-    (u64::from(index) * u64::from(target) / u64::from(source.max(1))) as u32
+    ((2 * u64::from(index) + 1) * u64::from(target) / (2 * u64::from(source.max(1)))) as u32
 }
 
 pub fn checker(image: &RgbaImage) -> RgbaImage {

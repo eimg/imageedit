@@ -3,7 +3,6 @@ use std::sync::Arc;
 use gpui::{Context, Div, Window, prelude::*};
 
 use super::Workspace;
-use crate::adjustments::PREVIEW_EDGE;
 use crate::commands::{DropShadow, GaussianBlur, Sharpen};
 use crate::document::LayerId;
 use crate::filters::FilterSpec;
@@ -81,6 +80,7 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before filtering.", cx);
             return false;
         }
+        let edge = self.effect_preview_edge(FilterKind::of(spec) == FilterKind::Shadow, window);
         let reediting = self.effect_reediting;
         let (content, selection) = if reediting {
             tab.document
@@ -97,10 +97,7 @@ impl Workspace {
             layer: layer.id,
             selection: selection.clone(),
             preview: Arc::new(crate::effect_preview::EffectPreview::new(
-                content,
-                layer.id,
-                selection,
-                PREVIEW_EDGE,
+                content, layer.id, selection, edge,
             )),
             spec,
         });
@@ -188,6 +185,24 @@ impl Workspace {
         if let Some(image) = self.filter_preview.take() {
             super::drop_images(image.images(), window, cx);
         }
+    }
+
+    pub(super) fn resize_filter_preview(
+        &mut self,
+        edge: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.filter.as_mut() else {
+            return;
+        };
+        let Some(preview) = session.preview.resized(edge) else {
+            return;
+        };
+        session.preview = Arc::new(preview);
+        self.filter_generation.request();
+        self.filter_dirty = true;
+        self.pump_filter_preview(window, cx);
     }
 
     fn pump_filter_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {

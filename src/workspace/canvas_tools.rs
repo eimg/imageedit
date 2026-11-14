@@ -107,7 +107,7 @@ impl Workspace {
                 event.modifiers.shift,
                 cx,
             );
-            self.finish_scale(window, cx);
+            self.end_scale_drag(cx);
         }
         if event.button == MouseButton::Left && !self.free_points.is_empty() {
             self.finish_free(event.position, window, cx);

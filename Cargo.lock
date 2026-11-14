@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "lime"
-version = "1.0.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "cosmic-text",

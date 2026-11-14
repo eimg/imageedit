@@ -288,6 +288,8 @@ pub struct Workspace {
     wand_match: crate::selection::RegionMatch,
     fill_match: crate::selection::RegionMatch,
     free_points: Vec<Point<f32>>,
+    free_nodes: Vec<usize>,
+    free_node_drag: Option<(usize, Point<f32>)>,
     free_op: crate::selection::SelectionOp,
     free_drag_origin: Option<Point<Pixels>>,
     free_dragging: bool,
@@ -427,9 +429,7 @@ impl Workspace {
                 workspace.opacity_drag = None;
                 workspace.toolbox_drag = None;
                 if workspace.tool == Tool::FreeSelect {
-                    workspace.free_points.clear();
-                    workspace.free_drag_origin = None;
-                    workspace.free_dragging = false;
+                    workspace.clear_free_draft();
                 }
                 workspace.cancel_path_gesture(cx);
                 if workspace.move_drag.is_some() {
@@ -440,7 +440,7 @@ impl Workspace {
                 }
                 workspace.end_warp_drag(cx);
                 workspace.end_gradient_drag(cx);
-                workspace.cancel_scale(window, cx);
+                workspace.end_scale_drag(cx);
             }
             cx.notify();
         })
@@ -570,6 +570,8 @@ impl Workspace {
             wand_match: Default::default(),
             fill_match: Default::default(),
             free_points: Vec::new(),
+            free_nodes: Vec::new(),
+            free_node_drag: None,
             free_op: crate::selection::SelectionOp::Replace,
             free_drag_origin: None,
             free_dragging: false,
@@ -785,7 +787,7 @@ impl Workspace {
         self.update_title(window);
         self.ensure_preview_level(window.scale_factor(), window, cx);
         if switched {
-            self.begin_warp(window, cx);
+            self.begin_layer_transform_preview(window, cx);
         }
         cx.notify();
     }
@@ -836,7 +838,7 @@ impl Workspace {
         self.recover_pending_text(window, cx);
         self.update_title(window);
         if closed_active && self.active.is_some() {
-            self.begin_warp(window, cx);
+            self.begin_layer_transform_preview(window, cx);
         }
         cx.notify();
     }
@@ -927,8 +929,8 @@ impl Workspace {
             return;
         }
         self.clear_content_previews(window, cx);
+        self.clear_free_draft();
         let tab = &mut self.tabs[index];
-        self.free_points.clear();
         let target = match change {
             Change::Edit | Change::Stroke { .. } | Change::Selection => None,
             Change::Undo => tab.history.undo_target(),

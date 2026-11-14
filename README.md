@@ -5,6 +5,8 @@
 **Lite Image Editor** for macOS and Windows. Layered editing, native menus with
 tool and command icons, and a workspace that keeps the canvas in focus.
 
+Current source version: **1.2.0**.
+
 ![Lime editing a night skyline, with its toolbox, text controls, and Paths panel](lime-screenshot.jpg)
 
 ## Features
@@ -80,7 +82,8 @@ transparency; import DPI controls the final images. Failed previews can be retri
 The dialog keeps Cancel/Import visible while its content scrolls. Page choices
 reset per source, and layer names/progress retain source page numbers.
 
-**Page background** can be White (the default) or Transparent. Transparent keeps unpainted page
+**Page background** can be White (the default) or Transparent. White produces fully
+opaque pages and thumbnails, including antialiased edges. Transparent keeps unpainted page
 areas clear and preserves PDF opacity; white shapes painted in the PDF stay
 white. For a new layered image, **Canvas size** offers First Page (the first
 selected page) or **Fit All Pages**, which fits the greatest selected width and height. Every page stays at
@@ -123,13 +126,20 @@ With **Scale Layer** (Shift+S), type Width or Height to preview a resize.
 **Size anchor** chooses which of nine points stays fixed during numeric resizing;
 it starts at Center. Choosing an anchor alone does not resize the layer. Border
 and corner drags keep their opposite edge or corner, independent of this choice.
-Return or clicking outside commits one undo step; Escape or empty text restores
-the original size. Aspect locking starts on; Shift temporarily reverses the lock
+Dragging and typed dimensions stay in a preview. **Apply** (or Return on the
+canvas) commits all adjustments as one undo step; **Cancel** (or Escape on the
+canvas) discards them. Apply and Cancel dismiss the scale frame and editing
+controls, just like Flip and Perspective. Click the canvas or select Scale Layer
+again to start another preview. Return or leaving a size field finishes that field;
+Escape or empty text restores the size from before that field's edit without
+discarding earlier adjustments. Aspect locking starts on; Shift temporarily reverses the lock
 while dragging. Choose Nearest, Bilinear, or Bicubic for the committed result.
 **Fit Layer to Canvas** in these options or the Layer menu scales the whole layer
 proportionally to fit inside the canvas and centers it. This works even when its
 resize handles are off-screen. It uses the chosen resampling, may enlarge smaller
-layers, and commits one undo step. The layer must be visible, rasterized, and
+layers, and previews the fit while Scale Layer is active; use Apply to commit.
+From other tools the Layer menu command commits one undo step immediately.
+The layer must be visible, rasterized, and
 position-unlocked. The canvas and selection stay unchanged. **Layer to Image
 Size** is a separate command that crops/pads the layer at its existing pixel
 positions; it does not proportionally scale the image.
@@ -153,6 +163,10 @@ corner, and Reset All restores the original rectangle. Both change the preview
 only. Empty text or Escape restores the active field. Crossed, concave, or
 oversized results show an error and cannot be applied until corrected; Apply
 commits one undo step and leaves the selection in canvas coordinates.
+Scale, Rotate, Flip, Perspective, Crop, and geometric selections share white
+square grips with a dark rim and a fixed screen size. Scale uses the same
+contrasting frame as the other transforms; Perspective accents the selected
+corner. Crop and selection retain their own boundary outlines.
 
 **Sample All Layers** on the Magic Wand samples the visible composite and can
 select beyond the active layer.
@@ -164,6 +178,13 @@ saved state. **Antialias edges** optionally smooths oval/circle and rounded
 rectangle edges; it starts off for hard pixel selections. Toggling it also
 updates the current editable curve. Combined, clipped, feathered, and wand masks
 keep their existing coverage when this setting changes.
+
+**Free Select** combines freehand segments and click-added polygon vertices.
+While its outline is open, drag any square checkpoint to adjust it. Checkpoints
+mark polygon vertices and the start/end of freehand segments; sampled curve
+points stay uncluttered. Click the first checkpoint or press Return to close;
+Escape cancels the draft. Node adjustments join the selection's single undo step
+when it closes. A closed free selection is a mask and has no editable nodes.
 
 **Free Select** has its own **Antialias edges** option for new freehand/polygon
 selections. It also starts off; enabling it preserves fractional edge coverage
@@ -353,14 +374,20 @@ layer order, offsets, opacity, and the selection's soft coverage. A checker
 shows transparency. **Before** shows the original composition; **After** shows
 the chosen effect. Switching views does not change parameters, and Apply always
 uses those parameters. **Reset** restores the built-in defaults and
-returns to After. Cancel leaves the document unchanged.
+returns to After. Cancel leaves the document unchanged. Colors adjustment dialogs share a
+wider layout with the preview beside the settings when space allows, and stack
+on narrow windows. Levels pairs its black/white input and output controls to
+reduce height. The dialog title and action buttons stay visible while settings
+scroll in shorter windows.
 
 Each adjustment and filter remembers its last successfully applied parameters
 for this app session, shared across tabs. Canceled, failed, and unchanged edits
 leave the previous settings in place. Reset changes the current preview without
 overwriting those settings until a changed result is applied.
-Drop Shadow also remembers its color; its dialog shows a swatch and offers
-**Use Foreground**. Reset uses the current foreground color.
+Drop Shadow starts with a black shadow and remembers its last applied color.
+Its wider dialog places the preview beside the controls when space allows.
+**Choose Color…** opens the color picker; **Use Foreground** copies the current
+foreground color. Reset restores black and the built-in shadow parameters.
 
 **Filters → Repeat Last Effect** applies the last successful adjustment or
 filter to the current layer using the current selection, without a dialog
@@ -435,7 +462,9 @@ further editing. The Layer mask toggle enables/disables its coverage. The menu
 also offers Invert, Apply, and Remove. Apply permanently combines coverage with
 pixel alpha; unlock alpha first. Remove keeps the source pixels. Masks follow
 layer movement, scaling, crop, rotation, flip, and perspective, and save in a
-project. Rasterize text before adding a raster mask. Painting directly into a
+project. Adjustment and filter previews include enabled masks throughout the stack.
+Layer to Image Size checks space for both the resized pixels and their mask.
+Rasterize text before adding a raster mask. Painting directly into a
 mask is a future extension; painting currently edits the layer beneath its mask.
 
 Applying a color adjustment, Blur, or Sharpen retains **one editable effect per
@@ -444,22 +473,27 @@ Use **Edit effect** or **Layer → Edit Layer Effect…** to replace its paramet
 with a preview. Cancel preserves the applied result. Remove restores its source;
 Bake keeps the result and frees retained source data. A subsequent effect bakes
 the previous one, and pixel/geometry edits bake the retained effect before changing
-its result. Movement, opacity, and mask changes retain it. Undo restores the prior
+its result, including transforms that change only a mask. Movement, opacity, and
+direct mask edits retain it. Undo restores the prior
 state. Memory admission includes retained sources and coverage. Drop Shadow still
 creates a separate raster layer; its parameters are not retained on that layer.
 
 Crash recovery writes separate project copies under the app's Application Support
 **Recovery** folder (on Windows, Local AppData/Lime/Recovery). Dirty documents are
-snapshotted about every five seconds, without changing their saved revision or
-original destination. Recovery includes valid text drafts; failed text rendering
+checked about every five seconds and snapshotted only when their persistent
+revision or text draft changes, without changing their saved revision or original
+destination. Selection-only edits do not rewrite copies. A failed snapshot does
+not prevent other tabs from updating. Recovery includes valid text drafts; failed text rendering
 also embeds its source in the same atomic project write, keeps a readable
 sidecar, and restores its draft when readable. Other
 unapplied canvas previews are not recovery snapshots. After an interrupted
 session, available copies reopen as unsaved **Recovered…** documents; use Save As.
 Saved/closed documents and an accepted clean exit remove their current recovery
 copies. A session lock skips another running instance. Recovery writes are atomic,
-with a 1 GiB storage limit; startup admits at most 512 MiB of layer data and leaves
-excess or unreadable copies on disk with a message. These are recovery copies,
+with a 1 GiB storage limit; startup checks a conservative 512 MiB memory budget
+before decoding pixels, including layer storage, canvas/preview/tile buffers,
+thumbnails, and decoding scratch space. Excess or unreadable copies remain on disk
+with a message. These are recovery copies,
 not a long-term backup history.
 
 Raster imports read embedded RGB/grayscale ICC profiles and convert pixels to

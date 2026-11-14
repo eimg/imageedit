@@ -291,6 +291,7 @@ impl DocumentContent {
             }
             let index = self.layer_index(id).unwrap();
             self.layers[index].mask = mask;
+            self.layers[index].effect = None;
             return self.layer_composite_dirty(id);
         }
         let dirty = self.place_layer(id, pixels, offset);
@@ -1945,10 +1946,8 @@ impl DocumentContent {
     }
 
     pub fn can_fit_layer(&self, id: LayerId) -> bool {
-        self.layer(id).is_some_and(|layer| {
-            !layer.locks.position
-                && self.fits_stack(layer.pixels.as_raw().len() as u64, self.canvas_bytes())
-        })
+        self.layer(id)
+            .is_some_and(|layer| !layer.locks.position && self.accepts_replacement(id, self.size()))
     }
 
     // Resizes the layer to the canvas. Pixels keep their canvas position; the rest is transparent.

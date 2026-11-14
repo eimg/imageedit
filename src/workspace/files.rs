@@ -68,10 +68,16 @@ impl Workspace {
             Some("transform")
         } else if self.crop.is_some() {
             Some("crop")
+        } else if self
+            .scale_drag
+            .as_ref()
+            .is_some_and(super::scale_ui::ScaleDrag::changed)
+        {
+            Some("scale")
         } else if !self.free_points.is_empty() {
             Some("free selection")
         } else if self.move_drag.is_some()
-            || self.scale_drag.is_some()
+            || self.scale_pointer_dragging()
             || self.guide_drag.is_some()
             || self.stroke.is_some()
             || self.path_gesture.is_some()

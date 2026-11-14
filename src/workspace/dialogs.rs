@@ -36,11 +36,14 @@ pub(super) struct Form {
     kind: FormKind,
     pdf_input_drag: Option<pdf_input::PdfInputDrag>,
     pub(super) error: Option<String>,
+    // The shadow color picker returns to its draft without ending the filter session.
+    parent: Option<Box<Form>>,
 }
 
 #[derive(Clone, Copy)]
 enum ColorTarget {
     Swatch(usize),
+    Shadow,
     GradientStop { revision: u64, index: usize },
 }
 
@@ -209,7 +212,7 @@ impl FormKind {
     }
 
     fn filter_parameters(value: FilterSpec) -> Self {
-        let mut form = Self::filter_defaults(FilterKind::of(value), image::Rgba([0, 0, 0, 255]));
+        let mut form = Self::filter_defaults(FilterKind::of(value));
         if let Self::Filter {
             radius,
             amount,
@@ -263,7 +266,7 @@ impl FormKind {
         }
     }
 
-    fn filter_defaults(kind: FilterKind, color: image::Rgba<u8>) -> Self {
+    fn filter_defaults(kind: FilterKind) -> Self {
         Self::Filter {
             kind,
             radius: if kind == FilterKind::Sharpen { 2 } else { 4 },
@@ -271,7 +274,7 @@ impl FormKind {
             offset_x: 8,
             offset_y: 8,
             opacity: 75,
-            color,
+            color: image::Rgba([0, 0, 0, 255]),
         }
     }
 
@@ -884,11 +887,18 @@ impl Workspace {
             kind,
             pdf_input_drag: None,
             error: None,
+            parent: None,
         });
         cx.notify();
     }
 
     pub(super) fn dismiss_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(parent) = self.form.as_mut().and_then(|form| form.parent.take()) {
+            parent.focus.focus(window);
+            self.form = Some(*parent);
+            cx.notify();
+            return;
+        }
         self.clear_adjustment(window, cx);
         self.clear_filter(window, cx);
         self.clear_pdf_previews(window, cx);
@@ -960,7 +970,6 @@ impl Workspace {
         if self.dialog_open || self.form.is_some() {
             return;
         }
-        let color = solid_color(self.colors[0]);
         let retained = self
             .effect_reediting
             .then(|| {
@@ -973,7 +982,7 @@ impl Workspace {
         let form = retained
             .or_else(|| self.effect_memory.filter(kind))
             .map_or_else(
-                || FormKind::filter_defaults(kind, color),
+                || FormKind::filter_defaults(kind),
                 FormKind::filter_parameters,
             );
         let Some(spec) = form.filter_value() else {
@@ -986,7 +995,6 @@ impl Workspace {
     }
 
     fn reset_effect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let foreground = solid_color(self.colors[0]);
         let Some(form) = self.form.as_mut() else {
             return;
         };
@@ -996,7 +1004,7 @@ impl Workspace {
                 Some(operation.defaults())
             }
             FormKind::Filter { kind, .. } => {
-                form.kind = FormKind::filter_defaults(kind, foreground);
+                form.kind = FormKind::filter_defaults(kind);
                 None
             }
             _ => return,
@@ -1011,6 +1019,36 @@ impl Workspace {
             self.set_filter(filter, window, cx);
         }
         cx.notify();
+    }
+
+    fn shadow_color_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Form {
+            kind:
+                FormKind::Filter {
+                    kind: FilterKind::Shadow,
+                    color,
+                    ..
+                },
+            ..
+        }) = self.form.as_ref()
+        else {
+            return;
+        };
+        let initial = u32::from_be_bytes([0, color[0], color[1], color[2]]);
+        let parent = self.form.take().map(Box::new);
+        self.show_form(
+            FormKind::Color {
+                target: ColorTarget::Shadow,
+                hex: Field::new(format!("{initial:06X}")),
+                hsv: Hsv::from_rgb(initial),
+                drag: None,
+            },
+            window,
+            cx,
+        );
+        if let Some(form) = self.form.as_mut() {
+            form.parent = parent;
+        }
     }
 
     fn use_shadow_foreground(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1032,6 +1070,41 @@ impl Workspace {
         };
         self.set_filter(spec, window, cx);
         cx.notify();
+    }
+
+    pub(super) fn effect_preview_edge(&self, responsive: bool, window: &Window) -> u32 {
+        let viewport = f32::from(window.viewport_size().width);
+        let width = if responsive && viewport >= 760. {
+            296.
+        } else {
+            (if responsive { 440_f32 } else { 380_f32 }).min(viewport) - 34.
+        };
+        crate::effect_preview::display_edge(
+            self.active_tab()
+                .map_or((1, 1), |tab| tab.document.content.size()),
+            (width.max(1.), 180.),
+            window.scale_factor(),
+        )
+    }
+
+    pub(super) fn refresh_effect_preview_resolution(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.form.as_ref().map(|form| &form.kind) {
+            Some(FormKind::Adjustment { .. }) => {
+                self.resize_adjustment_preview(self.effect_preview_edge(true, window), window, cx);
+            }
+            Some(FormKind::Filter { kind, .. }) => {
+                self.resize_filter_preview(
+                    self.effect_preview_edge(*kind == FilterKind::Shadow, window),
+                    window,
+                    cx,
+                );
+            }
+            _ => {}
+        }
     }
 
     fn effect_preview_panel(
@@ -1131,6 +1204,22 @@ impl Workspace {
                 let target = *target;
                 self.dismiss_form(window, cx);
                 match target {
+                    ColorTarget::Shadow => {
+                        if let Some(Form {
+                            kind: FormKind::Filter { color: shadow, .. },
+                            ..
+                        }) = self.form.as_mut()
+                        {
+                            let alpha = shadow[3];
+                            *shadow = solid_color(color);
+                            shadow[3] = alpha;
+                        }
+                        if let Some(spec) =
+                            self.form.as_ref().and_then(|form| form.kind.filter_value())
+                        {
+                            self.set_filter(spec, window, cx);
+                        }
+                    }
                     ColorTarget::Swatch(swatch) if swatch == super::text_ui::TEXT_SWATCH => {
                         self.recolor_text(color, window, cx)
                     }
@@ -1969,6 +2058,16 @@ impl Workspace {
         let form = self.form.as_ref()?;
         let mut can_accept = true;
         let wide_pdf = matches!(form.kind, FormKind::PdfImport { .. });
+        let shadow = matches!(
+            form.kind,
+            FormKind::Filter {
+                kind: FilterKind::Shadow,
+                ..
+            }
+        );
+        let adjustment = matches!(form.kind, FormKind::Adjustment { .. });
+        let responsive_effect = shadow || adjustment;
+        let wide_effect = responsive_effect && window.viewport_size().width >= px(760.);
         let wide = wide_pdf && window.viewport_size().width >= px(760.);
         let pdf_width = if wide {
             720.
@@ -2318,6 +2417,7 @@ impl Workspace {
                                 .bg(rgb(color)),
                         );
                     let title = match *target {
+                        ColorTarget::Shadow => "Shadow Color",
                         ColorTarget::Swatch(0) => "Foreground Color",
                         ColorTarget::Swatch(super::text_ui::TEXT_SWATCH) => "Text Color",
                         ColorTarget::Swatch(_) => "Background Color",
@@ -2428,8 +2528,7 @@ impl Workspace {
                         AdjustKind::Levels => "Levels",
                         AdjustKind::Curves => "Curves",
                     };
-                    let mut body = div().flex().flex_col().gap_3()
-                        .child(self.effect_preview_panel(adjustment_preview, self.adjustment_generation.pending(), cx));
+                    let mut body = div().flex().flex_col().gap_3();
                     body = match operation {
                         AdjustKind::BrightnessContrast => body
                             .child(adjust_slider(
@@ -2494,6 +2593,10 @@ impl Workspace {
                             curves_controls(body, *curves, *map_channel, adjustment_histogram, cx)
                         }
                     };
+                    let body = effect_dialog_layout(
+                        self.effect_preview_panel(adjustment_preview, self.adjustment_generation.pending(), cx),
+                        body, wide_effect,
+                    );
                     (title, "Apply", body)
                 }
                 FormKind::Filter {
@@ -2510,20 +2613,25 @@ impl Workspace {
                         FilterKind::Sharpen => "Sharpen",
                         FilterKind::Shadow => "Drop Shadow",
                     };
-                    let body = div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(self.effect_preview_panel(filter_preview, self.filter_generation.pending(), cx))
+                    let controls = div().flex().flex_col().gap_3()
                         .child(filter_controls(
                             *kind, *radius, *amount, *offset_x, *offset_y, *opacity, cx,
                         ))
                         .when(*kind == FilterKind::Shadow, |body| body.child(
-                            div().flex().items_center().gap_2()
-                                .child(div().size(px(16.)).border_1().border_color(rgb(BORDER)).rounded_sm().bg(rgba(u32::from_be_bytes(color.0))))
-                                .child(div().flex_1().child("Shadow color"))
-                                .child(form_button("Use Foreground", false).on_click(cx.listener(|this, _, window, cx| this.use_shadow_foreground(window, cx))))
+                            div().flex().flex_col().gap_2()
+                                .child("Shadow color")
+                                .child(div().flex().items_center().gap_2()
+                                    .child(form_button("Choose Color…", false)
+                                        .flex().items_center().justify_between().gap_2()
+                                        .flex_1()
+                                        .child(div().size(px(20.)).flex_shrink_0().border_1().border_color(rgb(BORDER)).rounded_sm().bg(rgba(u32::from_be_bytes(color.0))))
+                                        .on_click(cx.listener(|this, _, window, cx| this.shadow_color_form(window, cx))))
+                                    .child(form_button("Use Foreground", false).on_click(cx.listener(|this, _, window, cx| this.use_shadow_foreground(window, cx)))))
                         ));
+                    let body = effect_dialog_layout(
+                        self.effect_preview_panel(filter_preview, self.filter_generation.pending(), cx),
+                        controls, wide_effect,
+                    );
                     (title, "Apply", body)
                 }
             };
@@ -2545,13 +2653,21 @@ impl Workspace {
                 .capture_any_mouse_up(cx.listener(|this, _, _, _| this.end_pdf_input_drag()))
                 .child(
                     div()
-                        .w(px(if wide_pdf { pdf_width } else { 380. }))
+                        .w(px(if wide_pdf {
+                            pdf_width
+                        } else if wide_effect {
+                            720.
+                        } else if responsive_effect {
+                            440.
+                        } else {
+                            380.
+                        }))
                         .max_w_full()
                         .p_4()
                         .max_h_full()
                         .id("form-panel")
                         .overflow_y_scroll()
-                        .when(wide_pdf, |panel| {
+                        .when(wide_pdf || responsive_effect, |panel| {
                             panel
                                 .overflow_y_hidden()
                                 .max_h((window.viewport_size().height - px(32.)).max(px(0.)))
@@ -2571,14 +2687,17 @@ impl Workspace {
                                 .child(title)
                                 .flex_shrink_0(),
                         )
-                        .child(content.id("form-content").when(wide_pdf, |content| {
-                            content
-                                .min_h_0()
-                                .max_h(px(
-                                    (f32::from(window.viewport_size().height) - 180.).max(80.)
-                                ))
-                                .overflow_y_scroll()
-                        }))
+                        .child(content.id("form-content").when(
+                            wide_pdf || responsive_effect,
+                            |content| {
+                                content
+                                    .min_h_0()
+                                    .max_h(px(
+                                        (f32::from(window.viewport_size().height) - 180.).max(80.)
+                                    ))
+                                    .overflow_y_scroll()
+                            },
+                        ))
                         .children(form.error.as_ref().map(|error| {
                             div()
                                 .text_color(rgb(0xffb8ad))
@@ -2611,6 +2730,20 @@ impl Workspace {
                 ),
         )
     }
+}
+
+// Keep effect previews and settings in the same responsive arrangement.
+fn effect_dialog_layout(preview: Div, controls: Div, wide: bool) -> Div {
+    div()
+        .flex()
+        .gap_4()
+        .when(!wide, |body| body.flex_col())
+        .child(
+            div()
+                .when(wide, |preview| preview.w(px(296.)).flex_shrink_0())
+                .child(preview),
+        )
+        .child(controls.when(wide, |controls| controls.flex_1().min_w_0()))
 }
 
 pub(super) fn form_button(label: &'static str, primary: bool) -> gpui::Stateful<Div> {
@@ -2947,7 +3080,7 @@ fn filter_controls(
                 FilterSlider::Opacity,
                 cx,
             ))
-            .child("Adds a layer under the active layer, using the shadow color shown below."),
+            .child("Adds a layer under the active layer, using the chosen shadow color."),
     }
 }
 
@@ -3101,18 +3234,46 @@ fn levels_controls(
 ) -> Div {
     let stops = levels.stops(channel);
     let gamma = format!("{:.2}", f32::from(stops.gamma) / f32::from(GAMMA_ONE));
-    body.child(histogram_caption(histogram))
-        .child(channel_row(channel, cx))
-        .child(histogram_plot(histogram, channel))
-        .child(adjust_slider(
-            "Input black",
-            stops.input_black.to_string(),
-            i16::from(stops.input_black),
-            0,
-            i16::from(stops.input_white.saturating_sub(1)),
-            AdjustSlider::InputBlack,
-            cx,
-        ))
+    body.child(channel_row(channel, cx))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(histogram_caption(histogram))
+                .child(histogram_plot(histogram, channel)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(
+                    adjust_slider(
+                        "Input black",
+                        stops.input_black.to_string(),
+                        i16::from(stops.input_black),
+                        0,
+                        i16::from(stops.input_white.saturating_sub(1)),
+                        AdjustSlider::InputBlack,
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                )
+                .child(
+                    adjust_slider(
+                        "Input white",
+                        stops.input_white.to_string(),
+                        i16::from(stops.input_white),
+                        i16::from(stops.input_black.saturating_add(1)),
+                        255,
+                        AdjustSlider::InputWhite,
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                ),
+        )
         .child(adjust_slider(
             "Gamma",
             gamma,
@@ -3122,33 +3283,37 @@ fn levels_controls(
             AdjustSlider::Gamma,
             cx,
         ))
-        .child(adjust_slider(
-            "Input white",
-            stops.input_white.to_string(),
-            i16::from(stops.input_white),
-            i16::from(stops.input_black.saturating_add(1)),
-            255,
-            AdjustSlider::InputWhite,
-            cx,
-        ))
-        .child(adjust_slider(
-            "Output black",
-            stops.output_black.to_string(),
-            i16::from(stops.output_black),
-            0,
-            255,
-            AdjustSlider::OutputBlack,
-            cx,
-        ))
-        .child(adjust_slider(
-            "Output white",
-            stops.output_white.to_string(),
-            i16::from(stops.output_white),
-            0,
-            255,
-            AdjustSlider::OutputWhite,
-            cx,
-        ))
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(
+                    adjust_slider(
+                        "Output black",
+                        stops.output_black.to_string(),
+                        i16::from(stops.output_black),
+                        0,
+                        255,
+                        AdjustSlider::OutputBlack,
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                )
+                .child(
+                    adjust_slider(
+                        "Output white",
+                        stops.output_white.to_string(),
+                        i16::from(stops.output_white),
+                        0,
+                        255,
+                        AdjustSlider::OutputWhite,
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                ),
+        )
 }
 
 fn curves_controls(
@@ -3512,14 +3677,13 @@ mod tests {
                 Some(value)
             );
         }
-        let foreground = image::Rgba([12, 34, 56, 255]);
         assert_eq!(
-            FormKind::filter_defaults(FilterKind::Shadow, foreground).filter_value(),
+            FormKind::filter_defaults(FilterKind::Shadow).filter_value(),
             Some(FilterSpec::Shadow {
                 radius: 4,
                 offset: (8, 8),
                 opacity: 75,
-                color: foreground,
+                color: image::Rgba([0, 0, 0, 255]),
             })
         );
     }

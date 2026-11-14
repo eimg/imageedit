@@ -211,7 +211,24 @@ struct TextPreviewInput {
     anchor: (i32, i32),
 }
 
+#[derive(Clone, PartialEq)]
+pub(super) struct RecoveryText {
+    spec: TextSpec,
+    anchor: (i32, i32),
+    layer: Option<LayerId>,
+    above: LayerId,
+}
+
 impl TextDraft {
+    pub(super) fn recovery_signature(&self) -> RecoveryText {
+        RecoveryText {
+            spec: self.spec(),
+            anchor: self.anchor,
+            layer: self.layer,
+            above: self.above,
+        }
+    }
+
     pub(super) fn recovery_tab(&self) -> usize {
         self.tab
     }
@@ -2446,15 +2463,19 @@ mod tests {
     #[test]
     fn pending_text_detects_source_spacing_and_anchor_changes_but_not_selection() {
         let mut existing = draft(Some(LayerId(1)));
+        let signature = existing.recovery_signature();
         existing.selection_anchor = Some(0);
         existing.cursor = existing.source.len();
         existing.cursor = 0;
         assert!(!existing.changed());
+        assert!(existing.recovery_signature() == signature);
         existing.anchor.0 += 1;
         assert!(existing.changed());
+        assert!(existing.recovery_signature() != signature);
         existing.anchor.0 -= 1;
         existing.spacing.line = 2.0;
         assert!(existing.changed());
+        assert!(existing.recovery_signature() != signature);
         let mut new = draft(None);
         assert!(new.changed());
         new.source.clear();

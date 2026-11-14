@@ -4,7 +4,7 @@ use gpui::{Context, Div, Window, prelude::*};
 use image::RgbaImage;
 
 use super::Workspace;
-use crate::adjustments::{self, Adjustment, PREVIEW_EDGE};
+use crate::adjustments::{self, Adjustment};
 use crate::commands::{
     BrightnessContrast, ColorBalance, Curves, Desaturate, HueSaturation, InvertColors, Levels,
 };
@@ -125,6 +125,7 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before adjusting.", cx);
             return false;
         }
+        let edge = self.effect_preview_edge(true, window);
         let reediting = self.effect_reediting;
         let (content, selection) = if reediting {
             tab.document
@@ -145,10 +146,7 @@ impl Workspace {
             selection: selection.clone(),
             canvas: tab.document.content.size(),
             preview: Arc::new(crate::effect_preview::EffectPreview::new(
-                content,
-                layer.id,
-                selection,
-                PREVIEW_EDGE,
+                content, layer.id, selection, edge,
             )),
             adjustment,
         });
@@ -254,6 +252,24 @@ impl Workspace {
         if let Some(image) = self.adjustment_preview.take() {
             super::drop_images(image.images(), window, cx);
         }
+    }
+
+    pub(super) fn resize_adjustment_preview(
+        &mut self,
+        edge: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.adjustment.as_mut() else {
+            return;
+        };
+        let Some(preview) = session.preview.resized(edge) else {
+            return;
+        };
+        session.preview = Arc::new(preview);
+        self.adjustment_generation.request();
+        self.adjustment_dirty = true;
+        self.pump_adjustment_preview(window, cx);
     }
 
     fn pump_adjustment_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {

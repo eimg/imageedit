@@ -535,7 +535,7 @@ impl Document {
                 Some(ImageFormat::Png) => FileFormat::Png,
                 Some(ImageFormat::Jpeg) => FileFormat::Jpeg,
                 Some(ImageFormat::WebP) => FileFormat::WebP,
-                _ => anyhow::bail!("Choose a Lime project or a PNG, JPEG, or WebP image"),
+                _ => anyhow::bail!("Choose a Lime project, PNG, JPEG, WebP, or PDF file"),
             };
             let mut decoder = reader.into_decoder().context("Invalid image data")?;
             let orientation = decoder.orientation().context("Invalid image metadata")?;

@@ -107,8 +107,11 @@ pub(super) fn render_local(
                     (1..=THUMBNAIL_EDGE).contains(&width) && (1..=THUMBNAIL_EDGE).contains(&height),
                     "The page preview exceeded its size limit."
                 );
-                RgbaImage::from_raw(width, height, pixmap.take_rgba8(ImageAlphaType::Alpha))
-                    .ok_or_else(|| anyhow!("This page could not be previewed."))
+                let mut image =
+                    RgbaImage::from_raw(width, height, pixmap.take_rgba8(ImageAlphaType::Alpha))
+                        .ok_or_else(|| anyhow!("This page could not be previewed."))?;
+                background.flatten_background(&mut image);
+                Ok(image)
             }))
             .unwrap_or_else(|_| Err(anyhow!("This page could not be previewed.")));
             control.check()?;

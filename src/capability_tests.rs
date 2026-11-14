@@ -489,3 +489,146 @@ fn a_failed_recovery_replacement_keeps_its_previous_embedded_draft() {
     assert_eq!(documents[0].document.name, "Recovered Atomic");
     recovered.clean_exit();
 }
+
+#[test]
+fn effect_previews_match_commits_with_target_and_backdrop_masks() {
+    for mode in [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+    ] {
+        let mut content = scene();
+        let base = content.top_layer_id();
+        content.mask_from_selection(base, &soft_selection());
+        let id = content
+            .add_layer(base, "Effect".into(), Rgba([170, 80, 40, 200]))
+            .unwrap();
+        content.mask_from_selection(id, &soft_selection());
+        content.change_blend_mode(id, mode);
+        for disabled in [false, true] {
+            if disabled {
+                content.edit_mask(id, MaskEdit::Toggle);
+            }
+            let preview = crate::effect_preview::EffectPreview::new(
+                content.clone(),
+                id,
+                soft_selection(),
+                1024,
+            );
+            assert_eq!(preview.original(), content.composite().as_ref());
+            let mut adjusted = content.clone();
+            adjusted.apply_retained_effect(
+                id,
+                EffectSpec::Adjustment(Adjustment::Invert),
+                &soft_selection(),
+                false,
+            );
+            assert_eq!(
+                preview.adjustment(Adjustment::Invert),
+                *adjusted.composite()
+            );
+            let mut blurred = content.clone();
+            blurred.apply_retained_effect(
+                id,
+                EffectSpec::Blur { radius: 1 },
+                &soft_selection(),
+                false,
+            );
+            assert_eq!(
+                preview.filter(crate::filters::FilterSpec::Blur { radius: 1 }),
+                *blurred.composite()
+            );
+            let shadow = crate::filters::FilterSpec::Shadow {
+                radius: 1,
+                offset: (1, 1),
+                opacity: 150,
+                color: Rgba([20, 30, 40, 255]),
+            };
+            let mut shadowed = content.clone();
+            shadowed.place_drop_shadow(id, shadow).unwrap();
+            assert_eq!(preview.filter(shadow), *shadowed.composite());
+        }
+    }
+}
+
+#[test]
+fn layer_to_image_size_admits_the_resized_mask_and_rejects_without_mutation() {
+    let template = scene().layers()[0].clone();
+    let shared = Arc::new(RgbaImage::new(2048, 1024));
+    let mut layers: Vec<_> = (0..61)
+        .map(|id| document::RasterLayer {
+            id: LayerId(id),
+            pixels: shared.clone(),
+            ..template.clone()
+        })
+        .collect();
+    let id = LayerId(61);
+    layers.push(document::RasterLayer {
+        id,
+        pixels: Arc::new(RgbaImage::new(1, 1)),
+        ..template
+    });
+    let mut content = DocumentContent::from_layers(2048, 2048, layers).unwrap();
+    content.mask_from_selection(id, &Selection::Unrestricted);
+    let before = content.layer(id).unwrap().clone();
+    assert!(!content.can_fit_layer(id));
+    assert_eq!(content.layer_to_image_size(id), Dirty::None);
+    let unchanged = content.layer(id).unwrap();
+    assert!(Arc::ptr_eq(&before.pixels, &unchanged.pixels));
+    assert!(Arc::ptr_eq(
+        &before.mask.unwrap().pixels,
+        &unchanged.mask.as_ref().unwrap().pixels
+    ));
+    assert!(content.delete_layer(LayerId(0)).is_some());
+    assert!(content.can_fit_layer(id));
+    assert_ne!(content.layer_to_image_size(id), Dirty::None);
+    let bytes: u64 = content
+        .layers()
+        .iter()
+        .flat_map(|layer| layer.storage())
+        .map(|buffer| buffer.as_raw().len() as u64)
+        .sum();
+    assert_eq!(bytes, document::MAX_STACK_BYTES);
+}
+
+#[test]
+fn a_mask_only_transform_bakes_the_untransformed_retained_source() {
+    let mut content = DocumentContent::single_layer(
+        "Art".into(),
+        RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgba([100, 0, 0, 255])
+            } else {
+                Rgba([0, 100, 0, 255])
+            }
+        }),
+    );
+    let id = content.top_layer_id();
+    content.apply_retained_effect(
+        id,
+        EffectSpec::Adjustment(Adjustment::BrightnessContrast {
+            brightness: 100,
+            contrast: 0,
+        }),
+        &Selection::Unrestricted,
+        false,
+    );
+    content.mask_from_selection(id, &Selection::Rect(PixelRect::new(0, 0, 1, 1)));
+    let before = content.composite();
+    let layer = content.layer(id).unwrap();
+    let pixels = image::imageops::flip_horizontal(&*layer.pixels);
+    let mut mask = layer.mask.clone().unwrap();
+    mask.pixels = Arc::new(image::imageops::flip_horizontal(&*mask.pixels));
+    assert_ne!(
+        content.place_layer_with_mask(id, pixels, layer.offset, Some(mask)),
+        Dirty::None
+    );
+    assert!(content.layer(id).unwrap().effect.is_none());
+    assert_eq!(content.remove_retained_effect(id, false), Dirty::None);
+    assert_eq!(
+        *content.composite(),
+        image::imageops::flip_horizontal(&*before)
+    );
+    assert_eq!(*roundtrip(&content).composite(), *content.composite());
+}

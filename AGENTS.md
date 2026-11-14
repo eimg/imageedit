@@ -134,14 +134,27 @@ corner selector and signed canvas X/Y fields edit individual points to tenths of
 a pixel; dragging selects and accents that grip. Reset Corner or Reset All
 restores original source geometry in the draft, without editing pixels. Invalid
 quads remain editable with Apply disabled. The Scale
-Layer tool draws a frame around the active layer and scales it from a dragged
-border or corner; release commits one undo step, and the tool uses Shift+S.
+Layer tool draws a frame around the active layer and previews scaling from a dragged
+border or corner; the tool uses Shift+S. Apply or Return on the canvas commits
+all preview adjustments in one undo step; Cancel or Escape on the canvas discards
+them. Repeated drags and numeric edits always resample the original pixels only at Apply.
+Like warp tools, Scale owns an explicit preview session: Apply and Cancel remove
+its frame and editing controls. Selecting the tool or changing tabs/layers starts
+a session; after dismissal, a canvas click or reselecting Scale starts another.
+An untouched session leaves Save and Repeat Last Effect available.
 Width/Height edits preview a resize about the chosen nine-point Size anchor
-(Center initially) and commit on Return or leaving
-the field; empty text and Escape restore the original size. Aspect locking starts
+(Center initially). Return or leaving
+the field finishes that field without applying; empty text and Escape restore
+its prior size while retaining earlier preview adjustments. Aspect locking starts
 on and applies to numeric edits and handles; Shift reverses it during a drag.
-Nearest, Bilinear, and Bicubic choose the commit resampling. Escape or a
-layer/tab change cancels the pointer drag. Clone Stamp uses Shift+C,
+Nearest, Bilinear, and Bicubic choose the commit resampling. A tool/layer/tab
+change cancels the preview; deactivation ends its pointer drag while retaining
+the preview. Fit Layer to Canvas previews while Scale Layer is active and
+commits immediately from other tools. Transform Apply/Cancel rows share one
+renderer. Scale, Rotate, Flip, Perspective, Crop, and geometric selections share
+screen-sized white square grips with a dark rim; the selected Perspective grip
+adds an accent border. Scale shares the warp frame renderer; crop and selection
+keep their specialized outlines. Clone Stamp uses Shift+C,
 sets its source with Alt-click inside the visible raster layer, or anywhere on
 the canvas with Sample All Layers. Merged sampling uses an immutable reference
 to the current full-resolution composite at stroke start; default sampling uses
@@ -210,6 +223,11 @@ the exact alpha byte for restoration and accepts decimal input.
 Bucket Fill can cover the connected region or the whole selection. Brightness &
 Contrast, Hue & Saturation, Desaturate, and Invert preview the active layer's
 effect in the canvas composition inside a dialog, and apply inside the selection.
+Colors adjustment dialogs share Drop Shadow's responsive 720-point layout,
+placing the preview beside settings at window widths of at least 760 points and
+stacking at narrower widths. Levels pairs input black/white and output black/white
+sliders, with Gamma on its own row. Effect titles/actions stay outside the scrolling
+body in short windows.
 The preview includes offsets, layer opacity/order, and soft selection coverage;
 a checker displays transparency. Before/After switches between the original
 composition and the chosen effect without changing parameters. Apply still uses
@@ -230,8 +248,10 @@ raster layer and current selection as one undoable edit. Reopen Last Effect
 (Cmd/Ctrl+Shift+F) opens its remembered parameters with preview. Typed geometry
 and text resolve first; unfinished canvas previews disable these commands.
 Shadow repeat preflights the current destination and keeps the source active.
-Its dialog exposes the remembered color and Use Foreground; Reset restores
-built-in parameters and the current foreground color. Memory is not project data
+Its dialog uses a preview beside the controls on wide windows and a stacked
+layout on narrow windows. Shadows default to black; Choose Color opens the shared
+color picker and Use Foreground copies the foreground. Canceling the picker
+returns to the unchanged shadow draft. Reset restores built-in parameters and black. Memory is not project data
 and is not undone with the document. Path (`P`) edits cubic anchors in canvas
 coordinates. Click adds an anchor, a drag pulls its handles, and clicking the
 first anchor closes the path. Alt-clicking a visible curve inserts an anchor by exact cubic
@@ -442,7 +462,12 @@ document is a single plain layer without paths, guides, or editable text.
   close checks after success, and stays open on failure. No idle polling is used.
 - `src/workspace/scale_ui.rs` owns the Scale Layer frame, handle hit testing,
   the live GPU-scaled preview, and the commit that resamples the layer. It prepares
-  the preview in the background and rejects results after release or cancellation.
+  the preview in the background and rejects results after Apply or cancellation.
+  Release retains the draft; later pointer/numeric gestures capture the current
+  target as their baseline while preserving the original source for one Apply.
+  Frame/size and tool options exist only during the session; completion never
+  falls back to displaying an idle frame from the committed layer. Scale and warp
+  sessions share tool/tab/layer startup routing and restart on a canvas click.
   Numeric dimensions use the same preview/commit path; aspect locking retains
   opposite corner anchors or centers the unhandled axis. Numeric edits keep the
   selected Size anchor, captured when that edit starts. Choosing an anchor alone
@@ -513,8 +538,14 @@ Empty numeric text restores the selection. Cropping or shrinking the canvas pres
 a partially clipped curve becomes a bounded mask. Scaling a rounded selection
 scales its coverage on both axes as a mask. Free Select drags a freehand
 segment or click-adds polygon vertices, and previews the next edge. Releasing a
-drag keeps the draft open as a checkpoint, and the start node or Return closes
-it. Optional polygon antialiasing uses four scanlines per pixel row and counts
+drag keeps the draft open as a checkpoint. Polygon vertices and freehand segment
+endpoints have screen-sized draggable nodes; intermediate freehand samples stay
+unmarked. Node hit testing chooses the nearest checkpoint within eight screen
+points. Drags preserve their grab offset and edit only that point from its original
+position. Clicking the start node without dragging or Return closes the outline;
+node edits remain in the draft until that single selection history step. Closed
+free selections remain masks without node editing. Cancel/deactivation and context
+changes clear checkpoint and drag state with the draft. Optional polygon antialiasing uses four scanlines per pixel row and counts
 horizontal samples into the normal byte-per-pixel mask, without a supersized
 intermediate image. Hard polygon/path rasterization keeps its center-sample
 scanline path. `combine_created_selection` feathers new shapes/flood results
@@ -635,8 +666,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   shared with layer thumbnails.
 - `src/pdf.rs` probes PDFs with `hayro`, validates every selected page against
   the image, stack, and page-count budgets, and renders at the requested DPI on
-  a white or transparent page background. Its `layered_canvas_size` validates
-  First Page/Fit All Pages canvas bounds independently of individual page budgets;
+  a white or transparent page background. White output flattens renderer rounding
+  residue onto white so pages and thumbnails remain fully opaque. Transparent
+  output retains source alpha. Its `layered_canvas_size` validates First Page/Fit
+  All Pages canvas bounds independently of individual page budgets;
   portrait/landscape maxima can exceed the canvas pixel budget even when each
   page fits. Transparent rendering requests straight RGBA from the renderer.
   `PdfSource` retains the immutable shared `PdfData` bytes
@@ -740,11 +773,11 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   fields, separate wand/fill tolerance and gap radius, brush size/spacing/hardness/opacity/flow, path
   stroke size, selection/crop aspect ratios, Move position, Scale Layer dimensions,
   Rotate angle/pivot coordinates, Perspective corner coordinates, and text size/letter/line
-  spacing inline with a caret and text selection. Values preview live; selection,
-  scale, and Move edits commit one history entry. Warp fields retain Apply/Cancel.
+  spacing inline with a caret and text selection. Values preview live; selection
+  and Move edits commit one history entry. Scale and warp fields retain Apply/Cancel.
   Empty text and Escape restore the value from before editing. Letter spacing
   accepts negative values. A shortcut or a switch to another numeric field waits
-  for a selection, scale, or Move edit to settle and its action bindings to render; stale
+  for a selection or Move edit to settle and its action bindings to render; stale
   followups are rejected after a tab, tool, or revision change. Transform fields
   accept signed decimals for angles, pivots, and Perspective corners; other
   numeric fields retain their existing contracts. Pivot and corner fields
@@ -821,6 +854,13 @@ From the repository root, use a recent Rust toolchain and Xcode. Run
 `cargo test --locked`. Keep `Cargo.lock` tracked. GPUI on macOS uses
 `font-kit` for text and compiles its Metal shaders at runtime.
 
+`.github/workflows/pdf.yml` runs PDF tests and the actual non-test executable's
+headless worker on macOS and Windows. `scripts/check-pdf-worker.py --binary
+target/debug/lime` (or `lime.exe` on Windows) checks inspection, page selection,
+DPI, transparent/white rendering, bounded thumbnails, and rejected sources and
+requests without initializing GPUI. The unit suite retains kill/reap cancellation
+and deadline coverage. These checks require no interactive UI testing.
+
 Keep the package version in `Cargo.toml` and
 `CFBundleShortVersionString` in `macos/Info.plist` in sync; a test checks both.
 
@@ -866,14 +906,18 @@ app icons; they are source assets, not generated leftovers.
   selection tools create/edit masks through the Layer menu; there is no separate
   paint-mask target. Disabled masks retain storage. All linked geometry transforms
   map masks alongside pixels, including uniform-source warps whose mask alone
-  changes. Copy/shadow silhouettes honor enabled masks. Text masks are rejected.
+  changes. Layer to Image Size uses replacement admission for both pixels and
+  masks, subtracting retained data that will be baked. Adjustment/filter preview
+  composition applies enabled masks to every stack layer, just like commits.
+  Copy/shadow silhouettes honor enabled masks. Text masks are rejected.
 - `src/document/layer_effect.rs` retains one adjustment or Blur/Sharpen source
   and optional layer-local coverage bitmap. Pixels cache the applied appearance.
   Re-edit previews use source/coverage and captured alpha-lock behavior; Cancel
   never changes the cached layer. Identity re-edits restore the source. Source,
   coverage, mask, and cached pixels count in project/stack/history budgets. Owned
   retained metadata counts per history entry. Pixel/geometry writes bake the
-  retained effect; position/opacity/mask changes retain it. New effects bake the
+  retained effect, including warps that change only a mask;
+  position/opacity/direct mask edits retain it. New effects bake the
   previous result. Drop Shadow remains a separate raster-layer operation.
 - `TextLayout` stores optional fixed Width/Height and Left/Center/Right alignment.
   Fixed boxes wrap by word or glyph, clip raster/caret/highlight coverage, retain
@@ -903,7 +947,14 @@ app icons; they are source assets, not generated leftovers.
   finish their current call before the next cancellation check.
 - `src/recovery.rs` and `src/workspace/recovery_ui.rs` own five-second separate
   atomic recovery projects, per-session file leases, clean-exit markers, bounded
-  admission, and stale-session recovery. Original paths and saved revisions stay
+  admission, and stale-session recovery. Startup admission uses a conservative
+  512 MiB estimate before decoding any PNG payload: decoded storage, full canvas
+  and preview, both fine-tile representations with aprons, thumbnails, metadata,
+  and encoded input as decoding scratch. Skipped files stay on disk. Snapshot
+  tracking is per tab and persistent revision plus text source/style/placement;
+  selection/caret changes do not rewrite copies. Batch failures stay local to
+  their tab, and stale lease results cannot mark a new lease up to date.
+  Original paths and saved revisions stay
   unchanged. Accepted close/discard cleans the session; unreadable/excess old
   copies stay on disk. Text drafts are rendered into recovery candidates without
   committing the live tab. Failed text rendering preserves a JSON source sidecar

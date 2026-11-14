@@ -304,7 +304,7 @@ impl Tool {
                 "Drag a corner grip or choose a corner and edit its signed canvas X/Y to tenths of a pixel. The accented grip marks the selected corner. Reset Corner restores only that point; Reset All restores the original layer rectangle. Keep corners in a convex shape; invalid or oversized previews cannot be applied. Return finishes a numeric edit; Apply or Return on the canvas applies the preview. Empty text or Escape restores the numeric edit; Escape on the canvas cancels the preview. The selection stays in canvas coordinates."
             }
             Self::ScaleLayer => {
-                "Drag a border or corner to scale the active layer. Release commits one undo step; Escape cancels. Type Width or Height for a live preview about the selected Size anchor (Center initially); Return or clicking outside commits, and empty text restores the original size. Fit Layer to Canvas scales the whole layer proportionally and centers it, even when handles are off-screen. It may enlarge smaller layers and uses the selected resampling. The Size anchor affects typed dimensions; handle drags keep their opposite edge or corner. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at commit. Rasterize editable text before scaling it."
+                "Drag a border or corner to preview scaling the active layer. Apply or Return on the canvas commits all adjustments as one undo step; Cancel or Escape on the canvas discards them. Both dismiss the frame and editing controls. Click the canvas or select Scale Layer again to start another preview. Type Width or Height for a live preview about the selected Size anchor (Center initially); Return or leaving the field finishes that field, and Escape or empty text restores its previous size. Fit Layer to Canvas previews a proportional fit and centers the whole layer, even when handles are off-screen. It may enlarge smaller layers and uses the selected resampling. The Size anchor affects typed dimensions; handle drags keep their opposite edge or corner. Lock aspect ratio links dimensions; Shift temporarily reverses the lock while dragging. Choose the resampling used at Apply. Rasterize editable text before scaling it."
             }
             Self::Select => {
                 "Drag a rectangle. Drag inside to move it or drag a handle to resize it; click outside to deselect. X, Y, Width, Height, and corner radius update immediately; empty text or Escape restores the numeric edit. Choose Free or a fixed aspect ratio; Ratio W/H accepts a custom ratio for the next drag, resize, or dimension edit. Antialias edges smooths rounded corners. Shift adds, Control subtracts, and Shift-Control intersects."
@@ -519,7 +519,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("-", ZoomOut, None),
         KeyBinding::new("1", Zoom::Percent(100.), None),
         KeyBinding::new("escape", CancelMove, Some("Move")),
-        KeyBinding::new("escape", CancelMove, Some("ScaleLayer")),
+        KeyBinding::new("escape", CancelTransform, Some("ScaleLayer")),
+        KeyBinding::new("enter", ApplyTransform, Some("ScaleLayer")),
         KeyBinding::new("left", NudgeLayer(-1, 0), Some("Move")),
         KeyBinding::new("right", NudgeLayer(1, 0), Some("Move")),
         KeyBinding::new("up", NudgeLayer(0, -1), Some("Move")),

@@ -366,6 +366,19 @@ struct WarpPreview {
 }
 
 impl Workspace {
+    pub(super) fn begin_layer_transform_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tool == Tool::ScaleLayer {
+            self.cancel_scale(window, cx);
+            self.begin_scale_numeric(window, cx);
+        } else {
+            self.begin_warp(window, cx);
+        }
+    }
+
     pub(super) fn begin_warp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(kind) = warp_kind(self.tool) else {
             return;
@@ -772,6 +785,7 @@ impl Workspace {
         if self.warp.is_some() {
             self.request_warp_preview(window, cx);
         }
+        cx.notify();
     }
 
     pub(super) fn begin_warp_drag(

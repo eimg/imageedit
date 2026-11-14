@@ -152,8 +152,11 @@ impl Workspace {
             && self.path_gesture.is_none()
             && self.selection_drag.is_none()
             && self.opacity_drag.is_none()
-            && ((self.move_drag.is_none() && self.scale_drag.is_none())
-                || self.numeric_edit.is_some())
+            && (self.move_drag.is_none() || self.numeric_edit.is_some())
+            && self
+                .scale_drag
+                .as_ref()
+                .is_none_or(|scale| !scale.changed())
             && self.gradient.is_none()
             && self.warp.as_ref().is_none_or(|warp| !warp.changed())
             && self.crop.is_none()

@@ -26,6 +26,13 @@ pub struct Recovered {
 }
 impl Store {
     pub fn open(root: &Path) -> Result<(Arc<Self>, Vec<Recovered>, Vec<String>)> {
+        Self::open_with_budget(root, crate::document::MAX_STACK_BYTES)
+    }
+
+    fn open_with_budget(
+        root: &Path,
+        memory_budget: u64,
+    ) -> Result<(Arc<Self>, Vec<Recovered>, Vec<String>)> {
         fs::create_dir_all(root)?;
         let dir = tempfile::Builder::new()
             .prefix("session-")
@@ -65,20 +72,18 @@ impl Store {
                 }
                 // Read while holding the old session lease. Unreadable files
                 // stay in their original directory, including on clean exit.
-                match Document::open(&snapshot.path()) {
-                    Ok(mut document) => {
-                        let bytes = document
-                            .content
-                            .layers()
-                            .iter()
-                            .flat_map(|layer| layer.storage())
-                            .map(|image| image.as_raw().len() as u64)
-                            .sum::<u64>();
-                        if recovered_bytes.saturating_add(bytes) > crate::document::MAX_STACK_BYTES
-                        {
-                            errors.push(format!("Recovery copy {} was left on disk because the recovery memory limit was reached.",snapshot.path().display()));
-                            continue;
-                        }
+                let candidate = (|| -> Result<_> {
+                    let reader = std::io::BufReader::new(File::open(snapshot.path())?);
+                    let (content, bytes) = crate::project::read_for_recovery(
+                        reader,
+                        memory_budget.saturating_sub(recovered_bytes),
+                    )?;
+                    let document =
+                        Document::from_content_checked(String::new(), content, &|| Ok(()))?;
+                    Ok((document, bytes))
+                })();
+                match candidate {
+                    Ok((mut document, bytes)) => {
                         let claimed = dir.join(format!("recovered-{claimed_count}.lime"));
                         claimed_count += 1;
                         if let Err(error) = fs::rename(snapshot.path(), &claimed) {
@@ -219,4 +224,63 @@ pub fn default_root() -> Result<PathBuf> {
         .parent()
         .context("Application support directory is unavailable")?
         .join("Recovery"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbaImage;
+    use std::io::Cursor;
+
+    #[test]
+    fn recovery_admits_canvas_buffers_before_decoding_and_preserves_excess_copies() {
+        let mut content = DocumentContent::single_layer("Tiny layer".into(), RgbaImage::new(1, 1));
+        content
+            .resize_canvas(8192, 8192, crate::transform::Anchor::Center)
+            .unwrap();
+        let mut bytes = Vec::new();
+        crate::project::write_recovery(&mut bytes, &content, "Canvas", None).unwrap();
+        // An invalid PNG must never be decoded if its prepared canvas cannot fit.
+        let manifest = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        bytes[12 + manifest + 8] = 0;
+        let error =
+            crate::project::read_for_recovery(Cursor::new(bytes), crate::document::MAX_STACK_BYTES)
+                .err()
+                .unwrap();
+        assert!(error.to_string().contains("recovery memory limit"));
+
+        content
+            .resize_canvas(256, 256, crate::transform::Anchor::Center)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (store, _, _) = Store::open(root.path()).unwrap();
+        for id in 0..2 {
+            store
+                .snapshot(id, "Canvas", &content, None, &AtomicBool::new(true))
+                .unwrap();
+        }
+        let session = fs::read_dir(root.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let (_, one_document) = crate::project::read_for_recovery(
+            std::io::BufReader::new(File::open(session.join("tab-0.lime")).unwrap()),
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(one_document > 256 * 256 * 4 * 4);
+        drop(store);
+        let (reopened, documents, errors) =
+            Store::open_with_budget(root.path(), one_document).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("recovery memory limit"));
+        reopened.clean_exit();
+        let (remaining, documents, errors) = Store::open(root.path()).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert!(errors.is_empty());
+        remaining.clean_exit();
+    }
 }

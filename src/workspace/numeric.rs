@@ -820,14 +820,9 @@ impl Workspace {
         };
         if edit.field.parse(&edit.text).is_none() {
             self.restore_numeric_edit(&edit, window, cx);
-            if edit.field.is_scale() {
-                self.cancel_scale(window, cx);
-            }
             if edit.field.is_move() {
                 self.cancel_move(window, cx);
             }
-        } else if edit.field.is_scale() {
-            self.finish_scale(window, cx);
         } else if edit.field.is_move() {
             self.finish_move(window, cx);
         } else if edit.field.is_selection()
@@ -952,9 +947,6 @@ impl Workspace {
             return;
         };
         self.restore_numeric_edit(&edit, window, cx);
-        if edit.field.is_scale() {
-            self.cancel_scale(window, cx);
-        }
         if edit.field.is_move() {
             self.cancel_move(window, cx);
         }

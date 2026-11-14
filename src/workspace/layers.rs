@@ -537,7 +537,7 @@ impl Workspace {
             self.cancel_stroke(window, cx);
             self.cancel_gradient(window, cx);
             self.cancel_scale(window, cx);
-            self.begin_warp(window, cx);
+            self.begin_layer_transform_preview(window, cx);
             cx.notify();
         }
     }
@@ -1150,6 +1150,10 @@ impl Workspace {
         if !self.can_fit_active_layer() {
             return;
         }
+        if self.tool == crate::commands::Tool::ScaleLayer {
+            self.preview_scale_to_canvas(window, cx);
+            return;
+        }
         let resample = self.warp_resample;
         self.edit_content(
             move |content, _, _| content.fit_layer_to_canvas(layer, resample),
@@ -1664,7 +1668,11 @@ impl Workspace {
             .or_else(|| self.warp_overlay.clone())
             .or_else(|| self.gradient_overlay.clone())
             .or_else(|| self.text_overlay.clone())
-            .or_else(|| self.scale_overlay.clone())
+            .or_else(|| {
+                self.scale_drag
+                    .filter(|scale| scale.changed())
+                    .and(self.scale_overlay.clone())
+            })
     }
 
     pub(super) fn notice(&mut self, message: &str, cx: &mut Context<Self>) {

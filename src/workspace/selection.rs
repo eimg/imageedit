@@ -128,9 +128,7 @@ impl Workspace {
         }
         self.selection_drag = None;
         self.selection_preview = None;
-        self.free_points.clear();
-        self.free_drag_origin = None;
-        self.free_dragging = false;
+        self.clear_free_draft();
     }
 
     pub(super) fn begin_selection(
@@ -598,7 +596,7 @@ impl Workspace {
         position: Point<Pixels>,
         modifiers: &gpui::Modifiers,
         scale: f32,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
@@ -614,21 +612,23 @@ impl Workspace {
             return;
         }
         let point = geometry.fraction(position);
-        if self.free_points.len() >= 3
-            && near_polygon_start(geometry.project(self.free_points[0]), position)
-        {
-            self.close_free(window, cx);
+        self.free_drag_origin = Some(position);
+        self.free_dragging = false;
+        self.free_node_drag =
+            free_node_at(&self.free_points, &self.free_nodes, &geometry, position)
+                .map(|index| (index, self.free_points[index]));
+        if self.free_node_drag.is_some() {
+            cx.notify();
             return;
         }
         if self.free_points.is_empty() {
             self.free_op = selection_op(modifiers);
         }
-        self.free_drag_origin = Some(position);
-        self.free_dragging = false;
         if self.free_points.last() != Some(&point) {
+            self.free_nodes.push(self.free_points.len());
             self.free_points.push(point);
-            cx.notify();
         }
+        cx.notify();
     }
 
     pub(super) fn extend_free(
@@ -656,11 +656,17 @@ impl Workspace {
             }
             self.free_dragging = true;
         }
-        let point = geometry.fraction(position);
-        if self.free_points.last() != Some(&point) {
-            self.free_points.push(point);
-            cx.notify();
+        if let Some((index, original)) = self.free_node_drag {
+            // Preserve the grab offset and derive every frame from the gesture baseline.
+            let delta = geometry.fraction(position) - geometry.fraction(origin);
+            self.free_points[index] = original + delta;
+        } else {
+            let point = geometry.fraction(position);
+            if self.free_points.last() != Some(&point) {
+                self.free_points.push(point);
+            }
         }
+        cx.notify();
     }
 
     pub(super) fn finish_free(
@@ -672,9 +678,25 @@ impl Workspace {
         if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
+        if self.free_drag_origin.is_none() {
+            return;
+        }
         self.extend_free(position, window.scale_factor(), cx);
+        let close = self.free_node_drag.is_some_and(|(index, _)| index == 0)
+            && !self.free_dragging
+            && self.free_points.len() >= 3;
+        if self.free_node_drag.is_none() {
+            let last = self.free_points.len() - 1;
+            if self.free_nodes.last() != Some(&last) {
+                self.free_nodes.push(last);
+            }
+        }
+        self.free_node_drag = None;
         self.free_drag_origin = None;
         self.free_dragging = false;
+        if close {
+            self.close_free(window, cx);
+        }
         cx.notify();
     }
 
@@ -683,8 +705,7 @@ impl Workspace {
             return;
         }
         let points = std::mem::take(&mut self.free_points);
-        self.free_drag_origin = None;
-        self.free_dragging = false;
+        self.clear_free_draft();
         let op = self.free_op;
         let antialias = self.free_antialias;
         let feather = self.creation_feather_radius();
@@ -711,13 +732,19 @@ impl Workspace {
         );
     }
 
+    pub(super) fn clear_free_draft(&mut self) {
+        self.free_points.clear();
+        self.free_nodes.clear();
+        self.free_node_drag = None;
+        self.free_drag_origin = None;
+        self.free_dragging = false;
+    }
+
     pub(super) fn cancel_free(&mut self, cx: &mut Context<Self>) {
         if self.free_points.is_empty() {
             return;
         }
-        self.free_points.clear();
-        self.free_drag_origin = None;
-        self.free_dragging = false;
+        self.clear_free_draft();
         cx.notify();
     }
 
@@ -1017,6 +1044,24 @@ fn drag_selection(
     height: u32,
 ) -> Selection {
     Selection::shape_drag(shape, start, end, (width, height), radius, false, None)
+}
+
+pub(super) fn free_node_at(
+    points: &[Point<f32>],
+    nodes: &[usize],
+    geometry: &PreviewGeometry,
+    pointer: Point<Pixels>,
+) -> Option<usize> {
+    nodes
+        .iter()
+        .copied()
+        .filter_map(|index| {
+            let delta = geometry.project(*points.get(index)?) - pointer;
+            let distance = f32::from(delta.x).hypot(f32::from(delta.y));
+            (distance <= POLYGON_CLOSE_SLOP).then_some((index, distance))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
 }
 
 pub(super) fn near_polygon_start(origin: Point<Pixels>, pointer: Point<Pixels>) -> bool {
@@ -1474,6 +1519,44 @@ mod tests {
         let covered = wand_source(&content, active, true, (0, 0)).unwrap();
         assert_eq!(*covered.pixels.get_pixel(0, 0), blue);
         assert_eq!(*covered.pixels.get_pixel(2, 1), blue);
+    }
+
+    #[test]
+    fn free_nodes_hit_only_checkpoints_at_a_fixed_screen_radius() {
+        use super::super::Zoom;
+        use gpui::{Bounds, px, size};
+        let points = [point(0.1, 0.2), point(0.3, 0.4), point(0.8, 0.9)];
+        // The middle point is a freehand sample, not a user checkpoint.
+        let nodes = [0, 2];
+        for zoom in [Zoom::Percent(50.), Zoom::Percent(400.)] {
+            let geometry = PreviewGeometry::new(
+                1000,
+                1000,
+                zoom,
+                Bounds::new(point(px(0.), px(0.)), size(px(500.), px(500.))),
+                2.,
+            )
+            .unwrap()
+            .panned(point(px(30.), px(-20.)));
+            let last = geometry.project(points[2]);
+            assert_eq!(
+                free_node_at(&points, &nodes, &geometry, last + point(px(5.), px(4.))),
+                Some(2)
+            );
+            assert_eq!(
+                free_node_at(&points, &nodes, &geometry, last + point(px(9.), px(0.))),
+                None
+            );
+            assert_eq!(
+                free_node_at(&points, &nodes, &geometry, geometry.project(points[1])),
+                None
+            );
+            // Overlapping handles choose the closest checkpoint, including the first.
+            assert_eq!(
+                free_node_at(&points, &[0, 2, 1], &geometry, geometry.project(points[0])),
+                Some(0)
+            );
+        }
     }
 
     #[test]
