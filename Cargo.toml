@@ -40,3 +40,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+log = "0.4"
+gpui = { version = "=0.2.2", default-features = false, features = ["wayland", "x11"] }
+
+# GPUI's legacy archive client requires xattr 0.2, incompatible with modern
+# libc on Linux. Bridge its unchanged `set` API to the maintained xattr crate.
+[patch.crates-io]
+xattr = { path = "vendor/xattr-compat" }

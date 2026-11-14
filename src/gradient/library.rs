@@ -256,12 +256,27 @@ pub fn default_path() -> Option<PathBuf> {
     } else if cfg!(target_os = "windows") {
         std::env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join("Lime/gradients.json"))
     } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".config")))
-            .map(|root| root.join("lime/gradients.json"))
+        xdg_library_path(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
     };
     path.filter(|path| path.is_absolute())
+}
+
+fn xdg_library_path(
+    config: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    config
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        })
+        .map(|root| root.join("lime/gradients.json"))
 }
 
 fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -327,6 +342,38 @@ pub fn save(path: &Path, expected: Option<&[u8]>, library: &Library) -> Result<V
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn xdg_settings_fall_back_to_home_for_empty_or_relative_config_roots() {
+        let home = std::path::absolute("xdg-test-home").unwrap();
+        let config = std::path::absolute("xdg-test-config").unwrap();
+        let path = |config: Option<&Path>, home: Option<&Path>| {
+            xdg_library_path(
+                config.map(|path| path.as_os_str().to_owned()),
+                home.map(|path| path.as_os_str().to_owned()),
+            )
+        };
+        let fallback = Some(home.join(".config/lime/gradients.json"));
+        for config in [
+            None,
+            Some(Path::new("")),
+            Some(Path::new("relative/config")),
+        ] {
+            assert_eq!(path(config, Some(&home)), fallback);
+        }
+        assert_eq!(
+            path(Some(&config), None),
+            Some(config.join("lime/gradients.json"))
+        );
+        assert_eq!(
+            path(
+                Some(Path::new("relative")),
+                Some(Path::new("relative/home"))
+            ),
+            None
+        );
+        assert_eq!(path(None, None), None);
+    }
 
     fn value() -> PresetValue {
         PresetValue {

@@ -468,6 +468,13 @@ impl Render for Workspace {
                     this.cycle_tabs(true, window, cx);
                 }))
             })
+            .map(|root| {
+                #[cfg(any(target_os = "linux", test))]
+                let root = root
+                    .children(self.linux_titlebar(window, cx))
+                    .child(self.linux_menu_bar(interactive, cx));
+                root
+            })
             .child(
                 div()
                     .flex()
@@ -496,6 +503,13 @@ impl Render for Workspace {
             .child(self.status_bar(cx))
             .children(self.form_overlay(window, cx))
             .children(self.pdf_progress_overlay(cx))
+            .map(|root| {
+                #[cfg(any(target_os = "linux", test))]
+                let root = root
+                    .children(self.linux_resize_edges(window))
+                    .children(self.linux_menu_overlay(window, cx));
+                root
+            })
     }
 }
 

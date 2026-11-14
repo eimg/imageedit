@@ -12,6 +12,8 @@ mod gradient_ui;
 mod guide_ui;
 mod history;
 mod layers;
+#[cfg(any(target_os = "linux", test))]
+mod linux_menu;
 mod numeric;
 mod paint_ui;
 mod path_ui;
@@ -247,6 +249,8 @@ impl EffectImages {
 }
 
 pub struct Workspace {
+    #[cfg(any(target_os = "linux", test))]
+    linux_menu: linux_menu::LinuxMenu,
     focus: FocusHandle,
     numeric_focus: FocusHandle,
     numeric_edit: Option<numeric::NumericEdit>,
@@ -416,6 +420,8 @@ impl Workspace {
         });
         cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() {
+                #[cfg(any(target_os = "linux", test))]
+                workspace.linux_menu.close();
                 workspace.canvas_cursor.leave();
                 workspace.pan_drag = None;
                 workspace.space_pan = false;
@@ -466,6 +472,10 @@ impl Workspace {
         cx.intercept_keystrokes(move |event, window, cx| {
             let handled = numeric_entity
                 .update(cx, |workspace, cx| {
+                    #[cfg(any(target_os = "linux", test))]
+                    if workspace.linux_menu_key(&event.keystroke, window, cx) {
+                        return true;
+                    }
                     if workspace.font_list_open && workspace.font_search_focus.is_focused(window) {
                         return workspace.font_search_key(&event.keystroke, window, cx);
                     }
@@ -530,6 +540,8 @@ impl Workspace {
         .detach();
 
         let mut workspace = Self {
+            #[cfg(any(target_os = "linux", test))]
+            linux_menu: Default::default(),
             focus,
             numeric_focus,
             numeric_edit: None,
