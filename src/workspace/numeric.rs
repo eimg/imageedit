@@ -290,6 +290,11 @@ pub(super) enum NumericFollowup {
     FitLayer {
         layer: crate::document::LayerId,
     },
+    LayerContextMenu {
+        tab: usize,
+        layer: crate::document::LayerId,
+        position: gpui::Point<gpui::Pixels>,
+    },
     LayerMetadata {
         tab: usize,
         layer: crate::document::LayerId,
@@ -937,6 +942,14 @@ impl Workspace {
                             {
                                 this.fit_active_layer_to_canvas(window, cx);
                             }
+                            None
+                        }
+                        NumericFollowup::LayerContextMenu {
+                            tab,
+                            layer,
+                            position,
+                        } => {
+                            this.open_layer_context_menu(tab, layer, position, window, cx);
                             None
                         }
                         NumericFollowup::LayerMetadata {

@@ -29,7 +29,8 @@ Windows downloads are unsigned. The macOS app is ad hoc signed and not notarized
 
 ## Features
 
-- **Layers** — masks, blend modes, opacity, locks, and linked movement.
+- **Layers** — masks, blend modes, opacity, position locks, and movement link toggles.
+  Shadows follow their source independently of links; right-click a layer for more actions.
 - **Selections and transforms** — rectangle, oval, freehand, magic wand, crop, scale, rotate, and perspective.
 - **Painting** — pencil, brush, eraser, clone stamp, gradients, and bucket fill.
   Per-tool settings and recent colors survive app restarts.

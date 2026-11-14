@@ -11,6 +11,7 @@ mod filter_ui;
 mod gradient_ui;
 mod guide_ui;
 mod history;
+mod layer_menu;
 mod layers;
 #[cfg(any(target_os = "linux", test))]
 mod linux_menu;
@@ -247,6 +248,7 @@ impl EffectImages {
 }
 
 pub struct Workspace {
+    layer_menu: Option<layer_menu::LayerMenu>,
     #[cfg(any(target_os = "linux", test))]
     linux_menu: linux_menu::LinuxMenu,
     focus: FocusHandle,
@@ -371,6 +373,7 @@ impl Workspace {
         });
         cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() {
+                workspace.layer_menu = None;
                 #[cfg(any(target_os = "linux", test))]
                 workspace.linux_menu.close();
                 workspace.canvas_cursor.leave();
@@ -423,6 +426,9 @@ impl Workspace {
         cx.intercept_keystrokes(move |event, window, cx| {
             let handled = numeric_entity
                 .update(cx, |workspace, cx| {
+                    if workspace.layer_menu_key(&event.keystroke, window, cx) {
+                        return true;
+                    }
                     #[cfg(any(target_os = "linux", test))]
                     if workspace.linux_menu_key(&event.keystroke, window, cx) {
                         return true;
@@ -491,6 +497,7 @@ impl Workspace {
         .detach();
 
         let mut workspace = Self {
+            layer_menu: None,
             #[cfg(any(target_os = "linux", test))]
             linux_menu: Default::default(),
             focus,

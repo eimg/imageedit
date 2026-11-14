@@ -198,6 +198,7 @@ impl History {
                     + text_bytes
                     + retained_metadata
                     + std::mem::size_of_val(content.guides()) as u64
+                    + std::mem::size_of_val(content.shadow_attachments()) as u64
                     + std::mem::size_of_val(content.layer_links()) as u64
                     + content
                         .layer_links()
@@ -346,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_shadow_move_and_unlink_each_undo_as_one_persistent_edit() {
+    fn attached_shadow_move_and_detach_each_undo_as_one_persistent_edit() {
         let mut session = Session::new(true, 8);
         session.fill(100, &LIMITS);
         let source = session.current.active_layer;
@@ -383,12 +384,12 @@ mod tests {
         }
         assert!(session.redo());
         session.edit(
-            |content| content.unlink_layer(shadow) != crate::preview::Dirty::None,
+            |content| content.detach_shadow(shadow) != crate::preview::Dirty::None,
             &LIMITS,
         );
-        assert!(session.current.content.layer_links().is_empty());
+        assert!(session.current.content.shadow_attachments().is_empty());
         assert!(session.undo());
-        assert_eq!(session.current.content.linked_layers(source).len(), 2);
+        assert_eq!(session.current.content.shadow_source(shadow), Some(source));
         assert!(session.undo());
         assert!(!session.history.is_dirty());
     }

@@ -138,6 +138,7 @@ pub struct DocumentContent {
     // Bottom to top. Constructors and edits keep at least one layer.
     pub(super) layers: Vec<RasterLayer>,
     pub(super) layer_links: Vec<Vec<LayerId>>,
+    pub(super) shadow_attachments: Vec<(LayerId, LayerId)>,
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
     guides: Vec<crate::guides::Guide>,
@@ -325,6 +326,7 @@ impl DocumentContent {
             }],
             paths: Vec::new(),
             layer_links: Vec::new(),
+            shadow_attachments: Vec::new(),
             active_path: None,
             guides: Vec::new(),
         }
@@ -373,6 +375,7 @@ impl DocumentContent {
             layers,
             paths: Vec::new(),
             layer_links: Vec::new(),
+            shadow_attachments: Vec::new(),
             active_path: None,
             guides: Vec::new(),
         })
@@ -858,6 +861,8 @@ impl DocumentContent {
     pub fn is_plain_raster(&self) -> bool {
         self.paths.is_empty()
             && self.guides.is_empty()
+            && self.layer_links.is_empty()
+            && self.shadow_attachments.is_empty()
             && self.full_canvas_layer().is_some_and(|layer| {
                 layer.name == IMPORTED_LAYER_NAME
                     && layer.text.is_none()
@@ -1289,6 +1294,10 @@ impl DocumentContent {
         let pixels = composite::flatten_region(&self.layers[index..=index + 1], union);
         self.unlink_layer(id);
         self.unlink_layer(self.layers[index].id);
+        let lower_id = self.layers[index].id;
+        self.shadow_attachments.retain(|(child, parent)| {
+            *child != id && *parent != id && *child != lower_id && *parent != lower_id
+        });
         self.layers.remove(index + 1);
         let merged = &mut self.layers[index];
         merged.effect = None;
@@ -1647,7 +1656,7 @@ impl DocumentContent {
                 text: None,
             },
         );
-        self.link_layers(id, shadow_id);
+        self.shadow_attachments.push((shadow_id, id));
         Ok(rect)
     }
 
@@ -4822,6 +4831,11 @@ mod tests {
     fn raster_save_cannot_drop_paths_or_cached_text() {
         use crate::paths::{Anchor, AnchorId, PathId, VectorPath};
         let mut content = DocumentContent::single_layer("Image".into(), RgbaImage::new(2, 2));
+        assert!(content.is_plain_raster());
+        let id = content.top_layer_id();
+        content.set_layer_linked(id, true);
+        assert!(!content.is_plain_raster());
+        content.set_layer_linked(id, false);
         assert!(content.is_plain_raster());
         let mut with_path = content.clone();
         assert!(with_path.upsert_path(VectorPath {

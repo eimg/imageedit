@@ -17,7 +17,7 @@ pub const EXTENSION: &str = "lime";
 pub const LEGACY_EXTENSION: &str = "imageedit";
 // Preserve the on-disk signature so existing projects remain readable.
 pub const MAGIC: &[u8; 8] = b"IMGEDIT\0";
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 fn default_true() -> bool {
     true
@@ -43,6 +43,8 @@ struct Manifest {
     guides: Vec<crate::guides::Guide>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     layer_links: Vec<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shadow_attachments: Vec<(u64, u64)>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -214,7 +216,7 @@ fn read_inner(
     let manifest: Manifest =
         serde_json::from_slice(&manifest).context("Invalid project manifest")?;
     ensure!(
-        matches!(manifest.version, 6 | 7 | 8 | VERSION),
+        matches!(manifest.version, 6 | 7 | 8 | 9 | VERSION),
         "Unsupported Lime project version {}",
         manifest.version
     );
@@ -361,6 +363,13 @@ fn read_inner(
             .map(|group| group.into_iter().map(LayerId).collect())
             .collect(),
     )?;
+    content.set_shadow_attachments(
+        manifest
+            .shadow_attachments
+            .into_iter()
+            .map(|(child, parent)| (LayerId(child), LayerId(parent)))
+            .collect(),
+    )?;
     Ok((content, recovery_bytes))
 }
 
@@ -423,8 +432,9 @@ fn write_impl(
 ) -> Result<()> {
     let (width, height) = content.size();
     let manifest = Manifest {
-        version: if recovery.is_some()
-            || !content.layer_links().is_empty()
+        version: if !content.layer_links().is_empty() || !content.shadow_attachments().is_empty() {
+            VERSION
+        } else if recovery.is_some()
             || content.layers().iter().any(|layer| {
                 layer.effect.is_some()
                     || layer.mask.is_some()
@@ -433,8 +443,9 @@ fn write_impl(
                         .text
                         .as_ref()
                         .is_some_and(|text| !text.layout.is_auto())
-            }) {
-            VERSION
+            })
+        {
+            9
         } else if content
             .layers()
             .iter()
@@ -510,6 +521,11 @@ fn write_impl(
             .collect(),
         active_path: content.active_path_id().map(|id| id.0),
         guides: content.guides().to_vec(),
+        shadow_attachments: content
+            .shadow_attachments()
+            .iter()
+            .map(|(child, parent)| (child.0, parent.0))
+            .collect(),
         layer_links: content
             .layer_links()
             .iter()
@@ -677,15 +693,49 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
     let mut linked = HashSet::new();
     ensure!(
         (manifest.version >= 9 || manifest.layer_links.is_empty())
-            && manifest.layer_links.len() <= manifest.layers.len() / 2
+            && manifest.layer_links.len()
+                <= if manifest.version >= 10 {
+                    1
+                } else {
+                    manifest.layers.len() / 2
+                }
             && manifest.layer_links.iter().all(|group| {
-                (2..=manifest.layers.len()).contains(&group.len())
+                ((if manifest.version >= 10 { 1 } else { 2 })..=manifest.layers.len())
+                    .contains(&group.len())
                     && group
                         .iter()
                         .all(|id| ids.contains(id) && linked.insert(*id))
             }),
         "Invalid or unsupported layer links"
     );
+    let mut children = HashSet::new();
+    ensure!(
+        (manifest.version >= 10 || manifest.shadow_attachments.is_empty())
+            && manifest.shadow_attachments.len() < manifest.layers.len()
+            && manifest
+                .shadow_attachments
+                .iter()
+                .all(|(child, parent)| child != parent
+                    && ids.contains(child)
+                    && ids.contains(parent)
+                    && children.insert(*child)),
+        "Invalid or unsupported shadow attachments"
+    );
+    for &(child, mut parent) in &manifest.shadow_attachments {
+        let mut remaining = manifest.shadow_attachments.len();
+        loop {
+            ensure!(parent != child && remaining > 0, "Cyclic shadow attachment");
+            let Some((_, next)) = manifest
+                .shadow_attachments
+                .iter()
+                .find(|(id, _)| *id == parent)
+            else {
+                break;
+            };
+            parent = *next;
+            remaining -= 1;
+        }
+    }
     ensure!(
         manifest.paths.len() <= crate::paths::MAX_PATHS,
         "A project has too many paths"
@@ -813,6 +863,7 @@ mod tests {
         assert_eq!(actual.active_path_id(), expected.active_path_id());
         assert_eq!(actual.guides(), expected.guides());
         assert_eq!(actual.layer_links(), expected.layer_links());
+        assert_eq!(actual.shadow_attachments(), expected.shadow_attachments());
     }
 
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
@@ -826,14 +877,9 @@ mod tests {
         content.link_layers(LayerId(7), LayerId(3));
         let bytes = write_bytes(&content).unwrap();
         let manifest = manifest_json(&bytes);
-        assert_eq!(manifest["version"], json!(9));
+        assert_eq!(manifest["version"], json!(10));
         assert_same(&read_bytes(&bytes).unwrap(), &content);
-        for invalid in [
-            json!([[7]]),
-            json!([[7, 7]]),
-            json!([[7, 999]]),
-            json!([[7, 3], [3, 7]]),
-        ] {
+        for invalid in [json!([[7, 7]]), json!([[7, 999]]), json!([[7, 3], [3, 7]])] {
             let mut manifest = manifest.clone();
             manifest["layer_links"] = invalid;
             assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
@@ -844,10 +890,76 @@ mod tests {
             assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
         }
         content.unlink_layer(LayerId(7));
+        let singleton = write_bytes(&content).unwrap();
+        assert_same(&read_bytes(&singleton).unwrap(), &content);
+        assert_eq!(manifest_json(&singleton)["layer_links"], json!([[3]]));
+        content.unlink_layer(LayerId(3));
         let plain = write_bytes(&content).unwrap();
         assert_eq!(manifest_json(&plain)["version"], json!(6));
         assert!(manifest_json(&plain).get("layer_links").is_none());
         assert!(read_bytes(GOLDEN).unwrap().layer_links().is_empty());
+    }
+
+    #[test]
+    fn shadow_attachments_round_trip_and_invalid_graphs_are_rejected() {
+        let mut content = two_layers();
+        content
+            .place_drop_shadow(
+                LayerId(7),
+                crate::filters::FilterSpec::Shadow {
+                    radius: 1,
+                    offset: (2, 3),
+                    opacity: 180,
+                    color: Rgba([0, 0, 0, 255]),
+                },
+            )
+            .unwrap();
+        let shadow = content.shadow_attachments()[0].0.0;
+        content.set_layer_linked(LayerId(3), true);
+        let bytes = write_bytes(&content).unwrap();
+        let manifest = manifest_json(&bytes);
+        assert_eq!(manifest["version"], json!(10));
+        assert_same(&read_bytes(&bytes).unwrap(), &content);
+        for invalid in [
+            json!([[shadow, shadow]]),
+            json!([[shadow, 999]]),
+            json!([[shadow, 7], [shadow, 3]]),
+            json!([[shadow, 7], [7, shadow]]),
+        ] {
+            let mut broken = manifest.clone();
+            broken["shadow_attachments"] = invalid;
+            assert!(read_bytes(&with_manifest(&bytes, &broken)).is_err());
+        }
+        let mut old = manifest.clone();
+        old["version"] = json!(9);
+        old["layer_links"] = json!([]);
+        assert!(read_bytes(&with_manifest(&bytes, &old)).is_err());
+    }
+
+    #[test]
+    fn legacy_movement_groups_migrate_to_one_set_without_inferred_attachments() {
+        let mut content = two_layers();
+        content.link_layers(LayerId(7), LayerId(3));
+        let bytes = write_bytes(&content).unwrap();
+        let mut manifest = manifest_json(&bytes);
+        manifest["version"] = json!(9);
+        let restored = read_bytes(&with_manifest(&bytes, &manifest)).unwrap();
+        assert_same(&restored, &content);
+        assert!(restored.shadow_attachments().is_empty());
+        let extra = content
+            .add_layer(LayerId(7), "Extra".into(), Rgba([0; 4]))
+            .unwrap();
+        let extra2 = content
+            .add_layer(extra, "Extra 2".into(), Rgba([0; 4]))
+            .unwrap();
+        let bytes = write_bytes(&content).unwrap();
+        let mut manifest = manifest_json(&bytes);
+        manifest["version"] = json!(9);
+        manifest["layer_links"] = json!([[7, 3], [extra.0, extra2.0]]);
+        let restored = read_bytes(&with_manifest(&bytes, &manifest)).unwrap();
+        assert_eq!(restored.layer_links().len(), 1);
+        assert_eq!(restored.linked_layers(LayerId(7)).len(), 4);
+        assert!(restored.shadow_attachments().is_empty());
     }
 
     #[test]
@@ -1153,7 +1265,7 @@ mod tests {
         let manifest = manifest_json(&valid);
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut serde_json::Value));
         let edits: [Edit; 27] = [
-            ("unknown version", &|m| m["version"] = json!(10)),
+            ("unknown version", &|m| m["version"] = json!(11)),
             ("previous version", &|m| m["version"] = json!(5)),
             ("long layer name", &|m| {
                 m["layers"][0]["name"] = json!("x".repeat(65))

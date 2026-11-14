@@ -29,12 +29,9 @@ impl Workspace {
         self.move_overlay
             .as_ref()
             .is_some_and(|paint| Arc::ptr_eq(&paint.sprite, &raw.sprite))
-            && self.active_tab().is_some_and(|tab| {
-                !tab.document
-                    .content
-                    .linked_layers(tab.active_layer)
-                    .is_empty()
-            })
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.document.content.movement_layers(tab.active_layer).len() > 1)
     }
 
     pub(super) fn move_paint(&self) -> Option<MovePaint> {
@@ -313,6 +310,56 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn attached_shadow_preview_matches_commit_without_joining_the_movement_set() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(9, 7, Rgba([40, 80, 160, 200])),
+        );
+        let base = content.top_layer_id();
+        let source = content
+            .add_layer(base, "Source".into(), Rgba([200, 40, 30, 180]))
+            .unwrap();
+        content
+            .place_drop_shadow(
+                source,
+                crate::filters::FilterSpec::Shadow {
+                    radius: 1,
+                    offset: (1, 2),
+                    opacity: 180,
+                    color: Rgba([0, 0, 0, 255]),
+                },
+            )
+            .unwrap();
+        let shadow = content.shadow_attachments()[0].0;
+        // An intervening stationary layer must retain its stack position.
+        content.move_layer(shadow, 0);
+        assert!(content.layer_links().is_empty());
+        let paint = MovePaint {
+            below: None,
+            above: None,
+            sprite: document::preview_render(&RgbaImage::new(1, 1)),
+            offset: (-2, 1),
+            size: (9, 7),
+        };
+        let mut committed = content.clone();
+        committed.move_linked_layers(source, paint.offset);
+        assert_eq!(
+            composite(
+                &content,
+                &paint,
+                Some(source),
+                Some(base),
+                1024,
+                false,
+                true
+            ),
+            *committed.composite()
+        );
+        assert_eq!(committed.layer(base).unwrap().offset, (0, 0));
+        assert_eq!(content.layer(source).unwrap().offset, (0, 0));
+    }
+
     #[test]
     fn backdrop_dependent_move_and_scale_previews_match_full_composition() {
         for mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay] {

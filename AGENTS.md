@@ -135,14 +135,14 @@ one image pixel, or ten with Shift, independent of zoom. Release commits one
 undo step per key sequence; Escape, deactivation, or changing tools/tabs/layers
 cancels an unfinished sequence. Nudges queued during their own prior canvas
 commit resume only on the same tab, layer, and document generation.
-Layers have independent alpha and position locks, exposed as visible
-icon toggles beside each row's visibility button and through Layer menu actions.
-Lock toggles share visibility's background-free resting style and hover treatment;
-closed locks use the accent color, including while hovered, while open locks are dimmed. Position lock
-uses a plain padlock; alpha lock retains its transparency indicator.
+Layers have independent alpha and position locks. Each row exposes visibility,
+a movement-link toggle, and a plain position padlock. Alpha lock lives in the
+Layer menu and layer context menu. Row toggles share visibility's background-free
+resting style and hover treatment; closed locks use the accent color, including
+while hovered, while open locks are dimmed.
 Row toggles target stable tab/layer IDs without changing the active layer; typed
 geometry and text commit first, with deferred actions validating their context.
-Alpha lock is disabled on editable text rows with an explanatory tooltip.
+Alpha lock is disabled for editable text with an explanatory context-menu tooltip.
 Lock changes use `Dirty::Unpainted`, commit one image
 history step, preserve shared pixel/preview buffers, and require project Save.
 Alpha lock is available for raster layers: paint/clone/outline strokes use
@@ -158,20 +158,39 @@ pixel transforms, scale, fit, and layer content crop. Image-wide operations stil
 transform every layer and retain its locks. Editable text remains editable at its
 existing layout anchor, including automatic bitmap resizing; rasterize it before
 locking alpha. Opacity, visibility, order, and deletion remain available.
-Layers can form disjoint movement groups through Layer → Link with Layer Below.
-New Drop Shadow layers automatically join their source's group. Moving any member
-with the pointer, typed X/Y, arrow nudges, or alignment translates every member
-by the same delta, including hidden layers, in one history edit. Snapping and
-alignment use the active layer's geometry. Any member's position lock or offset
-overflow blocks the complete translation. Chain icons beside row toggles and
-Layer → Unlink Layer detach one member; a singleton group dissolves. Row unlink
-targets stable tab/layer IDs without changing the active layer and finishes typed
-geometry/text first. Links are saved project metadata, not session preferences.
-Duplicates start unlinked. Deletion/canvas crop prune removed members; Merge Down
-detaches the result while preserving other surviving groups. Individual scaling,
-rotation, pixel edits, opacity, visibility, and stacking stay independent.
-Image-wide transforms still affect all layers. Links do not regenerate shadows
-after source edits, and existing shadow layers are not linked by inference.
+Layer movement links form one explicit set per document. Every row always shows
+a chain toggle, also available through Layer → Toggle Movement Link. Moving a
+linked layer with the pointer, typed X/Y, arrow nudges, or alignment translates
+all enabled members by the same delta, including hidden layers, in one history
+edit. Moving an unlinked layer does not move that set. A single enabled toggle
+stays enabled. Snapping/alignment use the active layer's geometry.
+New Drop Shadow layers attach directionally to their source without changing
+movement toggles. A source move includes its attached shadows and descendants;
+moving a shadow directly adjusts its own position without pulling its source.
+The adjusted relative offset is preserved on future source moves. Followers are
+included once, even when also explicitly linked. Following an attachment does
+not expand the movement set through that follower's manual links. Shadow rows
+show their source beneath the name; Layer/context menu → Detach from Source
+makes them independent. Attachments do not regenerate shadow pixels after source
+edits. Any participating position lock or offset overflow blocks the entire move;
+pointer/nudge attempts name the locked layer.
+Row metadata toggles target stable tab/layer IDs without changing the active
+layer and finish typed geometry/text first. Links and attachments are saved,
+undoable project metadata. Duplicates start unlinked and unattached. Deletion/crop
+prune missing endpoints; Merge Down detaches both inputs and the result while
+preserving unrelated memberships/attachments. Individual scaling, rotation,
+pixel edits, opacity, visibility, and stacking stay independent. Image-wide
+transforms still affect all layers.
+Right-click selects the target row and opens a compact context menu containing
+Rename, Duplicate, Delete, Alpha Lock, and relevant Rasterize Text/Detach from
+Source actions. Broader transforms, alignment, masks, and effect actions stay in
+the application menu/panel. Visibility, position lock, and movement link stay in
+the row and application menu. Disabled context actions have reason tooltips.
+The popup supports arrows, Home/End, Return, Escape, and scrolling.
+It finishes numeric/text edits first, waits for the selected
+layer's rendered handlers, and validates stable IDs/generation before dispatch.
+Deactivation, outside clicks, and stale target state dismiss it. Delete remains
+available below the layer list.
 The Layer menu can align a layer, proportionally Fit Layer to Canvas, or crop
 it to its opaque pixels. Fit Layer to Canvas also appears in Scale Layer options,
 scales the complete raster (including transparent margins), and centers it. It
@@ -687,8 +706,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
   It handles crop, layer-local bucket fill, layer offsets, content crops, and outline strokes.
-  `src/document/links.rs` owns disjoint stable-ID movement groups, membership
-  validation, atomic checked translations, and pruning. `set_offset` stays the
+  `src/document/links.rs` owns the stable-ID movement set, directional shadow
+  attachments, validation, atomic checked translations, and pruning. `set_offset` stays the
   single-layer primitive for transforms; user moves and alignment use
   `move_linked_layers`. Composite dirtiness covers all visible members' old/new
   bounds and retains shared pixels and thumbnails.
@@ -709,7 +728,7 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   and is now a direct dependency for these grapheme and word boundaries.
   `src/workspace/text_ui.rs` edits that draft, commits it when the session
   ends, and draws the font picker and style options.
-- `src/project.rs` reads project versions 6, 7, 8, and 9 and applies the same size limits
+- `src/project.rs` reads project versions 6 through 10 and applies the same size limits
   in both directions. Any layer lock requires version 8 with an optional per-layer
   `locks` object. Missing flags default to false; unlocked layers omit the object.
   Without version 9 metadata or locks, projects containing guides write version 7; without guides
@@ -727,10 +746,14 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   follow their layer PNG in `RasterLayer::storage` order, and all decoded buffers
   count toward the aggregate limit. Lower feature-free versions still write as
   before. `v9-capabilities.lime` covers the new fields and payload ordering.
-  Top-level `layer_links` is omitted when empty and requires version 9. Groups
-  contain at least two existing IDs with no duplicate or overlapping membership;
-  reader validation runs before pixel decoding. Link-free projects retain the
-  earlier writer version when their other metadata permits it.
+  Version 10 stores the explicit movement set and directional shadow attachments.
+  Top-level `layer_links` retains its historical array-of-arrays shape but permits
+  at most one nonempty set, including a singleton. `shadow_attachments` contains
+  child/source ID pairs. Both fields omit empty values. Readers validate existing
+  IDs, unique memberships/children, and acyclic attachments before decoding pixels.
+  Version 9's disjoint groups migrate into one movement set; shadows in older
+  projects remain manual links, with no inferred attachments. Link/attachment-free
+  projects retain earlier writer versions when their other metadata permits it.
   Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.
 - `src/pdf/pages.rs` parses bounded page-list expressions after checking source
@@ -1039,7 +1062,7 @@ app icons; they are source assets, not generated leftovers.
   cap at 1024 pixels per edge;
   scale sampling uses pixel centers. Warp previews bake transformed masks before
   compositing; other sprite previews sample their linked mask in local coordinates.
-  Linked Move previews use the same coalesced bounded full-stack compositor even
+  Linked/attached Move previews use the same coalesced bounded full-stack compositor even
   for Normal stacks, translating an immutable content snapshot so intervening
   unlinked layers, masks, blend modes, and opacity retain their stacking behavior.
 - `RasterLayer.mask` stores optional same-size straight RGBA coverage in alpha.

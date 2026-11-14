@@ -159,8 +159,8 @@ pub(super) enum LayerCommand {
     Lower,
     AlphaLock,
     PositionLock,
-    LinkBelow,
-    Unlink,
+    Link,
+    DetachShadow,
     EditEffect,
     RemoveEffect,
     BakeEffect,
@@ -259,16 +259,8 @@ impl Workspace {
         let count = content.layers().len();
         let index = content.layer_index(tab.active_layer);
         match command {
-            LayerCommand::LinkBelow => {
-                index
-                    .and_then(|index| index.checked_sub(1))
-                    .is_some_and(|below| {
-                        !content
-                            .linked_layers(tab.active_layer)
-                            .contains(&content.layers()[below].id)
-                    })
-            }
-            LayerCommand::Unlink => !content.linked_layers(tab.active_layer).is_empty(),
+            LayerCommand::Link => true,
+            LayerCommand::DetachShadow => content.shadow_source(tab.active_layer).is_some(),
             LayerCommand::AlphaLock => content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.text.is_none()),
@@ -360,8 +352,8 @@ impl Workspace {
         let root = self.bind::<RaiseLayer>(root, LayerCommand::Raise, cx);
         let root = self.bind::<LowerLayer>(root, LayerCommand::Lower, cx);
         let root = self.bind::<ToggleAlphaLock>(root, LayerCommand::AlphaLock, cx);
-        let root = self.bind::<crate::commands::LinkLayerBelow>(root, LayerCommand::LinkBelow, cx);
-        let root = self.bind::<crate::commands::UnlinkLayer>(root, LayerCommand::Unlink, cx);
+        let root = self.bind::<crate::commands::ToggleLayerLink>(root, LayerCommand::Link, cx);
+        let root = self.bind::<crate::commands::DetachShadow>(root, LayerCommand::DetachShadow, cx);
         self.bind::<TogglePositionLock>(root, LayerCommand::PositionLock, cx)
     }
 
@@ -434,8 +426,8 @@ impl Workspace {
             ),
             LayerCommand::AlphaLock
             | LayerCommand::PositionLock
-            | LayerCommand::LinkBelow
-            | LayerCommand::Unlink => {
+            | LayerCommand::Link
+            | LayerCommand::DetachShadow => {
                 self.edit_layer_metadata(tab_id, id, command, window, cx);
             }
             LayerCommand::New => self.new_layer_form(window, cx),
@@ -531,7 +523,12 @@ impl Workspace {
         );
     }
 
-    fn select_layer(&mut self, id: LayerId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_layer(
+        &mut self,
+        id: LayerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_tab().is_some_and(|tab| tab.active_layer != id)
             && self.finish_text(window, cx)
         {
@@ -577,8 +574,8 @@ impl Workspace {
                 command,
                 LayerCommand::AlphaLock
                     | LayerCommand::PositionLock
-                    | LayerCommand::LinkBelow
-                    | LayerCommand::Unlink
+                    | LayerCommand::Link
+                    | LayerCommand::DetachShadow
             )
         {
             return;
@@ -603,19 +600,14 @@ impl Workspace {
         let Some(layer) = self.active_document().and_then(|doc| doc.content.layer(id)) else {
             return;
         };
-        if matches!(command, LayerCommand::LinkBelow | LayerCommand::Unlink) {
+        if matches!(command, LayerCommand::Link | LayerCommand::DetachShadow) {
             self.cancel_move(window, cx);
             self.edit_content(
                 move |content, _, _| {
-                    if command == LayerCommand::Unlink {
-                        content.unlink_layer(id)
-                    } else if let Some(below) = content
-                        .layer_index(id)
-                        .and_then(|index| index.checked_sub(1))
-                    {
-                        content.link_layers(id, content.layers()[below].id)
+                    if command == LayerCommand::DetachShadow {
+                        content.detach_shadow(id)
                     } else {
-                        Dirty::None
+                        content.set_layer_linked(id, content.linked_layers(id).is_empty())
                     }
                 },
                 window,
@@ -778,6 +770,7 @@ impl Workspace {
         let rows = layers.iter().enumerate().rev().map(|(index, layer)| {
             let id = layer.id;
             let active = id == tab.active_layer;
+            let position_locked = layer.locks.position;
             let name: SharedString = layer.name.clone().into();
             let title: SharedString = if layer.text.is_some() {
                 format!("{name} · Text").into()
@@ -803,6 +796,10 @@ impl Workspace {
                     if event.click_count() == 2 {
                         this.run_layer_command(LayerCommand::Rename, window, cx);
                     }
+                }))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_layer_context_menu(tab_id, id, event.position, window, cx);
                 }))
                 .on_drag(
                     DraggedLayer {
@@ -848,46 +845,37 @@ impl Workspace {
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(rgb(if layer.visible { TEXT } else { MUTED }))
-                        .child(title),
+                        .child(title)
+                        .when_some(content.shadow_source(id).and_then(|source| content.layer(source)), |label, source| {
+                            label.child(div().id(("shadow-attachment", id.0 as usize)).text_size(px(10.)).text_color(rgb(MUTED))
+                                .child(format!("↳ {}", source.name))
+                                .tooltip(tooltip("Attached shadow — follows its source; drag the shadow to adjust its offset")))
+                        }),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .flex_shrink_0()
-                        .when(!content.linked_layers(id).is_empty(), |controls| {
-                            controls.child(
-                                div()
-                                    .id(("layer-unlink", id.0 as usize))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(24.))
-                                    .rounded_sm()
-                                    .text_color(rgb(ACCENT))
-                                    .tooltip(tooltip("Unlink layer — linked layers move together"))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .when(locks_enabled, |button| {
-                                        button
-                                            .cursor_pointer()
-                                            .hover(|button| button.bg(rgb(HOVER)))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.edit_layer_metadata(
-                                                    tab_id,
-                                                    id,
-                                                    LayerCommand::Unlink,
-                                                    window,
-                                                    cx,
-                                                );
-                                            }))
-                                    })
-                                    .when(!locks_enabled, |button| button.opacity(0.45))
-                                    .child(icon("link", 14.)),
-                            )
-                        })
+                        .child(
+                            div()
+                                .id(("layer-link", id.0 as usize))
+                                .flex().items_center().justify_center()
+                                .size(px(24.)).rounded_sm()
+                                .text_color(rgb(if content.linked_layers(id).is_empty() { DISABLED } else { ACCENT }))
+                                .tooltip(tooltip(if content.linked_layers(id).is_empty() {
+                                    "Link movement — enabled layers move together"
+                                } else { "Unlink movement" }))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .when(locks_enabled, |button| button.cursor_pointer()
+                                    .hover(|button| button.bg(rgb(HOVER)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.edit_layer_metadata(tab_id, id, LayerCommand::Link, window, cx);
+                                    })))
+                                .when(!locks_enabled, |button| button.opacity(0.45))
+                                .child(icon("link", 14.)),
+                        )
                         .child(
                             div()
                                 .id(("layer-visibility", id.0 as usize))
@@ -910,72 +898,22 @@ impl Workspace {
                                 }))
                                 .child(icon(if layer.visible { "eye" } else { "eye-off" }, 14.)),
                         )
-                        .children(
-                            [
-                                ("lock-alpha", LayerCommand::AlphaLock, layer.locks.alpha),
-                                (
-                                    "lock-position",
-                                    LayerCommand::PositionLock,
-                                    layer.locks.position,
-                                ),
-                            ]
-                            .map(|(symbol, command, locked)| {
-                                let alpha = command == LayerCommand::AlphaLock;
-                                let enabled = locks_enabled && (!alpha || layer.text.is_none());
-                                let label = match (alpha, locked, layer.text.is_some()) {
-                                    (true, _, true) => "Lock Alpha — rasterize text first",
-                                    (true, true, _) => "Unlock Alpha — transparency is protected",
-                                    (true, false, _) => "Lock Alpha — preserve transparency",
-                                    (false, true, _) => {
-                                        "Unlock Position — moves and transforms are blocked"
-                                    }
-                                    (false, false, _) => {
-                                        "Lock Position — prevent moves and transforms"
-                                    }
-                                };
-                                div()
-                                    .id((symbol, id.0 as usize))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(24.))
-                                    .rounded_sm()
-                                    .text_color(rgb(if locked { ACCENT } else { DISABLED }))
-                                    .tooltip(tooltip(label))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
+                        .child(
+                            div().id(("lock-position", id.0 as usize))
+                                .flex().items_center().justify_center().size(px(24.)).rounded_sm()
+                                .text_color(rgb(if layer.locks.position { ACCENT } else { DISABLED }))
+                                .tooltip(tooltip(if layer.locks.position {
+                                    "Unlock Position — moves and transforms are blocked"
+                                } else { "Lock Position — prevent moves and transforms" }))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .when(locks_enabled, |button| button.cursor_pointer()
+                                    .hover(move |button| button.bg(rgb(HOVER)).text_color(rgb(if position_locked { ACCENT } else { TEXT })))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
-                                        if enabled {
-                                            this.edit_layer_metadata(
-                                                tab_id, id, command, window, cx,
-                                            );
-                                        }
-                                    }))
-                                    .when(enabled, |button| {
-                                        button.cursor_pointer().hover(|button| {
-                                            button.bg(rgb(HOVER)).text_color(rgb(if locked {
-                                                ACCENT
-                                            } else {
-                                                TEXT
-                                            }))
-                                        })
-                                    })
-                                    .when(!enabled, |button| {
-                                        button.opacity(0.45).cursor(CursorStyle::Arrow)
-                                    })
-                                    .child(icon(
-                                        if locked {
-                                            symbol
-                                        } else if alpha {
-                                            "unlock-alpha"
-                                        } else {
-                                            "unlock-position"
-                                        },
-                                        14.,
-                                    ))
-                            }),
+                                        this.edit_layer_metadata(tab_id, id, LayerCommand::PositionLock, window, cx);
+                                    })))
+                                .when(!locks_enabled, |button| button.opacity(0.45).cursor(CursorStyle::Arrow))
+                                .child(icon(if layer.locks.position { "lock-position" } else { "unlock-position" }, 14.)),
                         ),
                 )
         });
@@ -1544,7 +1482,16 @@ impl Workspace {
             return;
         };
         if !tab.document.content.can_move_linked(layer.id) {
-            tab.notice = Some("Unlock the position of every linked layer before moving.".into());
+            let name = tab
+                .document
+                .content
+                .move_blocker(layer.id)
+                .and_then(|id| tab.document.content.layer(id))
+                .map(|layer| layer.name.as_str())
+                .unwrap_or("Layer");
+            tab.notice = Some(format!(
+                "Unlock Position on \"{name}\" before moving these layers."
+            ));
             cx.notify();
             return;
         }
@@ -1573,7 +1520,7 @@ impl Workspace {
             input,
         });
         let job = cx.background_executor().spawn(async move {
-            let (below, above) = if content.linked_layers(id).is_empty() {
+            let (below, above) = if content.movement_layers(id).len() == 1 {
                 content.preview_around(id)
             } else {
                 (None, None)

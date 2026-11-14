@@ -519,6 +519,7 @@ impl Render for Workspace {
             .child(self.status_bar(cx))
             .children(self.form_overlay(window, cx))
             .children(self.pdf_progress_overlay(cx))
+            .children(self.layer_context_overlay(window, cx))
             .map(|root| self.bind_tool_reset_actions(root, cx))
             .map(|root| {
                 #[cfg(any(target_os = "linux", test))]
