@@ -447,8 +447,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.flush_settings(window, cx);
-        if self.settings_store.defer_exit(quit) {
+        if self.defer_settings_exit(quit, window, cx) {
             return false;
         }
         if self.gradient_store.saving {

@@ -101,6 +101,12 @@ pub(super) struct Preferences {
 }
 
 impl Preferences {
+    pub(super) fn reconcile_last(&mut self) {
+        // `last` identifies a slot. Its duplicated parameters must follow the
+        // winning complete slot value when another instance updates that effect.
+        self.last = self.last.and_then(|effect| self.values[effect.slot()]);
+    }
+
     pub(super) fn valid(&self) -> bool {
         self.values.iter().enumerate().all(|(slot, effect)| {
             effect.is_none_or(|effect| {

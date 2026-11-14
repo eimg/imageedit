@@ -13,6 +13,14 @@ const MAX_BYTES: u64 = 128 * 1024;
 
 pub trait Preferences: Default + Serialize + DeserializeOwned {
     fn validate(&self) -> Result<()>;
+
+    /// Paths in each group are replaced together, never merged by JSON leaf.
+    fn merge_groups() -> &'static [&'static [&'static str]] {
+        &[]
+    }
+
+    /// Restore derived references after merging independently remembered values.
+    fn reconcile_patch(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -61,8 +69,33 @@ impl Patch {
         let Value::Object(after) = serde_json::to_value(after)? else {
             anyhow::bail!("Settings must be an object.");
         };
-        for (key, value) in after {
-            diff(self, &key, before.get(&key).unwrap_or(&Value::Null), &value);
+        for (key, value) in &after {
+            diff(self, key, before.get(key).unwrap_or(&Value::Null), value);
+        }
+        let before = Value::Object(before);
+        let after = Value::Object(after);
+        for group in P::merge_groups() {
+            if group.iter().any(|path| {
+                before.pointer(&format!("/{path}")) != after.pointer(&format!("/{path}"))
+            }) {
+                self.replace_values(&after, group)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record an explicit operation, including values already at their defaults
+    /// locally that another instance may have changed on disk.
+    pub fn replace<P: Preferences>(&mut self, preferences: &P, paths: &[&str]) -> Result<()> {
+        self.replace_values(&serde_json::to_value(preferences)?, paths)
+    }
+
+    fn replace_values(&mut self, value: &Value, paths: &[&str]) -> Result<()> {
+        for path in paths {
+            let replacement = value
+                .pointer(&format!("/{path}"))
+                .with_context(|| format!("Unknown preference: {path}"))?;
+            self.insert((*path).to_owned(), replacement.clone());
         }
         Ok(())
     }
@@ -75,7 +108,8 @@ impl Patch {
                 .with_context(|| format!("Unknown preference: {path}"))?;
             *target = replacement.clone();
         }
-        let preferences: P = serde_json::from_value(value)?;
+        let mut preferences: P = serde_json::from_value(value)?;
+        preferences.reconcile_patch();
         preferences.validate()?;
         snapshot.preferences = preferences;
         snapshot.colors.apply(&self.colors);
@@ -165,7 +199,7 @@ pub fn save<P: Preferences>(path: &Path, patch: &Patch) -> Result<Snapshot<P>> {
         .truncate(false)
         .open(path.with_extension("lock"))?;
     lock.try_lock()
-        .context("Another Lime instance is saving settings. Change a setting to retry")?;
+        .context("Another Lime instance is saving settings")?;
     let mut snapshot = load::<P>(path)?;
     patch.apply(&mut snapshot)?;
     let bytes = serde_json::to_vec_pretty(&WireSettings {

@@ -60,6 +60,8 @@ resize it from its handles, and edit X, Y, Width, and Height in the Crop
 options. Typed values apply immediately, and an empty field leaves the crop
 unchanged. Crop drags may start outside the canvas; both creation endpoints clamp
 to image pixels so free and fixed-ratio crop boxes stay inside the image.
+Creation waits until the drag area overlaps the image; a wholly outside drag
+leaves the existing crop unchanged.
 Crop has Free, 1:1, 4:3, 16:9, Image, and custom integer aspect ratios. A fixed
 ratio constrains creation, handle resize, and numeric dimension edits; choosing
 a ratio alone leaves the current box unchanged. Sample or set swatches and fill
@@ -898,12 +900,18 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   stay in their separate library. Effect job order, pending document contexts,
   selection masks, document coordinates, and transform drafts are never saved.
   Settings load/save uses background jobs and 250 ms coalescing. Early/in-flight
-  edits replay over loads; writes merge only changed preference fields (including per-tool brush fields)
-  and RGB edits over the current disk state. Numeric previews and live toolbox
-  widths save only after their normal commit. Failed writes retain queued values,
-  report an error, and retry on the next preference change. Close/Quit flushes
-  outstanding settings before normal unsaved-image handling. Preference changes
-  never dirty a document or enter its undo history.
+  edits replay over loads; writes merge changed preference fields (including
+  per-tool brush fields) and RGB edits over the current disk state. Optional
+  ratios and complete effect slots replace atomically; the current gradient's
+  palette/mode/selection/shape/direction replace as one group. Last Effect follows
+  the winning complete slot parameters, preserving other remembered effects.
+  Numeric previews and live toolbox widths save only after their normal commit.
+  Failed writes retain queued values and report an error; a preference change,
+  explicit reset, or Close/Quit retries even without a new local value change.
+  Close/Quit flushes outstanding settings before normal unsaved-image handling.
+  If that retry fails, the error explains that another explicit Close/Quit can
+  exit without saving preferences; changes/resets enable another save attempt.
+  Preference changes never dirty a document or enter its undo history.
   `src/workspace/tool_reset.rs` owns current/all-tool reset scopes and availability.
   Tool Options has a reset arrow; Tools has Reset Current Tool and confirmed
   Reset All Tool Settings. Shared tool options reset together (geometric ratio/AA,
@@ -915,8 +923,10 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   editing, gestures, and pending previews. The header consumes mouse-down even
   while disabled so it cannot commit a field through the root handler. Reset
   changes only preferences, uses Clone's existing sampling/alignment invalidation,
-  and flushes settings immediately. It never commits, cancels, or applies an image
-  edit; existing selections/text/layers and their history remain untouched.
+  and flushes settings immediately. Reset writes its entire scope, including
+  locally unchanged defaults that another instance may have changed on disk.
+  It never commits, cancels, or applies an image edit; existing selections/text/
+  layers and their history remain untouched.
   `src/workspace/dialogs/pdf_input.rs` maps PDF input pointer positions through
   the current shaped font, field padding, and horizontal scroll offset. The modal
   owns the drag through mouse-up so selection can extend beyond the field. UTF-8

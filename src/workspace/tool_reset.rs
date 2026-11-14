@@ -1,5 +1,6 @@
 use super::{Workspace, settings_ui::Preferences};
 use crate::commands::{ResetAllTools, ResetCurrentTool, TOOL_GROUPS, Tool};
+use crate::settings::Patch;
 use gpui::{Context, Div, PromptButton, PromptLevel, Window, prelude::*};
 
 fn has_options(tool: Tool) -> bool {
@@ -9,41 +10,48 @@ fn has_options(tool: Tool) -> bool {
 impl Preferences {
     /// Only personal tool options belong here. This operation has no access to
     /// documents, color memory, gradient libraries, or active editing sessions.
-    pub(super) fn reset_tool(&mut self, tool: Tool) {
+    pub(super) fn reset_tool(&mut self, tool: Tool) -> Vec<&'static str> {
         let defaults = Self::default();
+        let mut paths = Vec::new();
+        macro_rules! reset {
+            ($field:ident) => {{
+                self.$field = defaults.$field;
+                paths.push(stringify!($field));
+            }};
+        }
         match tool {
             Tool::Move => {
-                self.snap_grid = defaults.snap_grid;
-                self.snap_guides = defaults.snap_guides;
-                self.grid_spacing = defaults.grid_spacing;
+                reset!(snap_grid);
+                reset!(snap_guides);
+                reset!(grid_spacing);
             }
             Tool::Select | Tool::OvalSelect => {
-                self.selection_ratio = defaults.selection_ratio;
-                self.selection_ratio_value = defaults.selection_ratio_value;
-                self.selection_antialias = defaults.selection_antialias;
+                reset!(selection_ratio);
+                reset!(selection_ratio_value);
+                reset!(selection_antialias);
                 if tool == Tool::Select {
-                    self.selection_radius = defaults.selection_radius;
+                    reset!(selection_radius);
                 } else {
-                    self.oval_circle = defaults.oval_circle;
+                    reset!(oval_circle);
                 }
             }
-            Tool::FreeSelect => self.free_antialias = defaults.free_antialias,
+            Tool::FreeSelect => reset!(free_antialias),
             Tool::MagicWand => {
-                self.wand_match = defaults.wand_match;
-                self.wand_sample_all = defaults.wand_sample_all;
-                self.wand_antialias = defaults.wand_antialias;
+                reset!(wand_match);
+                reset!(wand_sample_all);
+                reset!(wand_antialias);
             }
             Tool::Crop => {
-                self.crop_ratio = defaults.crop_ratio;
-                self.crop_ratio_value = defaults.crop_ratio_value;
+                reset!(crop_ratio);
+                reset!(crop_ratio_value);
             }
             Tool::ScaleLayer => {
-                self.scale_lock = defaults.scale_lock;
-                self.scale_anchor = defaults.scale_anchor;
-                self.warp_resample = defaults.warp_resample;
+                reset!(scale_lock);
+                reset!(scale_anchor);
+                reset!(warp_resample);
             }
             Tool::Rotate | Tool::Flip | Tool::Perspective => {
-                self.warp_resample = defaults.warp_resample
+                reset!(warp_resample)
             }
             Tool::Pencil
             | Tool::Brush
@@ -51,32 +59,32 @@ impl Preferences {
             | Tool::Blur
             | Tool::Sharpen
             | Tool::CloneStamp => {
-                self.brushes.reset_tool(tool);
+                paths.extend(self.brushes.reset_tool(tool));
                 if tool == Tool::CloneStamp {
-                    self.clone_aligned = defaults.clone_aligned;
-                    self.clone_sample_all = defaults.clone_sample_all;
-                    self.clone_show_source = defaults.clone_show_source;
+                    reset!(clone_aligned);
+                    reset!(clone_sample_all);
+                    reset!(clone_show_source);
                 }
             }
             Tool::BucketFill => {
-                self.fill_mode = defaults.fill_mode;
-                self.fill_match = defaults.fill_match;
-                self.sample_all = defaults.sample_all;
+                reset!(fill_mode);
+                reset!(fill_match);
+                reset!(sample_all);
             }
             Tool::Gradient => {
-                self.gradient_shape = defaults.gradient_shape;
-                self.gradient_blend = defaults.gradient_blend;
-                self.gradient_custom = defaults.gradient_custom;
-                self.gradient_use_custom = defaults.gradient_use_custom;
-                self.gradient_reverse = defaults.gradient_reverse;
-                self.gradient_selected_stop = defaults.gradient_selected_stop;
-                self.gradient_selected_preset = defaults.gradient_selected_preset;
+                reset!(gradient_shape);
+                reset!(gradient_blend);
+                reset!(gradient_custom);
+                reset!(gradient_use_custom);
+                reset!(gradient_reverse);
+                reset!(gradient_selected_stop);
+                reset!(gradient_selected_preset);
             }
-            Tool::Text => self.text_defaults = defaults.text_defaults,
+            Tool::Text => reset!(text_defaults),
             Tool::Path => {
-                self.path_handle_mode = defaults.path_handle_mode;
-                self.path_stroke_style = defaults.path_stroke_style;
-                self.brushes.reset_tool(tool);
+                reset!(path_handle_mode);
+                reset!(path_stroke_style);
+                paths.extend(self.brushes.reset_tool(tool));
             }
             Tool::Pan | Tool::Zoom | Tool::Eyedropper => {}
         }
@@ -84,17 +92,20 @@ impl Preferences {
             tool,
             Tool::Select | Tool::OvalSelect | Tool::FreeSelect | Tool::MagicWand
         ) {
-            self.selection_feather_enabled = defaults.selection_feather_enabled;
-            self.selection_feather_radius = defaults.selection_feather_radius;
+            reset!(selection_feather_enabled);
+            reset!(selection_feather_radius);
         }
+        paths
     }
 
-    pub(super) fn reset_all_tools(&mut self) {
+    pub(super) fn reset_all_tools(&mut self) -> Vec<&'static str> {
+        let mut paths = Vec::new();
         for (_, tools) in TOOL_GROUPS {
             for &tool in *tools {
-                self.reset_tool(tool);
+                paths.extend(self.reset_tool(tool));
             }
         }
+        paths
     }
 }
 
@@ -174,11 +185,21 @@ impl Workspace {
             return;
         }
         let mut candidate = self.preferences.clone();
-        if all {
-            candidate.reset_all_tools();
+        let paths = if all {
+            candidate.reset_all_tools()
         } else {
-            candidate.reset_tool(self.preferences.tool);
+            candidate.reset_tool(self.preferences.tool)
+        };
+        let mut reset = Patch::default();
+        if let Err(error) = reset.replace(&candidate, &paths) {
+            self.errors
+                .push(format!("Could not reset tool settings: {error:#}"));
+            return;
         }
+        // Preserve other changes before the explicit reset replaces its entire
+        // scope, including queued leaves and locally unchanged default values.
+        self.sync_settings(window, cx);
+        self.queue_settings_patch(&reset);
         // Use Clone's existing source/alignment invalidation rules. Raster data
         // and the chosen source remain intact when its policy is unchanged.
         self.set_clone_sampling(candidate.clone_sample_all, cx);
@@ -316,6 +337,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_resets_include_locally_default_values_changed_by_another_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let defaults = Preferences::default();
+        let remote = configured();
+        let scopes = TOOL_GROUPS
+            .iter()
+            .flat_map(|(_, tools)| tools.iter().copied().map(Some))
+            .chain(std::iter::once(None));
+        for scope in scopes {
+            let mut initial = Patch {
+                colors: Changes::color(0x123456),
+                ..Default::default()
+            };
+            initial.record(&defaults, &remote).unwrap();
+            settings::save::<Preferences>(&path, &initial).unwrap();
+            let mut candidate = defaults.clone();
+            let mut expected = remote.clone();
+            let paths = if let Some(tool) = scope {
+                expected.reset_tool(tool);
+                candidate.reset_tool(tool)
+            } else {
+                expected.reset_all_tools();
+                candidate.reset_all_tools()
+            };
+            let mut reset = Patch::default();
+            reset.replace(&candidate, &paths).unwrap();
+            // Include an older queued leaf edit so an explicit reset must
+            // supersede it rather than letting it override the reset later.
+            let mut pending = Patch::default();
+            if scope == Some(Tool::Brush) || scope.is_none() {
+                pending
+                    .preferences
+                    .insert("brushes/brush/diameter".into(), json!(93));
+            }
+            pending.merge(&reset);
+            let saved = settings::save::<Preferences>(&path, &pending).unwrap();
+            assert!(saved.preferences == expected, "reset scope {scope:?}");
+            assert!(saved.colors.recent.contains(&0x123456));
+            let restarted = settings::load::<Preferences>(&path).unwrap();
+            assert!(restarted.preferences == expected, "restart scope {scope:?}");
+        }
+    }
+
+    #[test]
     fn resets_survive_restart_and_preserve_colors_and_saved_gradients() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -343,13 +409,13 @@ mod tests {
         let original = settings::save::<Preferences>(&path, &first).unwrap();
         for all in [false, true] {
             let mut candidate = before.clone();
-            if all {
-                candidate.reset_all_tools();
+            let paths = if all {
+                candidate.reset_all_tools()
             } else {
-                candidate.reset_tool(Tool::Gradient);
-            }
+                candidate.reset_tool(Tool::Gradient)
+            };
             let mut patch = Patch::default();
-            patch.record(&before, &candidate).unwrap();
+            patch.replace(&candidate, &paths).unwrap();
             settings::save::<Preferences>(&path, &patch).unwrap();
             let loaded = settings::load::<Preferences>(&path).unwrap();
             assert_eq!(loaded.colors, original.colors);

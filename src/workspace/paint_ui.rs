@@ -169,9 +169,18 @@ impl Default for BrushSettings {
 }
 
 impl BrushSettings {
-    pub(super) fn reset_tool(&mut self, tool: Tool) {
+    pub(super) fn reset_tool(&mut self, tool: Tool) -> &'static [&'static str] {
         *self.get_mut(tool) = *Self::default().get(tool);
         self.set_smoothing(tool, Smoothing::Off);
+        match tool {
+            Tool::Pencil => &["brushes/pencil"],
+            Tool::Brush => &["brushes/brush", "brushes/smoothing/0"],
+            Tool::Eraser => &["brushes/eraser", "brushes/smoothing/1"],
+            Tool::Blur => &["brushes/blur", "brushes/smoothing/2"],
+            Tool::Sharpen => &["brushes/sharpen", "brushes/smoothing/3"],
+            Tool::CloneStamp => &["brushes/clone_stamp", "brushes/smoothing/4"],
+            _ => &["brushes/outline"],
+        }
     }
 
     pub(super) fn valid(&self) -> bool {

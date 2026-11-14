@@ -44,6 +44,7 @@ Open an image or PDF, or create a new image. Choose a tool and adjust its option
 beside the canvas. Hover the **?** for gestures and shortcuts.
 
 Crop and paint strokes can start outside the canvas; crop stays within the image.
+Crop ignores drags whose area stays entirely outside the image.
 The status bar shows the current app version.
 
 Use the reset arrow in **Tool Options** or **Tools → Reset Current Tool** to restore

@@ -242,7 +242,6 @@ impl Workspace {
                     })
             }
             Some((_, CropHit::Outside)) | None => {
-                self.clear_crop();
                 self.canvas_pixel(position, scale, true)
                     .map(|start| CropDrag::Create {
                         origin: position,
@@ -268,26 +267,40 @@ impl Workspace {
         };
         let crop = match drag {
             CropDrag::Create { origin, start } => {
-                let delta = position - origin;
-                self.canvas_pixel(position, scale, true)
-                    .filter(|_| f32::from(delta.x).abs().max(f32::from(delta.y).abs()) >= 3.)
-                    .map(|end| {
-                        if let Some(ratio) = self.preferences.crop_ratio {
-                            let rect = ratio.drag(
-                                (i64::from(start.0), i64::from(start.1)),
-                                (i64::from(end.0), i64::from(end.1)),
-                                Some((canvas_width, canvas_height)),
-                            );
-                            CropRect {
-                                x: rect.x as u32,
-                                y: rect.y as u32,
-                                width: rect.width,
-                                height: rect.height,
-                            }
-                        } else {
-                            CropRect::between(start, end)
-                        }
+                let viewport = self.viewport.get();
+                let Some(end) = self
+                    .active_tab()
+                    .and_then(|tab| PreviewGeometry::for_tab(tab, viewport, scale))
+                    .and_then(|geometry| {
+                        geometry.crop_drag_end(
+                            origin,
+                            position,
+                            viewport,
+                            (canvas_width, canvas_height),
+                        )
                     })
+                else {
+                    // Keep the previous box until a meaningful drag overlaps
+                    // the image instead of manufacturing an edge-pixel crop.
+                    return;
+                };
+                Some({
+                    if let Some(ratio) = self.preferences.crop_ratio {
+                        let rect = ratio.drag(
+                            (i64::from(start.0), i64::from(start.1)),
+                            (i64::from(end.0), i64::from(end.1)),
+                            Some((canvas_width, canvas_height)),
+                        );
+                        CropRect {
+                            x: rect.x as u32,
+                            y: rect.y as u32,
+                            width: rect.width,
+                            height: rect.height,
+                        }
+                    } else {
+                        CropRect::between(start, end)
+                    }
+                })
             }
             CropDrag::Move { crop, grab } => self
                 .canvas_pixel(position, scale, true)
@@ -691,6 +704,25 @@ impl PreviewGeometry {
         Some((pixel(fraction.x, canvas.0), pixel(fraction.y, canvas.1)))
     }
 
+    fn crop_drag_end(
+        &self,
+        origin: Point<Pixels>,
+        end: Point<Pixels>,
+        viewport: Bounds<Pixels>,
+        canvas: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        let delta = end - origin;
+        if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 3.
+            || origin.x.max(end.x) < self.bounds.left()
+            || origin.x.min(end.x) >= self.bounds.right()
+            || origin.y.max(end.y) < self.bounds.top()
+            || origin.y.min(end.y) >= self.bounds.bottom()
+        {
+            return None;
+        }
+        self.canvas_pixel(end, viewport, canvas, true)
+    }
+
     pub(super) fn project(&self, fraction: Point<f32>) -> Point<Pixels> {
         self.bounds.origin
             + point(
@@ -760,6 +792,70 @@ mod tests {
             assert_eq!(
                 geometry.canvas_pixel(outside, viewport, canvas, true),
                 Some((0, 0))
+            );
+        }
+    }
+
+    #[test]
+    fn crop_creation_ignores_wholly_outside_drags_and_accepts_crossing_drags() {
+        let canvas = (100, 80);
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        for scale in [1., 2.] {
+            let geometry =
+                PreviewGeometry::new(100, 80, Zoom::Percent(100.), viewport, scale).unwrap();
+            for (start, end) in [
+                ((-0.5, -0.5), (-0.1, -0.1)),
+                ((-0.5, 0.2), (-0.1, 0.8)),
+                ((1.1, 0.2), (1.5, 0.8)),
+                ((0.2, -0.5), (0.8, -0.1)),
+                ((0.2, 1.1), (0.8, 1.5)),
+            ] {
+                assert_eq!(
+                    geometry.crop_drag_end(
+                        geometry.project(point(start.0, start.1)),
+                        geometry.project(point(end.0, end.1)),
+                        viewport,
+                        canvas
+                    ),
+                    None
+                );
+            }
+            for (start, end) in [
+                ((-0.5, -0.5), (0.5, 0.5)),
+                ((1.5, 1.5), (0.5, 0.5)),
+                ((-0.5, -0.5), (1.5, 1.5)),
+                ((0.5, 0.5), (1.5, 1.5)),
+            ] {
+                let origin = geometry.project(point(start.0, start.1));
+                let start = geometry
+                    .canvas_pixel(origin, viewport, canvas, true)
+                    .unwrap();
+                let end = geometry
+                    .crop_drag_end(
+                        origin,
+                        geometry.project(point(end.0, end.1)),
+                        viewport,
+                        canvas,
+                    )
+                    .unwrap();
+                let crop = CropRect::between(start, end);
+                assert!(crop.width > 1 && crop.height > 1);
+                assert!(crop.x + crop.width <= canvas.0 && crop.y + crop.height <= canvas.1);
+                let square = crate::constraints::AspectRatio::SQUARE.drag(
+                    (i64::from(start.0), i64::from(start.1)),
+                    (i64::from(end.0), i64::from(end.1)),
+                    Some(canvas),
+                );
+                assert_eq!(square.width, square.height);
+                assert!(square.x >= 0 && square.y >= 0);
+                assert!(
+                    square.right() <= i64::from(canvas.0) && square.bottom() <= i64::from(canvas.1)
+                );
+            }
+            let origin = geometry.project(point(0.5, 0.5));
+            assert_eq!(
+                geometry.crop_drag_end(origin, origin + point(px(1.), px(1.)), viewport, canvas),
+                None
             );
         }
     }

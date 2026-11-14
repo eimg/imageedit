@@ -166,6 +166,37 @@ impl Preferences {
 }
 
 impl settings::Preferences for Preferences {
+    fn merge_groups() -> &'static [&'static [&'static str]] {
+        &[
+            &["selection_ratio"],
+            &["crop_ratio"],
+            &[
+                "gradient_custom",
+                "gradient_use_custom",
+                "gradient_selected_stop",
+                "gradient_selected_preset",
+                "gradient_shape",
+                "gradient_blend",
+                "gradient_reverse",
+            ],
+            &["effects/last"],
+            &["effects/values/0"],
+            &["effects/values/1"],
+            &["effects/values/2"],
+            &["effects/values/3"],
+            &["effects/values/4"],
+            &["effects/values/5"],
+            &["effects/values/6"],
+            &["effects/values/7"],
+            &["effects/values/8"],
+            &["effects/values/9"],
+        ]
+    }
+
+    fn reconcile_patch(&mut self) {
+        self.effects.reconcile_last();
+    }
+
     fn validate(&self) -> Result<()> {
         let ratio_valid = |ratio: crate::constraints::AspectRatio| {
             (1..=16384).contains(&ratio.width) && (1..=16384).contains(&ratio.height)
@@ -237,6 +268,7 @@ pub(super) struct Storage {
     pending: Patch,
     error_reported: bool,
     exit_after_save: Option<bool>,
+    exit_save_failed: bool,
 }
 
 impl Storage {
@@ -245,11 +277,35 @@ impl Storage {
     }
 
     pub(super) fn defer_exit(&mut self, quit: bool) -> bool {
-        if !self.loading && !self.saving && !self.timer {
+        if !self.loading
+            && !self.saving
+            && !self.timer
+            && (self.path.is_none() || self.pending.is_empty())
+        {
             return false;
         }
         self.exit_after_save = Some(quit || self.exit_after_save.unwrap_or(false));
         true
+    }
+
+    fn take_write(&mut self) -> Option<Patch> {
+        if self.loading || self.saving || self.path.is_none() || self.pending.is_empty() {
+            return None;
+        }
+        self.saving = true;
+        self.exit_save_failed = false;
+        Some(std::mem::take(&mut self.pending))
+    }
+
+    fn take_failed_exit(&mut self) -> bool {
+        std::mem::take(&mut self.exit_save_failed)
+    }
+
+    fn failed_write(&mut self, mut patch: Patch) {
+        self.saving = false;
+        patch.merge(&self.pending);
+        self.pending = patch;
+        self.exit_save_failed = self.exit_after_save.take().is_some();
     }
 }
 
@@ -330,6 +386,7 @@ impl Workspace {
         {
             Ok(()) => {
                 self.settings_store.observed = committed;
+                self.settings_store.exit_save_failed = false;
                 true
             }
             Err(error) => {
@@ -378,8 +435,30 @@ impl Workspace {
         if self.settings_store.timer {
             self.settings_store.timer = false;
             self.settings_store.token = self.settings_store.token.wrapping_add(1);
-            self.start_settings_write(window, cx);
         }
+        // A previous failure leaves pending values without an armed timer.
+        self.start_settings_write(window, cx);
+    }
+
+    pub(super) fn queue_settings_patch(&mut self, patch: &Patch) {
+        self.settings_store.pending.merge(patch);
+        self.settings_store.exit_save_failed = false;
+    }
+
+    pub(super) fn defer_settings_exit(
+        &mut self,
+        quit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.record_settings();
+        // After a failed exit-time retry, a second explicit Close/Quit may
+        // proceed. A permanently unwritable settings file must not trap users.
+        if self.settings_store.take_failed_exit() {
+            return false;
+        }
+        self.flush_settings(window, cx);
+        self.settings_store.defer_exit(quit)
     }
 
     pub(super) fn change_color_memory(
@@ -389,6 +468,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.color_memory.apply(&changes);
+        self.settings_store.exit_save_failed = false;
         self.settings_store.pending.colors.merge(&changes);
         self.record_settings();
         self.schedule_settings_write(window, cx);
@@ -415,18 +495,13 @@ impl Workspace {
     }
 
     fn start_settings_write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_store.loading
-            || self.settings_store.saving
-            || self.settings_store.pending.is_empty()
-        {
-            return;
-        }
         let Some(path) = self.settings_store.path.clone() else {
             return;
         };
-        let patch = std::mem::take(&mut self.settings_store.pending);
+        let Some(patch) = self.settings_store.take_write() else {
+            return;
+        };
         let saved = patch.clone();
-        self.settings_store.saving = true;
         let job = cx
             .background_executor()
             .spawn(async move { settings::save::<Preferences>(&path, &saved) });
@@ -443,17 +518,20 @@ impl Workspace {
                         let colors_changed = this.color_memory != snapshot.colors;
                         this.color_memory = snapshot.colors;
                         this.settings_store.error_reported = false;
+                        this.settings_store.exit_save_failed = false;
                         if colors_changed { this.refresh_gradient(window, cx); }
                         this.start_settings_write(window, cx);
                         this.finish_settings_exit(window, cx);
                     }
                     Err(error) => {
-                        let mut pending = patch;
-                        pending.merge(&this.settings_store.pending);
-                        this.settings_store.pending = pending;
-                        this.settings_store.exit_after_save = None;
-                        if !this.settings_store.error_reported {
-                            this.errors.push(format!("Could not save settings: {error:#}. Current preferences remain available; changing a setting retries saving."));
+                        this.settings_store.failed_write(patch);
+                        if !this.settings_store.error_reported || this.settings_store.exit_save_failed {
+                            let recovery = if this.settings_store.exit_save_failed {
+                                "Close or quit again to exit without saving preferences, or change/reset a setting to retry."
+                            } else {
+                                "Change or reset a setting, or close the app, to retry saving."
+                            };
+                            this.errors.push(format!("Could not save settings: {error:#}. Current preferences remain available. {recovery}"));
                             this.settings_store.error_reported = true;
                         }
                     }
@@ -753,6 +831,167 @@ pub(super) mod tests {
         pending.merge(&replace);
         let saved = settings::save::<Preferences>(&path, &pending).unwrap();
         assert!(saved.preferences == reset);
+    }
+
+    fn save_change(path: &std::path::Path, before: &Preferences, after: &Preferences) {
+        let mut patch = Patch::default();
+        patch.record(before, after).unwrap();
+        settings::save::<Preferences>(path, &patch).unwrap();
+    }
+
+    #[test]
+    fn concurrent_palette_and_optional_ratio_replacements_do_not_block_other_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let base = configured();
+        save_change(&path, &Preferences::default(), &base);
+        let mut local = base.clone();
+        local
+            .gradient_custom
+            .as_mut()
+            .unwrap()
+            .set_color(1, image::Rgba([12, 34, 56, 78]));
+        local.crop_ratio = Some(crate::constraints::AspectRatio::SQUARE);
+        local.grid_spacing = 45;
+        let mut pending = Patch::default();
+        pending.record(&base, &local).unwrap();
+        let mut other = base.clone();
+        other.reset_tool(Tool::Gradient);
+        other.reset_tool(Tool::Crop);
+        other.wand_sample_all = false;
+        save_change(&path, &base, &other);
+        let saved = settings::save::<Preferences>(&path, &pending).unwrap();
+        assert_eq!(saved.preferences.gradient_custom, local.gradient_custom);
+        assert_eq!(
+            saved.preferences.gradient_use_custom,
+            local.gradient_use_custom
+        );
+        assert_eq!(
+            saved.preferences.gradient_selected_stop,
+            local.gradient_selected_stop
+        );
+        assert_eq!(saved.preferences.crop_ratio, local.crop_ratio);
+        assert_eq!(saved.preferences.grid_spacing, 45);
+        assert!(!saved.preferences.wand_sample_all);
+        // A later reset of the whole palette also supersedes queued stop edits.
+        let mut reset = Patch::default();
+        reset.record(&local, &other).unwrap();
+        pending.merge(&reset);
+        let saved = settings::save::<Preferences>(&path, &pending).unwrap();
+        assert_eq!(saved.preferences.gradient_custom, None);
+        assert!(!saved.preferences.gradient_use_custom);
+    }
+
+    #[test]
+    fn concurrent_effect_variants_and_parameter_changes_keep_valid_complete_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut base_json = serde_json::to_value(Preferences::default()).unwrap();
+        let brightness =
+            json!({"Adjustment":{"BrightnessContrast":{"brightness":10,"contrast":0}}});
+        base_json["effects"]["values"][0] = brightness.clone();
+        base_json["effects"]["last"] = brightness;
+        let base: Preferences = serde_json::from_value(base_json.clone()).unwrap();
+        for other_effect in ["invert", "contrast"] {
+            save_change(&path, &Preferences::default(), &base);
+            let mut local_json = base_json.clone();
+            local_json["effects"]["values"][0]["Adjustment"]["BrightnessContrast"]["brightness"] =
+                json!(20);
+            local_json["effects"]["last"] = local_json["effects"]["values"][0].clone();
+            let local: Preferences = serde_json::from_value(local_json).unwrap();
+            let mut pending = Patch::default();
+            pending.record(&base, &local).unwrap();
+            pending.colors = Changes::color(0x123456);
+            let mut other_json = base_json.clone();
+            if other_effect == "invert" {
+                other_json["effects"]["values"][3] = json!({"Adjustment":"Invert"});
+                other_json["effects"]["last"] = json!({"Adjustment":"Invert"});
+            } else {
+                other_json["effects"]["values"][0]["Adjustment"]["BrightnessContrast"]["contrast"] =
+                    json!(35);
+                other_json["effects"]["last"] = other_json["effects"]["values"][0].clone();
+            }
+            let other: Preferences = serde_json::from_value(other_json).unwrap();
+            save_change(&path, &base, &other);
+            let saved = settings::save::<Preferences>(&path, &pending).unwrap();
+            saved.preferences.validate().unwrap();
+            let actual = serde_json::to_value(saved.preferences).unwrap();
+            let expected = serde_json::to_value(&local).unwrap();
+            assert_eq!(
+                actual["effects"]["values"][0],
+                expected["effects"]["values"][0]
+            );
+            assert_eq!(actual["effects"]["last"], expected["effects"]["last"]);
+            if other_effect == "invert" {
+                assert_eq!(
+                    actual["effects"]["values"][3],
+                    json!({"Adjustment":"Invert"})
+                );
+            }
+            assert!(saved.colors.recent.contains(&0x123456));
+        }
+        // A repeated choice can change only `last`; use the winning slot's
+        // parameters rather than retaining a stale duplicate in that reference.
+        let mut before = base_json.clone();
+        before["effects"]["values"][3] = json!({"Adjustment":"Invert"});
+        before["effects"]["last"] = json!({"Adjustment":"Invert"});
+        let mut after = before.clone();
+        after["effects"]["last"] = after["effects"]["values"][0].clone();
+        let before: Preferences = serde_json::from_value(before).unwrap();
+        let after: Preferences = serde_json::from_value(after).unwrap();
+        let mut repeated = Patch::default();
+        repeated.record(&before, &after).unwrap();
+        let saved = settings::save::<Preferences>(&path, &repeated).unwrap();
+        saved.preferences.validate().unwrap();
+        let actual = serde_json::to_value(saved.preferences).unwrap();
+        assert_eq!(actual["effects"]["last"], actual["effects"]["values"][0]);
+    }
+
+    #[test]
+    fn failed_reset_is_retryable_without_another_preference_change_and_defers_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let defaults = Preferences::default();
+        save_change(&path, &defaults, &configured());
+        let mut candidate = defaults.clone();
+        let paths = candidate.reset_all_tools();
+        let mut reset = Patch::default();
+        reset.replace(&candidate, &paths).unwrap();
+        let mut store = Storage {
+            path: Some(path.clone()),
+            pending: reset,
+            ..Default::default()
+        };
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let first = store.take_write().unwrap();
+        assert!(store.defer_exit(true));
+        assert!(settings::save::<Preferences>(&path, &first).is_err());
+        store.pending.colors.merge(&Changes::color(0x123456));
+        store.failed_write(first);
+        assert!(!store.timer && !store.saving);
+        assert_eq!(store.exit_after_save, None);
+        assert!(store.take_failed_exit()); // A second Close/Quit can bypass a permanent failure.
+        assert!(!store.take_failed_exit()); // The bypass applies only to that explicit request.
+        assert!(store.defer_exit(true));
+        assert!(candidate == defaults); // No new local preference difference to record.
+        drop(lock);
+        let retry = store
+            .take_write()
+            .expect("explicit flush must drain the failed queue");
+        assert!(store.take_write().is_none()); // Do not overlap an in-flight write.
+        let saved = settings::save::<Preferences>(&path, &retry).unwrap();
+        store.saving = false;
+        assert!(!store.defer_exit(true));
+        assert_eq!(saved.preferences.wand_sample_all, defaults.wand_sample_all);
+        assert_eq!(saved.preferences.gradient_custom, None);
+        assert!(saved.colors.recent.contains(&0x123456));
+        let restarted = settings::load::<Preferences>(&path).unwrap();
+        assert_eq!(restarted.preferences.grid_spacing, defaults.grid_spacing);
     }
 
     #[test]
