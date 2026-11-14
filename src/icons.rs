@@ -50,6 +50,12 @@ impl AssetSource for Icons {
             "lock-position" => {
                 r#"<path d="M8 10V7a4 4 0 0 1 8 0v3"/><rect x="5" y="10" width="14" height="11" rx="2"/>"#
             }
+            "link" => {
+                r#"<path d="m10 13 4-4m-6 7-1 1a4.24 4.24 0 0 1-6-6l5-5a4.24 4.24 0 0 1 6 0m0 2 1-1a4.24 4.24 0 0 1 6 6l-5 5a4.24 4.24 0 0 1-6 0"/>"#
+            }
+            "unlink" => {
+                r#"<path d="m3 3 18 18M8 16l-1 1a4.24 4.24 0 0 1-6-6l3-3m9 0 1-1a4.24 4.24 0 0 1 6 6l-2 2M7 3v2M3 7h2m14 0h2m-4-4v2M3 19l2-2m14 4v-2"/>"#
+            }
             "unlock-position" => {
                 r#"<path d="M8 10V7a4 4 0 0 1 8 0"/><rect x="5" y="10" width="14" height="11" rx="2"/>"#
             }

@@ -14,6 +14,7 @@ struct Key {
     offset: (i32, i32),
     size: (u32, u32),
     target: Option<LayerId>,
+    linked_move: bool,
 }
 
 #[derive(Default)]
@@ -24,11 +25,24 @@ pub(super) struct CompositePreview {
 }
 
 impl Workspace {
+    fn linked_move_preview(&self, raw: &MovePaint) -> bool {
+        self.move_overlay
+            .as_ref()
+            .is_some_and(|paint| Arc::ptr_eq(&paint.sprite, &raw.sprite))
+            && self.active_tab().is_some_and(|tab| {
+                !tab.document
+                    .content
+                    .linked_layers(tab.active_layer)
+                    .is_empty()
+            })
+    }
+
     pub(super) fn move_paint(&self) -> Option<MovePaint> {
         let raw = self.raw_move_paint()?;
         if self
             .active_tab()
             .is_some_and(|tab| tab.document.content.needs_composite_preview())
+            || self.linked_move_preview(&raw)
         {
             self.composite_preview
                 .published
@@ -47,8 +61,10 @@ impl Workspace {
         let raw = self.raw_move_paint();
         let input = self
             .active_tab()
-            .filter(|tab| tab.document.content.needs_composite_preview())
             .zip(raw)
+            .filter(|(tab, raw)| {
+                tab.document.content.needs_composite_preview() || self.linked_move_preview(raw)
+            })
             .map(|(tab, raw)| {
                 let target = if self
                     .text_overlay
@@ -66,6 +82,7 @@ impl Workspace {
                     offset: raw.offset,
                     size: raw.size,
                     target,
+                    linked_move: self.linked_move_preview(&raw),
                 };
                 (key, raw, tab.document.content.clone(), tab.active_layer)
             });
@@ -102,7 +119,15 @@ impl Workspace {
             .as_ref()
             .is_some_and(|warp| Arc::ptr_eq(&warp.sprite, &raw.sprite));
         let job = cx.background_executor().spawn(async move {
-            let image = composite(&content, &raw, key.target, above, 1024, mask_baked);
+            let image = composite(
+                &content,
+                &raw,
+                key.target,
+                Some(above),
+                1024,
+                mask_baked,
+                key.linked_move,
+            );
             MovePaint {
                 below: None,
                 above: None,
@@ -134,11 +159,26 @@ impl Workspace {
 fn composite(
     content: &DocumentContent,
     paint: &MovePaint,
-    target: Option<LayerId>,
-    above: LayerId,
+    mut target: Option<LayerId>,
+    mut above: Option<LayerId>,
     edge: u32,
     mask_baked: bool,
+    linked_move: bool,
 ) -> RgbaImage {
+    // Translate the immutable snapshot, preserving stack order, masks, opacity,
+    // and backdrop-dependent blending even across intervening unlinked layers.
+    let mut moved;
+    let content = if linked_move {
+        moved = content.clone();
+        if let Some(id) = target {
+            moved.move_linked_layers(id, paint.offset);
+        }
+        target = None;
+        above = None;
+        &moved
+    } else {
+        content
+    };
     let (width, height) = content.size();
     let scale = |value: u32| {
         ((u64::from(value) * u64::from(edge.min(width.max(height))) / u64::from(width.max(height)))
@@ -213,7 +253,7 @@ fn composite(
                 }
             }
             if target.is_none()
-                && layer.id == above
+                && Some(layer.id) == above
                 && let Some(pixel) = sprite_at(cx, cy)
             {
                 *out = document::blend(*out, pixel, 255, BlendMode::Normal);
@@ -226,6 +266,53 @@ fn composite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn linked_move_preview_preserves_interleaved_stack_masks_and_blend_modes() {
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+        ] {
+            let mut content = DocumentContent::single_layer(
+                "Back".into(),
+                RgbaImage::from_pixel(7, 5, Rgba([50, 100, 180, 120])),
+            );
+            let back = content.top_layer_id();
+            let middle = content
+                .add_layer(back, "Stationary".into(), Rgba([90, 30, 60, 190]))
+                .unwrap();
+            let top = content
+                .add_layer(middle, "Source".into(), Rgba([210, 60, 20, 180]))
+                .unwrap();
+            content.mask_from_selection(
+                top,
+                &crate::selection::Selection::from_coverage(7, 5, |x, _| (x * 40) as u8),
+            );
+            content.change_blend_mode(top, mode);
+            content.set_opacity(top, 160);
+            content.link_layers(back, top);
+            let paint = MovePaint {
+                below: None,
+                above: None,
+                sprite: document::preview_render(&RgbaImage::new(1, 1)),
+                offset: (-2, 1),
+                size: (7, 5),
+            };
+            let preview = composite(&content, &paint, Some(top), Some(back), 1024, false, true);
+            let mut committed = content.clone();
+            committed.move_linked_layers(top, paint.offset);
+            assert_eq!(preview, *committed.composite());
+            assert_eq!(content.layer(top).unwrap().offset, (0, 0));
+            assert_eq!(committed.layer(middle).unwrap().offset, (0, 0));
+            content.set_visible(back, false);
+            committed.set_visible(back, false);
+            assert_eq!(
+                composite(&content, &paint, Some(top), Some(back), 1024, false, true),
+                *committed.composite()
+            );
+        }
+    }
     #[test]
     fn backdrop_dependent_move_and_scale_previews_match_full_composition() {
         for mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay] {
@@ -254,7 +341,7 @@ mod tests {
                 offset: (-2, 1),
                 size: (6, 4),
             };
-            let preview = composite(&content, &paint, Some(id), base, 1024, false);
+            let preview = composite(&content, &paint, Some(id), Some(base), 1024, false, false);
             content.set_offset(id, paint.offset);
             assert_eq!(preview, *content.composite());
             content.scale_layer(id, 3, 2, crate::transform::Resample::Nearest);
@@ -285,7 +372,7 @@ mod tests {
             }));
             original = DocumentContent::from_layers(6, 4, restored).unwrap();
             assert_eq!(
-                composite(&original, &paint, Some(id), base, 1024, false),
+                composite(&original, &paint, Some(id), Some(base), 1024, false, false),
                 *content.composite()
             );
         }

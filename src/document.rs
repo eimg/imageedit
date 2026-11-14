@@ -1,6 +1,7 @@
 mod composite;
 mod content;
 pub(crate) mod layer_effect;
+mod links;
 
 use std::{
     fs::File,
@@ -1087,6 +1088,58 @@ mod tests {
         let thumbnails = canvas.thumbnails.clone();
         for offset in [(-200, 0), (500, 260), (i32::MAX, 0), (i32::MIN, 0), (0, 0)] {
             let dirty = content.set_offset(top, offset);
+            let patch = RenderedCanvas::prepare_patch(
+                &canvas.pixels,
+                canvas.preview.has_transparency,
+                canvas.level_caches(),
+                &content,
+                dirty,
+            )
+            .unwrap();
+            assert!(patch.thumbnails.is_empty());
+            canvas.apply(patch);
+            assert_eq!(*canvas.pixels, *content.composite());
+            for (id, thumbnail) in &thumbnails {
+                assert!(Arc::ptr_eq(thumbnail, canvas.thumbnail(*id).unwrap()));
+            }
+            for level in &canvas.levels {
+                let expected = build_level(&content, level.cache.shift());
+                for span in expected.spans() {
+                    assert_eq!(level.cache.slot(span.index), expected.slot(span.index));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn linked_moves_refresh_all_members_without_rebuilding_thumbnails() {
+        let mut content = DocumentContent::single_layer(
+            "Base".into(),
+            RgbaImage::from_pixel(600, 300, Rgba([10, 20, 30, 255])),
+        );
+        let source = content
+            .add_layer(
+                content.top_layer_id(),
+                "Source".into(),
+                Rgba([200, 40, 30, 180]),
+            )
+            .unwrap();
+        content
+            .place_drop_shadow(
+                source,
+                crate::filters::FilterSpec::Shadow {
+                    radius: 2,
+                    offset: (20, 10),
+                    opacity: 180,
+                    color: Rgba([0, 0, 0, 255]),
+                },
+            )
+            .unwrap();
+        let mut canvas = RenderedCanvas::new(&content);
+        canvas.install_cache(build_level(&content, 1));
+        let thumbnails = canvas.thumbnails.clone();
+        for offset in [(-200, 0), (500, 260), (0, 0)] {
+            let dirty = content.move_linked_layers(source, offset);
             let patch = RenderedCanvas::prepare_patch(
                 &canvas.pixels,
                 canvas.preview.has_transparency,

@@ -137,6 +137,7 @@ pub struct DocumentContent {
     mode: crate::transform::ColorMode,
     // Bottom to top. Constructors and edits keep at least one layer.
     pub(super) layers: Vec<RasterLayer>,
+    pub(super) layer_links: Vec<Vec<LayerId>>,
     paths: Vec<crate::paths::VectorPath>,
     active_path: Option<crate::paths::PathId>,
     guides: Vec<crate::guides::Guide>,
@@ -323,6 +324,7 @@ impl DocumentContent {
                 text: None,
             }],
             paths: Vec::new(),
+            layer_links: Vec::new(),
             active_path: None,
             guides: Vec::new(),
         }
@@ -370,6 +372,7 @@ impl DocumentContent {
             mode: crate::transform::ColorMode::Rgb,
             layers,
             paths: Vec::new(),
+            layer_links: Vec::new(),
             active_path: None,
             guides: Vec::new(),
         })
@@ -943,6 +946,7 @@ impl DocumentContent {
             fallback.pixels = Arc::new(RgbaImage::new(crop.width, crop.height));
             self.layers.push(fallback);
         }
+        self.prune_layer_links();
         (self.width, self.height) = (crop.width, crop.height);
         let origin = (f64::from(crop.x), f64::from(crop.y));
         self.map_paths(|point| (point.0 - origin.0, point.1 - origin.1));
@@ -1190,6 +1194,7 @@ impl DocumentContent {
         }
         let index = self.layer_index(id)?;
         self.layers.remove(index);
+        self.prune_layer_links();
         Some(self.layers[index.saturating_sub(1)].id)
     }
 
@@ -1282,6 +1287,8 @@ impl DocumentContent {
             return None;
         }
         let pixels = composite::flatten_region(&self.layers[index..=index + 1], union);
+        self.unlink_layer(id);
+        self.unlink_layer(self.layers[index].id);
         self.layers.remove(index + 1);
         let merged = &mut self.layers[index];
         merged.effect = None;
@@ -1640,6 +1647,7 @@ impl DocumentContent {
                 text: None,
             },
         );
+        self.link_layers(id, shadow_id);
         Ok(rect)
     }
 
@@ -1908,7 +1916,7 @@ impl DocumentContent {
             self.height,
             alignment,
         );
-        self.set_offset(id, offset)
+        self.move_linked_layers(id, offset)
     }
 
     pub fn scale_to_canvas_bounds(&self, id: LayerId) -> Option<crate::geometry::PixelBox> {

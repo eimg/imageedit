@@ -198,6 +198,12 @@ impl History {
                     + text_bytes
                     + retained_metadata
                     + std::mem::size_of_val(content.guides()) as u64
+                    + std::mem::size_of_val(content.layer_links()) as u64
+                    + content
+                        .layer_links()
+                        .iter()
+                        .map(|group| std::mem::size_of_val(group.as_slice()) as u64)
+                        .sum::<u64>()
             })
             .sum();
         layer_bytes + mask_bytes + metadata_bytes
@@ -337,6 +343,54 @@ mod tests {
         fn pixel(&self) -> [u8; 4] {
             self.current.content.composite().get_pixel(0, 0).0
         }
+    }
+
+    #[test]
+    fn linked_shadow_move_and_unlink_each_undo_as_one_persistent_edit() {
+        let mut session = Session::new(true, 8);
+        session.fill(100, &LIMITS);
+        let source = session.current.active_layer;
+        session.edit(
+            |content| {
+                content
+                    .place_drop_shadow(
+                        source,
+                        crate::filters::FilterSpec::Shadow {
+                            radius: 1,
+                            offset: (2, 3),
+                            opacity: 160,
+                            color: Rgba([0, 0, 0, 255]),
+                        },
+                    )
+                    .is_ok()
+            },
+            &LIMITS,
+        );
+        let baseline = session.current.content.clone();
+        let shadow = baseline.layers()[0].id;
+        session.history.mark_saved(session.history.revision());
+        session.edit(
+            |content| content.move_linked_layers(source, (3, -2)) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        assert!(session.history.is_dirty());
+        assert!(session.undo());
+        assert!(!session.history.is_dirty());
+        for layer in session.current.content.layers() {
+            let original = baseline.layer(layer.id).unwrap();
+            assert_eq!(layer.offset, original.offset);
+            assert!(std::sync::Arc::ptr_eq(&layer.pixels, &original.pixels));
+        }
+        assert!(session.redo());
+        session.edit(
+            |content| content.unlink_layer(shadow) != crate::preview::Dirty::None,
+            &LIMITS,
+        );
+        assert!(session.current.content.layer_links().is_empty());
+        assert!(session.undo());
+        assert_eq!(session.current.content.linked_layers(source).len(), 2);
+        assert!(session.undo());
+        assert!(!session.history.is_dirty());
     }
 
     #[test]

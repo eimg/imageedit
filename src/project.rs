@@ -41,6 +41,8 @@ struct Manifest {
     active_path: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guides: Vec<crate::guides::Guide>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layer_links: Vec<Vec<u64>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -352,6 +354,13 @@ fn read_inner(
         .collect();
     content.set_paths(paths, manifest.active_path.map(crate::paths::PathId))?;
     content.set_guides(manifest.guides)?;
+    content.set_layer_links(
+        manifest
+            .layer_links
+            .into_iter()
+            .map(|group| group.into_iter().map(LayerId).collect())
+            .collect(),
+    )?;
     Ok((content, recovery_bytes))
 }
 
@@ -415,6 +424,7 @@ fn write_impl(
     let (width, height) = content.size();
     let manifest = Manifest {
         version: if recovery.is_some()
+            || !content.layer_links().is_empty()
             || content.layers().iter().any(|layer| {
                 layer.effect.is_some()
                     || layer.mask.is_some()
@@ -500,6 +510,11 @@ fn write_impl(
             .collect(),
         active_path: content.active_path_id().map(|id| id.0),
         guides: content.guides().to_vec(),
+        layer_links: content
+            .layer_links()
+            .iter()
+            .map(|group| group.iter().map(|id| id.0).collect())
+            .collect(),
     };
     check_limits(&manifest)?;
     let manifest = serde_json::to_vec(&manifest)?;
@@ -659,6 +674,18 @@ fn check_limits(manifest: &Manifest) -> Result<()> {
             );
         }
     }
+    let mut linked = HashSet::new();
+    ensure!(
+        (manifest.version >= 9 || manifest.layer_links.is_empty())
+            && manifest.layer_links.len() <= manifest.layers.len() / 2
+            && manifest.layer_links.iter().all(|group| {
+                (2..=manifest.layers.len()).contains(&group.len())
+                    && group
+                        .iter()
+                        .all(|id| ids.contains(id) && linked.insert(*id))
+            }),
+        "Invalid or unsupported layer links"
+    );
     ensure!(
         manifest.paths.len() <= crate::paths::MAX_PATHS,
         "A project has too many paths"
@@ -785,11 +812,42 @@ mod tests {
         assert_eq!(actual.paths(), expected.paths());
         assert_eq!(actual.active_path_id(), expected.active_path_id());
         assert_eq!(actual.guides(), expected.guides());
+        assert_eq!(actual.layer_links(), expected.layer_links());
     }
 
     fn manifest_json(bytes: &[u8]) -> serde_json::Value {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         serde_json::from_slice(&bytes[12..12 + length]).unwrap()
+    }
+
+    #[test]
+    fn linked_layers_round_trip_and_invalid_membership_is_rejected() {
+        let mut content = two_layers();
+        content.link_layers(LayerId(7), LayerId(3));
+        let bytes = write_bytes(&content).unwrap();
+        let manifest = manifest_json(&bytes);
+        assert_eq!(manifest["version"], json!(9));
+        assert_same(&read_bytes(&bytes).unwrap(), &content);
+        for invalid in [
+            json!([[7]]),
+            json!([[7, 7]]),
+            json!([[7, 999]]),
+            json!([[7, 3], [3, 7]]),
+        ] {
+            let mut manifest = manifest.clone();
+            manifest["layer_links"] = invalid;
+            assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+        }
+        for version in [6, 7, 8] {
+            let mut manifest = manifest.clone();
+            manifest["version"] = json!(version);
+            assert!(read_bytes(&with_manifest(&bytes, &manifest)).is_err());
+        }
+        content.unlink_layer(LayerId(7));
+        let plain = write_bytes(&content).unwrap();
+        assert_eq!(manifest_json(&plain)["version"], json!(6));
+        assert!(manifest_json(&plain).get("layer_links").is_none());
+        assert!(read_bytes(GOLDEN).unwrap().layer_links().is_empty());
     }
 
     #[test]

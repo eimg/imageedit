@@ -290,7 +290,7 @@ pub(super) enum NumericFollowup {
     FitLayer {
         layer: crate::document::LayerId,
     },
-    LayerLock {
+    LayerMetadata {
         tab: usize,
         layer: crate::document::LayerId,
         command: super::layers::LayerCommand,
@@ -929,12 +929,12 @@ impl Workspace {
                             }
                             None
                         }
-                        NumericFollowup::LayerLock {
+                        NumericFollowup::LayerMetadata {
                             tab,
                             layer,
                             command,
                         } => {
-                            this.toggle_layer_lock(tab, layer, command, window, cx);
+                            this.edit_layer_metadata(tab, layer, command, window, cx);
                             None
                         }
                     }

@@ -159,6 +159,8 @@ pub(super) enum LayerCommand {
     Lower,
     AlphaLock,
     PositionLock,
+    LinkBelow,
+    Unlink,
     EditEffect,
     RemoveEffect,
     BakeEffect,
@@ -257,6 +259,16 @@ impl Workspace {
         let count = content.layers().len();
         let index = content.layer_index(tab.active_layer);
         match command {
+            LayerCommand::LinkBelow => {
+                index
+                    .and_then(|index| index.checked_sub(1))
+                    .is_some_and(|below| {
+                        !content
+                            .linked_layers(tab.active_layer)
+                            .contains(&content.layers()[below].id)
+                    })
+            }
+            LayerCommand::Unlink => !content.linked_layers(tab.active_layer).is_empty(),
             LayerCommand::AlphaLock => content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.text.is_none()),
@@ -348,6 +360,8 @@ impl Workspace {
         let root = self.bind::<RaiseLayer>(root, LayerCommand::Raise, cx);
         let root = self.bind::<LowerLayer>(root, LayerCommand::Lower, cx);
         let root = self.bind::<ToggleAlphaLock>(root, LayerCommand::AlphaLock, cx);
+        let root = self.bind::<crate::commands::LinkLayerBelow>(root, LayerCommand::LinkBelow, cx);
+        let root = self.bind::<crate::commands::UnlinkLayer>(root, LayerCommand::Unlink, cx);
         self.bind::<TogglePositionLock>(root, LayerCommand::PositionLock, cx)
     }
 
@@ -418,8 +432,11 @@ impl Workspace {
                 window,
                 cx,
             ),
-            LayerCommand::AlphaLock | LayerCommand::PositionLock => {
-                self.toggle_layer_lock(tab_id, id, command, window, cx);
+            LayerCommand::AlphaLock
+            | LayerCommand::PositionLock
+            | LayerCommand::LinkBelow
+            | LayerCommand::Unlink => {
+                self.edit_layer_metadata(tab_id, id, command, window, cx);
             }
             LayerCommand::New => self.new_layer_form(window, cx),
             LayerCommand::Rename => self.rename_layer_form(id, window, cx),
@@ -542,7 +559,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn toggle_layer_lock(
+    pub(super) fn edit_layer_metadata(
         &mut self,
         tab_id: usize,
         id: LayerId,
@@ -558,13 +575,16 @@ impl Workspace {
             || self.pdf_job.is_some()
             || !matches!(
                 command,
-                LayerCommand::AlphaLock | LayerCommand::PositionLock
+                LayerCommand::AlphaLock
+                    | LayerCommand::PositionLock
+                    | LayerCommand::LinkBelow
+                    | LayerCommand::Unlink
             )
         {
             return;
         }
         if self.commit_numeric_with_followup(
-            super::numeric::NumericFollowup::LayerLock {
+            super::numeric::NumericFollowup::LayerMetadata {
                 tab: tab_id,
                 layer: id,
                 command,
@@ -576,13 +596,33 @@ impl Workspace {
         }
         if self.finish_text(window, cx) {
             self.defer_after_text(move |this, window, cx| {
-                this.toggle_layer_lock(tab_id, id, command, window, cx);
+                this.edit_layer_metadata(tab_id, id, command, window, cx);
             });
             return;
         }
         let Some(layer) = self.active_document().and_then(|doc| doc.content.layer(id)) else {
             return;
         };
+        if matches!(command, LayerCommand::LinkBelow | LayerCommand::Unlink) {
+            self.cancel_move(window, cx);
+            self.edit_content(
+                move |content, _, _| {
+                    if command == LayerCommand::Unlink {
+                        content.unlink_layer(id)
+                    } else if let Some(below) = content
+                        .layer_index(id)
+                        .and_then(|index| index.checked_sub(1))
+                    {
+                        content.link_layers(id, content.layers()[below].id)
+                    } else {
+                        Dirty::None
+                    }
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         if command == LayerCommand::AlphaLock && layer.text.is_some() {
             return;
         }
@@ -815,6 +855,39 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .flex_shrink_0()
+                        .when(!content.linked_layers(id).is_empty(), |controls| {
+                            controls.child(
+                                div()
+                                    .id(("layer-unlink", id.0 as usize))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(24.))
+                                    .rounded_sm()
+                                    .text_color(rgb(ACCENT))
+                                    .tooltip(tooltip("Unlink layer — linked layers move together"))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .when(locks_enabled, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|button| button.bg(rgb(HOVER)))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.edit_layer_metadata(
+                                                    tab_id,
+                                                    id,
+                                                    LayerCommand::Unlink,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                    })
+                                    .when(!locks_enabled, |button| button.opacity(0.45))
+                                    .child(icon("link", 14.)),
+                            )
+                        })
                         .child(
                             div()
                                 .id(("layer-visibility", id.0 as usize))
@@ -875,7 +948,9 @@ impl Workspace {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         if enabled {
-                                            this.toggle_layer_lock(tab_id, id, command, window, cx);
+                                            this.edit_layer_metadata(
+                                                tab_id, id, command, window, cx,
+                                            );
                                         }
                                     }))
                                     .when(enabled, |button| {
@@ -1067,11 +1142,13 @@ impl Workspace {
                 this.fit_active_layer_to_canvas(window, cx);
             }))
         })
-        .when(!self.active_position_locked(), |root| {
+        .when(!self.active_move_locked(), |root| {
             root.on_action(cx.listener(|this, action: &AlignLayer, window, cx| {
                 this.align_active(*action, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
+        })
+        .when(!self.active_position_locked(), |root| {
+            root.on_action(cx.listener(|this, _: &LayerToImageSize, window, cx| {
                 this.layer_to_image_size(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CropLayerToContent, window, cx| {
@@ -1094,6 +1171,11 @@ impl Workspace {
         self.active_tab()
             .and_then(|tab| tab.document.content.layer(tab.active_layer))
             .is_some_and(|layer| layer.locks.position)
+    }
+
+    pub(super) fn active_move_locked(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| !tab.document.content.can_move_linked(tab.active_layer))
     }
 
     fn align_active(&mut self, axis: AlignLayer, window: &mut Window, cx: &mut Context<Self>) {
@@ -1461,8 +1543,8 @@ impl Workspace {
         let Some(layer) = tab.document.content.layer(tab.active_layer) else {
             return;
         };
-        if layer.locks.position {
-            tab.notice = Some("Unlock the layer's position before moving it.".into());
+        if !tab.document.content.can_move_linked(layer.id) {
+            tab.notice = Some("Unlock the position of every linked layer before moving.".into());
             cx.notify();
             return;
         }
@@ -1491,7 +1573,11 @@ impl Workspace {
             input,
         });
         let job = cx.background_executor().spawn(async move {
-            let (below, above) = content.preview_around(id);
+            let (below, above) = if content.linked_layers(id).is_empty() {
+                content.preview_around(id)
+            } else {
+                (None, None)
+            };
             MovePaint {
                 below: below.map(|image| document::preview_render(&image)),
                 sprite: document::preview_render(&with_layer_opacity(&pixels, opacity)),
@@ -1579,6 +1665,14 @@ impl Workspace {
     }
 
     fn update_move_offset(&mut self, offset: (i32, i32), cx: &mut Context<Self>) {
+        if self.move_drag.as_ref().is_none_or(|drag| {
+            self.active_tab().is_none_or(|tab| {
+                !drag.belongs_to(tab)
+                    || !tab.document.content.can_move_linked_to(drag.layer, offset)
+            })
+        }) {
+            return;
+        }
         if self
             .move_drag
             .as_ref()
@@ -1626,7 +1720,7 @@ impl Workspace {
             None
         };
         self.edit_content(
-            move |content, _, _| content.set_offset(id, offset),
+            move |content, _, _| content.move_linked_layers(id, offset),
             window,
             cx,
         );

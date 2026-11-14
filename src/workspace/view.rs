@@ -1862,7 +1862,7 @@ impl Workspace {
                                     ]))
                             })
                             .when(self.tool == Tool::Move, |panel| {
-                                let enabled = self.geometry_enabled() && !self.active_position_locked();
+                                let enabled = self.geometry_enabled() && !self.active_move_locked();
                                 let offset = self.move_offset();
                                 panel
                                     .when_some(offset, |panel, _| {

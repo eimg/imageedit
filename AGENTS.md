@@ -115,6 +115,20 @@ pixel transforms, scale, fit, and layer content crop. Image-wide operations stil
 transform every layer and retain its locks. Editable text remains editable at its
 existing layout anchor, including automatic bitmap resizing; rasterize it before
 locking alpha. Opacity, visibility, order, and deletion remain available.
+Layers can form disjoint movement groups through Layer → Link with Layer Below.
+New Drop Shadow layers automatically join their source's group. Moving any member
+with the pointer, typed X/Y, arrow nudges, or alignment translates every member
+by the same delta, including hidden layers, in one history edit. Snapping and
+alignment use the active layer's geometry. Any member's position lock or offset
+overflow blocks the complete translation. Chain icons beside row toggles and
+Layer → Unlink Layer detach one member; a singleton group dissolves. Row unlink
+targets stable tab/layer IDs without changing the active layer and finishes typed
+geometry/text first. Links are saved project metadata, not session preferences.
+Duplicates start unlinked. Deletion/canvas crop prune removed members; Merge Down
+detaches the result while preserving other surviving groups. Individual scaling,
+rotation, pixel edits, opacity, visibility, and stacking stay independent.
+Image-wide transforms still affect all layers. Links do not regenerate shadows
+after source edits, and existing shadow layers are not linked by inference.
 The Layer menu can align a layer, proportionally Fit Layer to Canvas, or crop
 it to its opaque pixels. Fit Layer to Canvas also appears in Scale Layer options,
 scales the complete raster (including transparent margins), and centers it. It
@@ -623,6 +637,11 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   the on-canvas part of a layer into a canvas-sized image.
 - `src/document/content.rs` owns the canvas dimensions, raster layer stack, and paths.
   It handles crop, layer-local bucket fill, layer offsets, content crops, and outline strokes.
+  `src/document/links.rs` owns disjoint stable-ID movement groups, membership
+  validation, atomic checked translations, and pruning. `set_offset` stays the
+  single-layer primitive for transforms; user moves and alignment use
+  `move_linked_layers`. Composite dirtiness covers all visible members' old/new
+  bounds and retains shared pixels and thumbnails.
   `RasterLayer::locks` owns the persistent `LayerLocks` flags. Model mutation
   methods enforce them in addition to UI/action gates, and reject alpha-locked
   editable text. Stroke sessions capture the lock policy; fill/gradient previews
@@ -653,11 +672,15 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   (`v6-two-layers.imageedit`); keep its legacy extension to exercise compatibility. New projects use `.lime`; the file magic
   stays unchanged; the existing version 6 fixture remains unchanged.
   `v8-layer-locks.lime` additionally covers the lock-bearing format.
-  Version 9 adds optional text layout, blend modes, masks, and retained effects;
+  Version 9 adds optional text layout, blend modes, masks, retained effects, and layer links;
   these require version 9 independently of locks/guides. Mask/source/coverage PNGs
   follow their layer PNG in `RasterLayer::storage` order, and all decoded buffers
   count toward the aggregate limit. Lower feature-free versions still write as
   before. `v9-capabilities.lime` covers the new fields and payload ordering.
+  Top-level `layer_links` is omitted when empty and requires version 9. Groups
+  contain at least two existing IDs with no duplicate or overlapping membership;
+  reader validation runs before pixel decoding. Link-free projects retain the
+  earlier writer version when their other metadata permits it.
   Text bold/italic flags are optional in all supported versions and default to regular for
   projects written before those controls were added.
 - `src/pdf/pages.rs` parses bounded page-list expressions after checking source
@@ -734,6 +757,8 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   current and saved revisions, and the entry and memory limits. Snapshots
   share layer pixels, and each shared buffer counts once toward the limits.
   Owned path and text metadata counts separately for each snapshot.
+  Owned link-group metadata counts separately too; links and linked movements
+  preserve saved-revision and one-step undo/redo behavior.
 - `src/workspace/clipboard.rs` copies the selected part of the active layer,
   pastes a centered layer, and imports rasters above the active layer. Deferred
   operations validate the document generation and layer; each imported image
@@ -930,6 +955,9 @@ app icons; they are source assets, not generated leftovers.
   cap at 1024 pixels per edge;
   scale sampling uses pixel centers. Warp previews bake transformed masks before
   compositing; other sprite previews sample their linked mask in local coordinates.
+  Linked Move previews use the same coalesced bounded full-stack compositor even
+  for Normal stacks, translating an immutable content snapshot so intervening
+  unlinked layers, masks, blend modes, and opacity retain their stacking behavior.
 - `RasterLayer.mask` stores optional same-size straight RGBA coverage in alpha.
   Coverage multiplies source alpha before layer opacity/blending. Existing
   selection tools create/edit masks through the Layer menu; there is no separate

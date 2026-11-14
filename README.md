@@ -14,6 +14,7 @@ Current source version: **1.2.0**.
 - **Layers** — move, align, reorder, merge, and adjust opacity.
   Alpha lock preserves transparency while recoloring; position lock protects
   layers from manual moves and transforms.
+  Linked layers move together; new Drop Shadow layers link to their source automatically.
   The opacity slider keeps your chosen value while the canvas updates; each drag
   is one undo step. You can keep dragging outside the slider and release at the
   desired position. Pending text commits before the opacity change.
@@ -401,6 +402,10 @@ for this app session, shared across tabs. Canceled, failed, and unchanged edits
 leave the previous settings in place. Reset changes the current preview without
 overwriting those settings until a changed result is applied.
 Drop Shadow starts with a black shadow and remembers its last applied color.
+Its new layer links to the source by default, so moving either also moves the
+other. Click the chain icon in a layer row or choose **Layer → Unlink Layer** to
+move it independently. Existing shadows can be linked manually with
+**Layer → Link with Layer Below** on their source layer.
 Its wider dialog places the preview beside the controls when space allows.
 **Choose Color…** opens the color picker; **Use Foreground** copies the current
 foreground color. Reset restores black and the built-in shadow parameters.
@@ -446,7 +451,7 @@ Guides are stored in **`.lime`** projects, never flattened exports. A project
 containing guides uses format version 7 when its layers are unlocked. Existing
 version 6/7 projects still open; unlocked projects without guides retain version
 6 on save. Lock-only projects use version 8, with or without guides. Blend modes,
-masks, retained effects, or text-box layout use version 9 and require this build
+masks, retained effects, linked layers, or text-box layout use version 9 and require this build
 or newer. The reader keeps opening versions 6–8.
 
 In **Text**, drag over characters, Shift-click, or use Shift+arrows to select a
@@ -473,6 +478,18 @@ compositing when the stack needs its backdrop. A preview may briefly trail a fas
 drag while its latest background frame finishes. Merge Down is disabled when a
 backdrop-dependent pair above other layers cannot be merged without changing its
 appearance; bottom pairs remain available.
+
+**Layer → Link with Layer Below** joins those layers and any existing link groups.
+Dragging with Move, arrow nudges, typed X/Y positions, and alignment translate
+every member by the same amount, including hidden layers, in one undo step.
+Alignment and snapping use the active layer's edges and center. A position lock
+on any member blocks the entire move; unlink it or unlock its position first.
+Each linked row shows a chain icon that unlinks that layer without changing the
+active layer. Links survive project Save and Undo/Redo. Duplicates start unlinked;
+deleting a layer removes its membership, and Merge Down detaches the merged result.
+Scaling, rotation, pixel edits, opacity, visibility, and layer order stay independent.
+Image-wide transforms continue to affect the whole image. Linking does not
+regenerate a shadow after edits to its source pixels.
 
 **Layer → Mask → From Selection** creates or replaces a raster layer's mask.
 No selection produces a white mask. Use the existing selection tools to define
