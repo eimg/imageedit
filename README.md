@@ -50,6 +50,7 @@ Aspect-ratio choices also reshape the current selection or crop box.
 Crop and paint strokes can start outside the canvas; crop stays within the image.
 Crop ignores drags whose area stays entirely outside the image.
 The status bar shows the current app version.
+Linux menus open cascading submenus beside their parent menu.
 
 Use the reset arrow in **Tool Options** or **Tools → Reset Current Tool** to restore
 that tool's defaults. **Tools → Reset All Tool Settings…** resets every tool after

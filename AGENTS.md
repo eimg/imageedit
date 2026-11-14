@@ -23,7 +23,11 @@ renders an in-window menu bar from `commands::application_menus(false)` without
 introducing GTK or changing the macOS/Windows menu adapters. Menu navigation
 runs before inline editors in the workspace keystroke interceptor; editor focus
 stays in place for action dispatch. F10/Alt-letter, arrows, Return, Escape,
-scrolling, submenu Back/Left, and current action availability are supported.
+scrolling, and current action availability are supported. Submenus cascade beside
+visible parent panels on hover/click or Right/Return, flipping left near the window
+edge. Each panel retains its selection and scroll position; Left/Escape closes
+one submenu level, and Escape at the root dismisses the menu. Scrolling a parent
+closes its descendants so they cannot remain detached from their source row.
 Wayland explicitly requests client decorations to avoid GPUI 0.2.2 recording
 nonexistent server decorations on GNOME/Weston. Client decorations get a draggable
 title bar, close/minimize/maximize controls, and resize edges; server-decorated
