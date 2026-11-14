@@ -9,7 +9,7 @@ use crate::preview::PixelRect;
 
 pub const MAX_GAP_RADIUS: u8 = 8;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegionMatch {
     pub tolerance: u8,
     pub gap_radius: u8,

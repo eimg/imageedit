@@ -81,7 +81,7 @@ fn save_route(mode: SaveMode, has_path: bool, format: FileFormat, raster_ok: boo
 }
 
 impl Workspace {
-    fn pending_edit_name(&self) -> Option<&'static str> {
+    pub(super) fn pending_edit_name(&self) -> Option<&'static str> {
         if self.has_pending_text() {
             Some("text")
         } else if self.gradient.is_some() {
@@ -447,6 +447,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.flush_settings(window, cx);
+        if self.settings_store.defer_exit(quit) {
+            return false;
+        }
         if self.gradient_store.saving {
             self.gradient_store.exit_after_save =
                 Some(quit || self.gradient_store.exit_after_save.unwrap_or(false));

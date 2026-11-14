@@ -137,6 +137,8 @@ impl ClonePreview {
     }
 }
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct BrushSettings {
     brush: crate::paint::Brush,
     pencil: crate::paint::Brush,
@@ -167,6 +169,25 @@ impl Default for BrushSettings {
 }
 
 impl BrushSettings {
+    pub(super) fn reset_tool(&mut self, tool: Tool) {
+        *self.get_mut(tool) = *Self::default().get(tool);
+        self.set_smoothing(tool, Smoothing::Off);
+    }
+
+    pub(super) fn valid(&self) -> bool {
+        [
+            &self.brush,
+            &self.pencil,
+            &self.eraser,
+            &self.blur,
+            &self.sharpen,
+            &self.clone_stamp,
+            &self.outline,
+        ]
+        .into_iter()
+        .all(|brush| *brush == brush.clamped())
+    }
+
     fn smoothing_index(tool: Tool) -> Option<usize> {
         match tool {
             Tool::Brush => Some(0),
@@ -223,12 +244,12 @@ impl Workspace {
             offset: layer.offset,
             size: layer.pixels.dimensions(),
             canvas: tab.document.content.size(),
-            sample_all: self.clone_sample_all,
+            sample_all: self.preferences.clone_sample_all,
         })
     }
 
     pub(super) fn clone_preview(&self) -> Option<ClonePreview> {
-        if self.tool != Tool::CloneStamp || !self.clone_show_source {
+        if self.preferences.tool != Tool::CloneStamp || !self.preferences.clone_show_source {
             return None;
         }
         let source = self.clone_source.as_ref()?;
@@ -241,7 +262,8 @@ impl Workspace {
             .as_ref()
             .and_then(|stroke| stroke.clone_delta)
             .or_else(|| {
-                self.clone_aligned
+                self.preferences
+                    .clone_aligned
                     .then(|| source.pending.map(|(_, delta)| delta).or(source.delta))
                     .flatten()
             });
@@ -263,21 +285,23 @@ impl Workspace {
     }
 
     pub(super) fn brush_smoothing(&self) -> Smoothing {
-        self.brushes.smoothing(self.tool)
+        self.preferences.brushes.smoothing(self.preferences.tool)
     }
 
     pub(super) fn set_brush_smoothing(&mut self, mode: Smoothing, cx: &mut Context<Self>) {
         if self.stroke.is_none() {
-            self.brushes.set_smoothing(self.tool, mode);
+            self.preferences
+                .brushes
+                .set_smoothing(self.preferences.tool, mode);
             cx.notify();
         }
     }
 
     pub(super) fn set_clone_sampling(&mut self, sample_all: bool, cx: &mut Context<Self>) {
-        if self.stroke.is_some() || self.clone_sample_all == sample_all {
+        if self.stroke.is_some() || self.preferences.clone_sample_all == sample_all {
             return;
         }
-        self.clone_sample_all = sample_all;
+        self.preferences.clone_sample_all = sample_all;
         self.clone_source = None;
         self.notice(
             "Clone sampling changed. Alt-click to choose a new source.",
@@ -314,7 +338,7 @@ impl Workspace {
             BrushField::Hardness | BrushField::Opacity | BrushField::Flow => (0, 100),
         };
         let next = value.clamp(min, max);
-        let brush = self.brushes.get_mut(self.tool);
+        let brush = self.preferences.brushes.get_mut(self.preferences.tool);
         match field {
             BrushField::Size => brush.diameter = next,
             BrushField::Spacing => brush.spacing = next as u8,
@@ -335,7 +359,10 @@ impl Workspace {
     }
 
     pub(super) fn set_brush_buildup(&mut self, buildup: bool, cx: &mut Context<Self>) {
-        self.brushes.get_mut(self.tool).buildup = buildup;
+        self.preferences
+            .brushes
+            .get_mut(self.preferences.tool)
+            .buildup = buildup;
         cx.notify();
     }
 
@@ -375,10 +402,10 @@ impl Workspace {
     }
 
     pub(super) fn set_clone_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
-        if self.stroke.is_some() || self.clone_aligned == aligned {
+        if self.stroke.is_some() || self.preferences.clone_aligned == aligned {
             return;
         }
-        self.clone_aligned = aligned;
+        self.preferences.clone_aligned = aligned;
         if let Some(source) = self.clone_source.as_mut() {
             source.delta = None;
             source.pending = None;
@@ -400,12 +427,9 @@ impl Workspace {
         if self.refuse_text_pixels(false, cx) {
             return;
         }
-        let Some(kind) = stroke_kind(self.tool) else {
+        let Some(kind) = stroke_kind(self.preferences.tool) else {
             return;
         };
-        if self.canvas_pixel(position, scale, false).is_none() {
-            return;
-        }
         let Some(point) = self.canvas_point(position, scale) else {
             return;
         };
@@ -419,7 +443,7 @@ impl Workspace {
             self.notice("The active layer is hidden. Show it before painting.", cx);
             return;
         }
-        if self.tool == Tool::Eraser && layer.locks.alpha {
+        if self.preferences.tool == Tool::Eraser && layer.locks.alpha {
             self.notice("Unlock the layer's alpha before erasing pixels.", cx);
             return;
         }
@@ -432,7 +456,7 @@ impl Workspace {
             .document
             .content
             .mode()
-            .constrain(solid_color(self.colors[0]));
+            .constrain(solid_color(self.color_memory.swatches[0]));
         let here = local_point(point, offset);
         let kind = if matches!(kind, StrokeKind::Clone { .. }) {
             let Some(target) = self.clone_target() else {
@@ -441,7 +465,7 @@ impl Workspace {
             let Some(kind) = self
                 .clone_source
                 .as_ref()
-                .and_then(|source| source.kind(target, here, self.clone_aligned))
+                .and_then(|source| source.kind(target, here, self.preferences.clone_aligned))
             else {
                 self.notice("Alt-click to set the clone source.", cx);
                 return;
@@ -452,7 +476,7 @@ impl Workspace {
         };
         let mut stroke =
             Stroke::new(kind, color, *self.active_brush()).with_alpha_lock(layer.locks.alpha);
-        if matches!(kind, StrokeKind::Clone { .. }) && self.clone_sample_all {
+        if matches!(kind, StrokeKind::Clone { .. }) && self.preferences.clone_sample_all {
             stroke = stroke.with_clone_source(tab.document.canvas.pixels.clone(), offset);
         }
         let smoothing = self.brush_smoothing();
@@ -491,7 +515,7 @@ impl Workspace {
         self.stroke_token = token;
         self.stroke = Some(session);
         self.refresh_stroke_patch(window, cx);
-        if self.tool == Tool::CloneStamp {
+        if self.preferences.tool == Tool::CloneStamp {
             // Establish the source cursor delta even if the first dab is a no-op.
             cx.notify();
         }
@@ -556,7 +580,7 @@ impl Workspace {
                         };
                         let pending = session.advance_smoothing();
                         workspace.refresh_stroke_patch(window, cx);
-                        if workspace.tool == Tool::CloneStamp {
+                        if workspace.preferences.tool == Tool::CloneStamp {
                             cx.notify();
                         }
                         pending
@@ -599,7 +623,7 @@ impl Workspace {
         self.refresh_stroke_patch(window, cx);
         let session = self.stroke.take().unwrap();
         let generation = self.active_tab().unwrap().history.generation();
-        if self.clone_aligned
+        if self.preferences.clone_aligned
             && let Some(delta) = session.clone_delta
             && let Some(source) = self.clone_source.as_mut()
         {
@@ -698,7 +722,7 @@ impl Workspace {
     }
 
     fn active_brush(&self) -> &crate::paint::Brush {
-        self.brushes.get(self.tool)
+        self.preferences.brushes.get(self.preferences.tool)
     }
 
     pub(super) fn active_brush_settings(&self) -> (u32, u8) {
@@ -855,8 +879,17 @@ mod tests {
         mode: Smoothing,
         selection: Selection,
     ) -> StrokeSession {
+        stroke_session_at(content, kind, mode, selection, (5.5, 6.5))
+    }
+
+    fn stroke_session_at(
+        content: &document::DocumentContent,
+        kind: StrokeKind,
+        mode: Smoothing,
+        selection: Selection,
+        here: (f64, f64),
+    ) -> StrokeSession {
         let layer = content.layer(content.top_layer_id()).unwrap();
-        let here = (5.5, 6.5);
         let mut session = StrokeSession {
             token: 7,
             layer: layer.id,
@@ -888,6 +921,75 @@ mod tests {
         };
         session.paint(here.0, here.1);
         session
+    }
+
+    #[test]
+    fn all_six_paint_tools_enter_from_outside_without_editing_outside_canvas_or_selection() {
+        let mut content = smoothing_content();
+        let id = content.top_layer_id();
+        let pixels = content.layer(id).unwrap().pixels.as_ref().clone();
+        content.place_layer(id, pixels, (-2, -3));
+        let layer = content.layer(id).unwrap();
+        let source = layer.pixels.clone();
+        let selection = Selection::Rect(PixelRect::new(0, 0, 24, 24));
+        for tool in [
+            Tool::Pencil,
+            Tool::Brush,
+            Tool::Eraser,
+            Tool::Blur,
+            Tool::Sharpen,
+            Tool::CloneStamp,
+        ] {
+            let kind = if tool == Tool::CloneStamp {
+                StrokeKind::Clone { dx: 1, dy: 1 }
+            } else {
+                stroke_kind(tool).unwrap()
+            };
+            for mode in [Smoothing::Off, Smoothing::Light, Smoothing::Strong] {
+                if tool == Tool::Pencil && mode != Smoothing::Off {
+                    continue;
+                }
+                for start in [(-20.5, 12.5), (68.5, 12.5), (12.5, -20.5), (12.5, 52.5)] {
+                    let mut outside_click = stroke_session_at(
+                        &content,
+                        kind,
+                        mode,
+                        selection.clone(),
+                        local_point(start, layer.offset),
+                    );
+                    outside_click.finish_pixels();
+                    assert!(
+                        !outside_click.stroke.changed(),
+                        "{tool:?} outside-only click"
+                    );
+                    let mut session = stroke_session_at(
+                        &content,
+                        kind,
+                        mode,
+                        selection.clone(),
+                        local_point(start, layer.offset),
+                    );
+                    let target = local_point((12.5, 12.5), layer.offset);
+                    session.input_at(target, Duration::ZERO);
+                    session.finish_pixels();
+                    assert_eq!(session.last_point, target);
+                    let painted = crate::paint::apply_stroke(&source, &session.stroke)
+                        .unwrap_or_else(|| panic!("{tool:?}, {mode:?}, from {start:?}"))
+                        .0;
+                    for (x, y, original) in source.enumerate_pixels() {
+                        let canvas_x = i64::from(x) + i64::from(layer.offset.0);
+                        let canvas_y = i64::from(y) + i64::from(layer.offset.1);
+                        if !(0..48).contains(&canvas_x)
+                            || !(0..32).contains(&canvas_y)
+                            || selection.coverage(canvas_x, canvas_y, 48, 32) == 0
+                        {
+                            assert_eq!(painted.get_pixel(x, y), original, "{tool:?}");
+                        }
+                    }
+                    assert_eq!(layer.pixels.as_ref(), source.as_ref());
+                }
+            }
+        }
     }
 
     #[test]

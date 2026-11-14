@@ -25,7 +25,7 @@ pub(super) enum PdfTarget {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct PdfPreferences {
     pub dpi: u32,
     pub mode: PdfMode,
@@ -464,7 +464,10 @@ impl Workspace {
                             for document in documents {
                                 workspace.show_document(document, window, cx);
                             }
-                            workspace.pdf_preferences.remember_success(&options, target);
+                            workspace
+                                .preferences
+                                .pdf_preferences
+                                .remember_success(&options, target);
                         }
                         Ok(PdfResult::Layers { change, added }) => {
                             if let Err(error) = workspace.validate_pdf_target(target, &[]) {
@@ -481,7 +484,10 @@ impl Workspace {
                                     cx,
                                 )
                             {
-                                workspace.pdf_preferences.remember_success(&options, target);
+                                workspace
+                                    .preferences
+                                    .pdf_preferences
+                                    .remember_success(&options, target);
                                 let layers = if added == 1 { "layer" } else { "layers" };
                                 workspace
                                     .notice(&format!("Added {added} {layers} from the PDF."), cx);

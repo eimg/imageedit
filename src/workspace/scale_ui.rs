@@ -84,7 +84,7 @@ enum ScaleHit {
 
 impl Workspace {
     pub(super) fn scale_frame(&self) -> Option<PixelRect> {
-        if self.tool != Tool::ScaleLayer {
+        if self.preferences.tool != Tool::ScaleLayer {
             return None;
         }
         self.scale_drag.map(|drag| drag.target)
@@ -102,7 +102,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.commit_numeric_edit(window, cx);
-        if self.tool != Tool::ScaleLayer
+        if self.preferences.tool != Tool::ScaleLayer
             || self.scale_pointer_dragging()
             || self.active_tab().is_none_or(|tab| tab.busy())
         {
@@ -142,11 +142,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.tool != Tool::ScaleLayer || self.scale_pointer_dragging() {
+        if self.preferences.tool != Tool::ScaleLayer || self.scale_pointer_dragging() {
             return false;
         }
         if let Some(drag) = self.scale_drag.as_mut() {
-            drag.begin_numeric(self.scale_anchor);
+            drag.begin_numeric(self.preferences.scale_anchor);
             return true;
         }
         let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
@@ -185,7 +185,7 @@ impl Workspace {
                 bottom: false,
             },
             pointer: false,
-            anchor: self.scale_anchor,
+            anchor: self.preferences.scale_anchor,
         };
         self.start_scale_preview(drag, window, cx);
         true
@@ -259,7 +259,7 @@ impl Workspace {
             drag.edges,
             drag.start,
             pointer,
-            self.scale_lock ^ shift,
+            self.preferences.scale_lock ^ shift,
         );
         self.update_scale_target(target, cx);
     }
@@ -284,7 +284,7 @@ impl Workspace {
         let Some(drag) = self.scale_drag.filter(|drag| !drag.pointer) else {
             return;
         };
-        match drag.numeric_target(width, value, self.scale_lock) {
+        match drag.numeric_target(width, value, self.preferences.scale_lock) {
             Ok(target) => {
                 if !self.update_scale_target(target, cx) {
                     self.restore_scale_size(cx);
@@ -307,8 +307,8 @@ impl Workspace {
         let Some(anchor) = crate::transform::Anchor::from_grid(index) else {
             return;
         };
-        if !self.scale_pointer_dragging() && self.scale_anchor != anchor {
-            self.scale_anchor = anchor;
+        if !self.scale_pointer_dragging() && self.preferences.scale_anchor != anchor {
+            self.preferences.scale_anchor = anchor;
             cx.notify();
         }
     }
@@ -386,7 +386,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let resample = self.warp_resample;
+        let resample = self.preferences.warp_resample;
         self.edit_content(
             move |content, _, _| commit_scale(content, drag, resample),
             window,
@@ -415,7 +415,7 @@ impl Workspace {
     }
 
     pub(super) fn scale_cursor(&self, scale: f32) -> CursorStyle {
-        if self.tool != Tool::ScaleLayer {
+        if self.preferences.tool != Tool::ScaleLayer {
             return CursorStyle::Crosshair;
         }
         if let Some(drag) = self.scale_drag.filter(|drag| drag.pointer) {

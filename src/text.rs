@@ -20,7 +20,7 @@ pub const DEFAULT_LINE_SPACING: f32 = 1.2;
 // shapes with HarfRust and returns coverage through SwashCache.
 static FONTS: Mutex<Option<(cosmic_text::FontSystem, cosmic_text::SwashCache)>> = Mutex::new(None);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Spacing {
     pub letter: f32,
     pub line: f32,
@@ -45,7 +45,7 @@ impl Spacing {
 }
 
 /// Face choices shared by rasterization, caret layout, and cached text.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FontFace {
     pub bold: bool,
     pub italic: bool,

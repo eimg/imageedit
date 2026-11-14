@@ -63,6 +63,7 @@ pub(crate) fn for_action(action: &dyn Action) -> Option<&'static str> {
         CropLayerToContent => "crop", StrokePath => "stroke", StrokeSelection => "stroke",
         SwapColors => "swap",
         RepeatLastEffect => "redo", ReopenLastEffect => "redo",
+        ResetCurrentTool => "reset", ResetAllTools => "reset",
     }
     None
 }

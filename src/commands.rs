@@ -40,6 +40,8 @@ actions!(
         BackgroundColor,
         SwapColors,
         ResetColors,
+        ResetCurrentTool,
+        ResetAllTools,
         ZoomIn,
         ZoomOut,
         ApplyCrop,
@@ -120,7 +122,7 @@ actions!(
     ]
 );
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Tool {
     Move,
     Pan,
@@ -845,6 +847,11 @@ pub(crate) fn application_menus(macos: bool) -> Vec<Menu> {
                 .map(|(label, tools)| {
                     MenuItem::submenu(menu(label, tools.iter().copied().map(tool).collect()))
                 })
+                .chain([
+                    MenuItem::separator(),
+                    MenuItem::action("Reset Current Tool", ResetCurrentTool),
+                    MenuItem::action("Reset All Tool Settings…", ResetAllTools),
+                ])
                 .collect(),
         ),
         menu(
@@ -1204,6 +1211,8 @@ mod tests {
             "Pan",
             "Zoom",
             "Color Picker",
+            "Reset Current Tool",
+            "Reset All Tool Settings…",
             "menu:Colors",
             "Foreground Color…",
             "Background Color…",

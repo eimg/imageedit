@@ -19,6 +19,7 @@ impl AssetSource for Icons {
             }
             "undo" => r#"<path d="M3 5v6h6M3 11l4-4a8 8 0 1 1 0 11"/>"#,
             "redo" => r#"<path d="M21 5v6h-6m6 0-4-4a8 8 0 1 0 0 11"/>"#,
+            "reset" => r#"<path d="M3 10a9 9 0 1 1 2.64 8.36M3 4v6h6"/>"#,
             "cut" => {
                 r#"<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 12 12M8 16 20 4"/>"#
             }

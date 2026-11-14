@@ -1232,11 +1232,11 @@ impl Workspace {
         if !self.can_fit_active_layer() {
             return;
         }
-        if self.tool == crate::commands::Tool::ScaleLayer {
+        if self.preferences.tool == crate::commands::Tool::ScaleLayer {
             self.preview_scale_to_canvas(window, cx);
             return;
         }
-        let resample = self.warp_resample;
+        let resample = self.preferences.warp_resample;
         self.edit_content(
             move |content, _, _| content.fit_layer_to_canvas(layer, resample),
             window,
@@ -1369,7 +1369,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.tool != crate::commands::Tool::Move || self.move_drag.is_some() {
+        if self.preferences.tool != crate::commands::Tool::Move || self.move_drag.is_some() {
             return false;
         }
         self.start_move_preview(
@@ -1426,7 +1426,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tool != crate::commands::Tool::Move
+        if self.preferences.tool != crate::commands::Tool::Move
             || self.guide_drag.is_some()
             || self.space_pan
             || self.numeric_edit.is_some()
@@ -1509,7 +1509,7 @@ impl Workspace {
             self.pending_nudge = Some(pending);
             return;
         }
-        if self.tool != crate::commands::Tool::Move
+        if self.preferences.tool != crate::commands::Tool::Move
             || self.form.is_some()
             || self.dialog_open
             || pending.delta == (0, 0)
@@ -1648,8 +1648,10 @@ impl Workspace {
                         offset,
                         layer.pixels.dimensions(),
                         tab.document.content.size(),
-                        self.snap_grid.then_some(self.grid_spacing),
-                        if self.snap_guides {
+                        self.preferences
+                            .snap_grid
+                            .then_some(self.preferences.grid_spacing),
+                        if self.preferences.snap_guides {
                             tab.document.content.guides()
                         } else {
                             &[]

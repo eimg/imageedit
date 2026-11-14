@@ -13,7 +13,7 @@ pub mod smoothing;
 pub const STROKE_TILE: u32 = 64;
 pub type TileKey = (u32, u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Brush {
     pub diameter: u32,
     pub spacing: u8,
@@ -622,13 +622,13 @@ fn source_over(dst: Rgba<u8>, src: Rgba<u8>, amount: f64) -> Rgba<u8> {
     ])
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GradientShape {
     Linear,
     Radial,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GradientBlend {
     ForegroundToBackground,
     ForegroundToTransparent,

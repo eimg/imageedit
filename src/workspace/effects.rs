@@ -8,13 +8,34 @@ use crate::filters::FilterSpec;
 use crate::preview::Dirty;
 use crate::selection::Selection;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Effect {
     Adjustment(Adjustment),
     Filter(FilterSpec),
 }
 
 impl Effect {
+    fn valid(self) -> bool {
+        match self {
+            Self::Adjustment(value) => value.valid(),
+            Self::Filter(FilterSpec::Blur { radius }) => radius <= crate::filters::MAX_RADIUS,
+            Self::Filter(FilterSpec::Sharpen { radius, amount }) => {
+                radius <= crate::filters::MAX_RADIUS && amount <= 100
+            }
+            Self::Filter(FilterSpec::Shadow {
+                radius,
+                offset,
+                opacity,
+                ..
+            }) => {
+                radius <= crate::filters::MAX_RADIUS
+                    && opacity <= 100
+                    && offset.0.unsigned_abs() <= 16384
+                    && offset.1.unsigned_abs() <= 16384
+            }
+        }
+    }
+
     fn slot(self) -> usize {
         match self {
             Self::Adjustment(value) => AdjustKind::of(value) as usize,
@@ -72,6 +93,25 @@ struct PendingEffect {
     effect: Effect,
 }
 
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct Preferences {
+    values: [Option<Effect>; 10],
+    last: Option<Effect>,
+}
+
+impl Preferences {
+    pub(super) fn valid(&self) -> bool {
+        self.values.iter().enumerate().all(|(slot, effect)| {
+            effect.is_none_or(|effect| {
+                effect.valid() && effect.slot() == slot && !effect.is_identity()
+            })
+        }) && self
+            .last
+            .is_none_or(|effect| effect.valid() && self.values[effect.slot()] == Some(effect))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct EffectMemory {
     // Keep only small parameter values, never document pixels or selections.
@@ -82,6 +122,24 @@ pub(super) struct EffectMemory {
 }
 
 impl EffectMemory {
+    pub(super) fn preferences(&self) -> Preferences {
+        Preferences {
+            values: self.values.map(|value| value.map(|(_, effect)| effect)),
+            last: self.last.map(|(_, effect)| effect),
+        }
+    }
+
+    pub(super) fn restore(&mut self, preferences: &Preferences) {
+        for (current, saved) in self.values.iter_mut().zip(preferences.values) {
+            if current.is_none() {
+                *current = saved.map(|effect| (0, effect));
+            }
+        }
+        if self.last.is_none() {
+            self.last = preferences.last.map(|effect| (0, effect));
+        }
+    }
+
     pub(super) fn adjustment(&self, kind: AdjustKind) -> Adjustment {
         match self.values[kind as usize] {
             Some((_, Effect::Adjustment(value))) => value,
@@ -304,6 +362,30 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_keeps_successful_effects_without_pending_document_context() {
+        let mut memory = EffectMemory::default();
+        let invert = Effect::Adjustment(Adjustment::Invert);
+        memory.queue(1, 10, invert);
+        memory.finish(1, 10, true);
+        memory.queue(2, 50, Effect::Filter(FilterSpec::Blur { radius: 8 }));
+        let bytes = serde_json::to_vec(&memory.preferences()).unwrap();
+        let preferences: Preferences = serde_json::from_slice(&bytes).unwrap();
+        assert!(preferences.valid());
+        let mut restarted = EffectMemory::default();
+        restarted.restore(&preferences);
+        assert!(restarted.pending.is_empty());
+        assert_eq!(restarted.last, Some((0, invert)));
+        assert_eq!(restarted.filter(FilterKind::Blur), None);
+        let blur = Effect::Filter(FilterSpec::Blur { radius: 4 });
+        restarted.queue(3, 1, blur);
+        restarted.finish(3, 1, false);
+        assert_eq!(restarted.last.map(|(_, effect)| effect), Some(invert));
+        restarted.queue(3, 2, blur);
+        restarted.finish(3, 2, true);
+        assert_eq!(restarted.last.map(|(_, effect)| effect), Some(blur));
+    }
     use crate::adjustments::{ColorBalance, Curves, Levels};
     use crate::document::LayerLocks;
     use image::{Rgba, RgbaImage};

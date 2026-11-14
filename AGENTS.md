@@ -58,11 +58,19 @@ Lime supports layered raster editing. The empty workspace can open a
 file or create an image. Crop that image: drag the box, move it from inside,
 resize it from its handles, and edit X, Y, Width, and Height in the Crop
 options. Typed values apply immediately, and an empty field leaves the crop
-unchanged.
+unchanged. Crop drags may start outside the canvas; both creation endpoints clamp
+to image pixels so free and fixed-ratio crop boxes stay inside the image.
 Crop has Free, 1:1, 4:3, 16:9, Image, and custom integer aspect ratios. A fixed
 ratio constrains creation, handle resize, and numeric dimension edits; choosing
-a ratio alone leaves the current box unchanged. Sample or set swatches,
-and fill connected regions on the active layer. Rectangle, oval, circle,
+a ratio alone leaves the current box unchanged. Sample or set swatches and fill
+connected regions on the active layer.
+One shared recent list holds 12 unique RGB colors across tabs and all color
+pickers. Accepting foreground/background, Text, Drop Shadow, and gradient-stop
+colors or sampling with Eyedropper remembers the RGB; canceled picker drafts do
+not. Foreground/background swatches and recents persist in personal `settings.json`
+beside `gradients.json`, outside project data/history. Swap and Reset persist;
+Reset leaves recents intact. Gradient alpha stays separate from RGB memory.
+Rectangle, oval, circle,
 freehand or polygon, and wand selections limit fill and Clear to Transparency,
 and Crop to Selection uses the selection bounds. Rectangle Select and Oval Select
 are separate tools. Oval Select has a Circle option for an exact circle, and
@@ -73,7 +81,7 @@ share ratio geometry from `src/constraints.rs`: dimensions round to pixels,
 resizes stay bounded, side handles center the untouched axis, and corner handles
 keep their opposite corner. Fixed-ratio handles stop at minimum size rather than
 crossing their opposite edge. Circle overrides the oval ratio. Rectangle and
-oval tools remember a shared ratio during the session; Crop has a separate one.
+oval tools remember a shared ratio across restarts; Crop has a separate one.
 Antialias edges defaults off and smooths oval/circle and rounded-rectangle
 coverage with a 4×4 subpixel sample, using fast interior/exterior checks. It
 updates a current editable curve in one selection-only undo step. Masks retain
@@ -82,8 +90,11 @@ image transforms, and history preserve curve quality; clipped curves become
 coverage masks.
 Rectangle and oval drags may start or extend outside the canvas; coverage stays
 bounded to canvas pixels and clipped curves retain their original geometry.
+New geometric selections use the persistent radius/antialias defaults rather
+than copying style from an existing selection at gesture start. Moving/resizing
+an existing shape still preserves its own quality and coverage.
 Shift adds to the selection, Control subtracts, and Shift-Control intersects.
-Wand and Bucket have independent session Tolerance and Gap radius settings,
+Wand and Bucket have independent persistent Tolerance and Gap radius settings,
 starting at zero. Zero tolerance matches exactly. Gap radius (0–8 image pixels)
 closes small breaks in nonmatching boundaries before four-connected region
 traversal; 0 preserves the original fast path. A temporary hard boundary mask
@@ -219,10 +230,14 @@ the chosen source. Changing alignment resets its offset. Tab/layer changes clear
 the source; changed layer/canvas geometry requires a fresh source. The first successful
 stroke establishes alignment; canceled/failed strokes leave it unchanged. Pencil,
 Brush, Eraser, Blur, and Sharpen paint the active layer inside the selection; a
-stroke commits when the pointer is released. Their pointer is a size-scaled
+stroke commits when the pointer is released. Pencil, Brush, Eraser, Blur, Sharpen,
+and Clone Stamp strokes may start outside the canvas and enter it while held;
+painting remains clipped to the canvas, active layer, and selection. Eyedropper,
+Wand, Bucket Fill, and clone-source picking still require an inside-canvas pixel.
+Their pointer is a size-scaled
 ring, hard for Pencil and soft for the others. Blur and Sharpen change local
 pixels under the brush. Blur and Sharpen have no shortcut.
-Brush, Eraser, Blur, Sharpen, and Clone Stamp have independent session smoothing
+Brush, Eraser, Blur, Sharpen, and Clone Stamp have independent persistent smoothing
 settings: Off (default), Light, and Strong, shown in a full-width segmented group
 below a regular mixed-case Smoothing field label with tight label/control spacing. Pencil and outline strokes stay
 unsmoothed. Light/Strong use time-based responses of 16/32 ms and finite settling
@@ -232,12 +247,12 @@ live pixels. Off bypasses the filter and timer. Release drains the remaining
 bounded tail synchronously to the exact endpoint before the ordinary single
 stroke commit; cancellation discards it. Shift-click connectors remain straight.
 The Clone source indicator uses the filtered destination during a smoothed stroke.
-The paint and retouch tools retain independent brush settings during the session;
+The paint and retouch tools retain independent brush settings across restarts;
 path and selection outlines share their own settings. Opacity limits each stroke
 relative to its starting pixels. A 16-bit coverage buffer per touched tile keeps
 overlapping dabs from exceeding that limit and applies soft selection coverage
 once. Buildup defaults off; when on, Flow (0–100) accumulates dab coverage toward
-the opacity limit. Flow and buildup are remembered per tool during the session.
+the opacity limit. Flow and buildup are remembered per tool across restarts.
 Blur/Sharpen label opacity Strength and blend the original stroke pixels toward
 a fixed local filtered result; a new stroke applies another pass. Outline strokes
 use the same coverage cap. Zero opacity, buildup with zero flow, and unchanged targets publish no
@@ -287,7 +302,7 @@ Blur, Sharpen, and Drop Shadow use the same composition preview controls. Blur a
 Sharpen follow the selection and mix color and alpha. Drop Shadow adds a layer
 beneath the source from its blurred silhouette. A zero radius or amount does
 not create a history entry. Each adjustment/filter remembers successful parameters
-for the workspace session, shared across tabs; cancellation, failed/stale jobs,
+across restarts, shared across tabs; cancellation, failed/stale jobs,
 and pixel no-ops leave prior settings intact. Filters → Repeat Last Effect
 (Cmd/Ctrl+F) applies the last successful adjustment/filter to the current visible
 raster layer and current selection as one undoable edit. Reopen Last Effect
@@ -317,7 +332,7 @@ removing every anchor removes the path. A group click never closes an open path;
 click-first-anchor closure is retained for a single selected anchor. Selection
 is session-only and clears on path/tab/tool switches, hiding/deleting its path,
 and undo/redo. Stale or hidden IDs cannot target another path.
-Independent (default), Aligned, and Symmetric are session handle-drag preferences;
+Independent (default), Aligned, and Symmetric are persistent handle-drag preferences;
 they preserve the opposite handle, its length, or mirror its length respectively.
 Newly placed handles retain symmetric creation. Linked drags use the baseline
 anchor each frame to avoid drift. A click without movement does not couple
@@ -390,7 +405,7 @@ DPI rounding, and validates the combined canvas before rendering. All imported
 layers retain their pixels and use the same integer centering rule, including
 the first page. The dialog shows canvas dimensions and warns about pages extending
 outside the first-page or existing canvas. Open as Layers never resizes its target.
-Successful imports remember DPI/background during the session, and successful
+Successful imports remember DPI/background across restarts, and successful
 new-document imports also remember mode/canvas choice. Failed/canceled imports
 do not change defaults; page selection resets per source. The PDF dialog is
 720 px wide above a 760 px window width, with settings beside the page picker;
@@ -440,13 +455,13 @@ below eight screen points of spacing at low zoom. Move's independent Snap to Gri
 start off; they work even when overlays are hidden, align layer edges/centers
 within six screen points, and Control bypasses snapping and guide grabs. Exact
 numeric positions and arrow nudges bypass snapping. Grid spacing (1–4096 px) and
-overlay/snap preferences are session settings. Save and Save As handle
+overlay/snap preferences persist across restarts. Save and Save As handle
 Lime (`.lime`) projects (legacy `.imageedit` files remain readable),
 PNG, JPEG, and WebP. A project stores the layer stack, paths, guides, and text with lossless pixels.
 Export writes flattened PNG, JPEG, WebP, or single-page PDF copies to a separate destination
 and preserves the tab’s saved state. PDF exports the complete current canvas as a
 lossless RGB image over white with embedded sRGB. Its dialog shows physical page
-size and accepts 1–1200 DPI (300 initially, remembered for the session), with a
+size and accepts 1–1200 DPI (300 initially, remembered across restarts), with a
 canvas-dependent minimum to stay within 200 inches per page edge. DPI changes
 page size without resampling. Layers and text are flattened; multipage, paper
 layouts, searchable text, and vector output are deferred. `src/pdf/export.rs`
@@ -469,6 +484,9 @@ document is a single plain layer without paths, guides, or editable text.
   ZIP), and direct URLs must match this repository's HTTPS release paths.
   `src/updates/ui.rs` adds a status-bar badge and a separate update window with
   changelog/download links, current/checking/offline states, and keyboard access.
+  The status bar always shows the compiled package version beside the image count
+  in muted 11-point text, matching the update badge's size and padding; the update
+  badge remains the rightmost item when available.
   Missing platform assets leave the changelog available without guessing a URL.
   The Lime menu (macOS) or Help menu (Windows) exposes Check for Updates. Nothing
   downloads or installs in the app, and update state never enters image history.
@@ -505,7 +523,7 @@ document is a single plain layer without paths, guides, or editable text.
   establishes alignment only after the stroke result publishes successfully.
   `src/gradient.rs` owns bounded color ramps, ordered stop edits, and premultiplied
   interpolation. `src/workspace/gradient_ui.rs` shares one specification between
-  the coalesced preview and Apply, owns the session palette and persistent named
+  the coalesced preview and Apply, owns the persistent current palette and named
   library UI, and preserves geometry when loading presets. Apply/Cancel remain above the stop editor.
 - `src/gradient/library.rs` validates the version 1 JSON gradient library,
   including IDs, unique names, at most 32 entries, 2–8 strictly ordered stops,
@@ -524,7 +542,7 @@ document is a single plain layer without paths, guides, or editable text.
   the preview in the background and rejects results after Apply or cancellation.
   Release retains the draft; later pointer/numeric gestures capture the current
   target as their baseline while preserving the original source for one Apply.
-  Frame/size and tool options exist only during the session; completion never
+  Frame and draft sizes exist only during the transform session; tool preferences persist separately; completion never
   falls back to displaying an idle frame from the committed layer. Scale and warp
   sessions share tool/tab/layer startup routing and restart on a canvas click.
   Numeric dimensions use the same preview/commit path; aspect locking retains
@@ -573,7 +591,7 @@ document is a single plain layer without paths, guides, or editable text.
   independently of remembered parameters; neither comparison nor reset edits pixels
   or history.
 - `src/workspace/effects.rs` shares the normal/repeated effect commit path and
-  owns bounded, session-only parameter memory for the seven adjustments and three
+  owns bounded, persistent parameter memory for the seven adjustments and three
   filters. Pending entries contain parameter values plus tab/generation/submission
   order, never source pixels or selection snapshots. Only successful publication
   records parameters; late completions from another tab cannot replace newer
@@ -600,7 +618,7 @@ or oval, resizes it from its handles, moves it from inside, and clears it on a
 click outside. Oval Select has a Circle option. Rectangle Select has a corner
 radius control with minus and plus buttons. X/Y and Width/Height fields edit
 the position and size with live preview. Selection and Crop share constrained
-ratio geometry in `src/constraints.rs`; each has its own session preference.
+ratio geometry in `src/constraints.rs`; each has its own persistent preference.
 Geometric curve quality lives with the selection, including in history.
 Empty numeric text restores the selection. Cropping or shrinking the canvas preserves curved selection coverage;
 a partially clipped curve becomes a bounded mask. Scaling a rounded selection
@@ -818,7 +836,7 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   aspect ratio and draw their checker only inside that area. The preview is
   display-only until the pointer is released. Move's crosshair has a four-arrow badge, and
   its tool options align the layer to canvas edges or center it with icon
-  buttons. Move's Snapping disclosure starts collapsed, retains its session
+  buttons. Move's Snapping disclosure starts collapsed, retains its persistent
   state, shows the active snap modes while folded, and never changes settings
   when folded. Tool options use their natural height up to half the inspector,
   scrolling independently from Layers/Paths in the remaining space.
@@ -842,6 +860,40 @@ Grow/Shrink use linear-time running max/min filters to preserve soft coverage.
   action styling and put chevrons before Previous and after Next.
   `src/workspace/color.rs`
   handles the HSV wheel and brightness slider.
+  `src/color_memory.rs` owns bounded RGB memory and legacy `colors.json` reads.
+  `src/settings.rs` owns the centralized version-1 `settings.json`, a 128 KiB
+  read/write limit, validated preference patches, legacy color import, advisory
+  locking, and atomic replacement. Invalid/unknown/newer files remain untouched.
+  `src/workspace/settings_ui.rs::Preferences` is the sole owner of personal tool
+  and workspace preferences; Workspace/Tab retain document data, active gestures,
+  render buffers, clone sources, and other transient state. The preferences cover
+  all per-tool brushes/smoothing, selection/crop choices, region matching and
+  sampling, Clone flags, Scale lock/anchor/resampling, the current gradient and
+  library selection/disclosure, text defaults, Path handle/stroke choices,
+  successful effect parameters/last effect, PDF/JPEG preferences, overlays,
+  snapping, active tool, inspector tab, and toolbox width/folding. Named gradients
+  stay in their separate library. Effect job order, pending document contexts,
+  selection masks, document coordinates, and transform drafts are never saved.
+  Settings load/save uses background jobs and 250 ms coalescing. Early/in-flight
+  edits replay over loads; writes merge only changed preference fields (including per-tool brush fields)
+  and RGB edits over the current disk state. Numeric previews and live toolbox
+  widths save only after their normal commit. Failed writes retain queued values,
+  report an error, and retry on the next preference change. Close/Quit flushes
+  outstanding settings before normal unsaved-image handling. Preference changes
+  never dirty a document or enter its undo history.
+  `src/workspace/tool_reset.rs` owns current/all-tool reset scopes and availability.
+  Tool Options has a reset arrow; Tools has Reset Current Tool and confirmed
+  Reset All Tool Settings. Shared tool options reset together (geometric ratio/AA,
+  creation feathering, transform resampling, outline brush); Move includes snap
+  flags and grid spacing. Selected tool, layout/disclosures/overlays, colors and
+  recents, gradient library, PDF/JPEG choices, and effect memory stay intact.
+  Gradient's current palette/selection resets, without writing its library.
+  Resets are disabled during dialogs, settings load, document jobs, numeric/text
+  editing, gestures, and pending previews. The header consumes mouse-down even
+  while disabled so it cannot commit a field through the root handler. Reset
+  changes only preferences, uses Clone's existing sampling/alignment invalidation,
+  and flushes settings immediately. It never commits, cancels, or applies an image
+  edit; existing selections/text/layers and their history remain untouched.
   `src/workspace/dialogs/pdf_input.rs` maps PDF input pointer positions through
   the current shaped font, field padding, and horizontal scroll offset. The modal
   owns the drag through mouse-up so selection can extend beyond the field. UTF-8

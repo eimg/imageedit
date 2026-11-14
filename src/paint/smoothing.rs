@@ -2,7 +2,7 @@ use std::time::Duration;
 
 pub const TICK: Duration = Duration::from_millis(8);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Smoothing {
     #[default]
     Off,

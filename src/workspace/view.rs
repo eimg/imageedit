@@ -18,9 +18,10 @@ use crate::commands::{
     CancelStroke, CancelTransform, CloseFreeSelect, ClosePath, CloseTab, DeletePathAnchor,
     ExportJpeg, ExportPdf, ExportPng, ExportWebp, FeatherSelection, ForegroundColor, GrowSelection,
     InvertSelection, MinimizeWindow, NEW_HINT, NewImage, NextTab, NudgeLayer, OPEN_HINT, OpenImage,
-    PreviousTab, Redo, ResetColors, SaveImage, SaveImageAs, SaveProjectAs, SelectNone, SelectTool,
-    ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides, ToggleLayerBoundary,
-    ToggleSnapGrid, ToggleSnapGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut, ZoomWindow,
+    PreviousTab, Redo, ResetColors, ResetCurrentTool, SaveImage, SaveImageAs, SaveProjectAs,
+    SelectNone, SelectTool, ShrinkSelection, SwapColors, TOOL_GROUPS, ToggleGrid, ToggleGuides,
+    ToggleLayerBoundary, ToggleSnapGrid, ToggleSnapGuides, Tool, Undo, Zoom, ZoomIn, ZoomOut,
+    ZoomWindow,
 };
 use crate::document::{CropRect, DrawnTile, FileFormat};
 use crate::preview;
@@ -31,7 +32,7 @@ use super::cursor::CanvasCursor;
 use super::files::{ExportFormat, SaveMode};
 use super::numeric::NumericField;
 use super::tooltip::{help_icon, tooltip, tooltip_with_detail};
-use super::{Change, DEFAULT_COLORS, Tab, Workspace};
+use super::{Change, Tab, Workspace};
 
 pub(super) use crate::theme::{
     ACCENT, BORDER, CANVAS, CHECKER_DARK, CHECKER_LIGHT, CHROME, DISABLED, HOVER, MUTED, PANEL,
@@ -53,6 +54,7 @@ const TOOLBOX_MAX_COLUMNS: usize = 4;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_settings(window, cx);
         #[cfg(target_os = "windows")]
         crate::windows_menu::request_sync(cx);
         self.schedule_pending_open(window, cx);
@@ -151,8 +153,8 @@ impl Render for Workspace {
                 root.on_action(cx.listener(|this, action: &SelectTool, window, cx| {
                     this.close_font_picker(window, cx);
                     let tool = action.0;
-                    let changed = this.tool != tool;
-                    let was_path = this.tool == Tool::Path;
+                    let changed = this.preferences.tool != tool;
+                    let was_path = this.preferences.tool == Tool::Path;
                     // Typed text commits on its own; a transform tool starts once it lands.
                     let committing = changed && this.finish_text(window, cx);
                     if committing
@@ -171,13 +173,13 @@ impl Render for Workspace {
                         this.pending_nudge = None;
                         this.commit_numeric_edit(window, cx);
                         this.numeric_followup = None;
-                        this.tool = tool;
+                        this.preferences.tool = tool;
                         this.pan_drag = None;
                         this.clear_selection_gesture();
                         this.clear_move_preview(window, cx);
                         this.clear_crop();
                         if tool == Tool::Path {
-                            this.inspector_tab = super::InspectorTab::Paths;
+                            this.preferences.inspector_tab = super::InspectorTab::Paths;
                         } else if was_path {
                             this.end_path_session(cx);
                         }
@@ -212,11 +214,22 @@ impl Render for Workspace {
                     this.color_form(1, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &SwapColors, window, cx| {
-                    this.colors.swap(0, 1);
+                    let [foreground, background] = this.color_memory.swatches;
+                    this.change_color_memory(
+                        crate::color_memory::Changes::swatches([background, foreground]),
+                        window,
+                        cx,
+                    );
                     this.refresh_gradient(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &ResetColors, window, cx| {
-                    this.colors = DEFAULT_COLORS;
+                    this.change_color_memory(
+                        crate::color_memory::Changes::swatches(
+                            crate::color_memory::DEFAULT_SWATCHES,
+                        ),
+                        window,
+                        cx,
+                    );
                     this.refresh_gradient(window, cx);
                 }))
             })
@@ -263,7 +276,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(|this, _: &ExportPdf, window, cx| {
                         this.pdf_export_form(window, cx)
                     }))
-                    .when(self.tool == Tool::Crop, |root| {
+                    .when(self.preferences.tool == Tool::Crop, |root| {
                         root.key_context("Crop")
                             .when(self.crop.is_some() && self.crop_drag.is_none(), |root| {
                                 root.on_action(cx.listener(|this, _: &ApplyCrop, window, cx| {
@@ -275,7 +288,7 @@ impl Render for Workspace {
                                 cx.notify();
                             }))
                     })
-                    .when(self.tool == Tool::Move, |root| {
+                    .when(self.preferences.tool == Tool::Move, |root| {
                         root.key_context("Move")
                             .on_action(cx.listener(|this, delta: &NudgeLayer, window, cx| {
                                 this.nudge_layer((delta.0, delta.1), window, cx);
@@ -284,7 +297,7 @@ impl Render for Workspace {
                                 this.cancel_move(window, cx)
                             }))
                     })
-                    .when(self.tool == Tool::ScaleLayer, |root| {
+                    .when(self.preferences.tool == Tool::ScaleLayer, |root| {
                         root.key_context("ScaleLayer")
                             .on_action(cx.listener(|this, _: &ApplyTransform, window, cx| {
                                 this.finish_scale(window, cx)
@@ -295,7 +308,7 @@ impl Render for Workspace {
                     })
                     .when(
                         matches!(
-                            self.tool,
+                            self.preferences.tool,
                             Tool::Pencil
                                 | Tool::Brush
                                 | Tool::Eraser
@@ -309,7 +322,7 @@ impl Render for Workspace {
                             ))
                         },
                     )
-                    .when(self.tool == Tool::Gradient, |root| {
+                    .when(self.preferences.tool == Tool::Gradient, |root| {
                         root.key_context("Gradient")
                             .when(self.can_apply_gradient(), |root| {
                                 root.on_action(cx.listener(
@@ -324,7 +337,10 @@ impl Render for Workspace {
                             }))
                     })
                     .when(
-                        matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective),
+                        matches!(
+                            self.preferences.tool,
+                            Tool::Rotate | Tool::Flip | Tool::Perspective
+                        ),
                         |root| {
                             root.key_context("Transform")
                                 .when(self.can_apply_warp(), |root| {
@@ -363,7 +379,7 @@ impl Render for Workspace {
                             })
                     })
                     .when(
-                        self.tool == Tool::Text && self.text_draft.is_some(),
+                        self.preferences.tool == Tool::Text && self.text_draft.is_some(),
                         |root| {
                             root.key_context("Text").on_key_down(cx.listener(
                                 |this, event: &gpui::KeyDownEvent, window, cx| {
@@ -372,7 +388,7 @@ impl Render for Workspace {
                             ))
                         },
                     )
-                    .when(self.tool == Tool::Path, |root| {
+                    .when(self.preferences.tool == Tool::Path, |root| {
                         root.key_context("Path")
                             .on_action(cx.listener(|this, _: &CancelPath, _, cx| {
                                 this.end_path_session(cx);
@@ -399,7 +415,7 @@ impl Render for Workspace {
             .when(
                 interactive
                     && matches!(
-                        self.tool,
+                        self.preferences.tool,
                         Tool::Pencil
                             | Tool::Brush
                             | Tool::Eraser
@@ -437,25 +453,25 @@ impl Render for Workspace {
                     this.step_zoom(0.8, None, window.scale_factor(), window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleGrid, _, cx| {
-                    this.show_grid = !this.show_grid;
+                    this.preferences.show_grid = !this.preferences.show_grid;
                     cx.notify();
                 }))
                 .on_action(cx.listener(|this, _: &ToggleSnapGrid, _, cx| {
-                    this.snap_grid = !this.snap_grid;
+                    this.preferences.snap_grid = !this.preferences.snap_grid;
                     cx.notify();
                 }))
                 .on_action(cx.listener(|this, _: &ToggleSnapGuides, _, cx| {
-                    this.snap_guides = !this.snap_guides;
+                    this.preferences.snap_guides = !this.preferences.snap_guides;
                     cx.notify();
                 }))
                 .on_action(cx.listener(|this, _: &ToggleGuides, _, cx| {
                     this.cancel_guide(cx);
-                    this.show_guides = !this.show_guides;
+                    this.preferences.show_guides = !this.preferences.show_guides;
                     cx.notify();
                 }))
                 .on_action(cx.listener(
                     |this, _: &ToggleLayerBoundary, _, cx| {
-                        this.show_layer_bounds = !this.show_layer_bounds;
+                        this.preferences.show_layer_bounds = !this.preferences.show_layer_bounds;
                         cx.notify();
                     },
                 ))
@@ -503,6 +519,7 @@ impl Render for Workspace {
             .child(self.status_bar(cx))
             .children(self.form_overlay(window, cx))
             .children(self.pdf_progress_overlay(cx))
+            .map(|root| self.bind_tool_reset_actions(root, cx))
             .map(|root| {
                 #[cfg(any(target_os = "linux", test))]
                 let root = root
@@ -516,7 +533,7 @@ impl Render for Workspace {
 impl Workspace {
     fn brush_cursor(&self, tab: &Tab, scale: f32) -> Option<BrushCursor> {
         if !matches!(
-            self.tool,
+            self.preferences.tool,
             Tool::Pencil
                 | Tool::Brush
                 | Tool::Eraser
@@ -531,10 +548,10 @@ impl Workspace {
         let scale = f32::from(geometry.bounds.size.width) / canvas_width;
         let (diameter, hardness) = self.active_brush_settings();
         Some(BrushCursor {
-            tool: self.tool,
+            tool: self.preferences.tool,
             diameter: diameter as f32 * scale,
             hardness,
-            soft: self.tool != Tool::Pencil,
+            soft: self.preferences.tool != Tool::Pencil,
             clone_source: self.clone_preview().map(|preview| CloneCursor {
                 preview,
                 bounds: geometry.bounds,
@@ -544,14 +561,15 @@ impl Workspace {
     }
 
     fn toolbox(&self, cx: &Context<Self>) -> Div {
-        let folded = self.toolbox_folded;
+        let folded = self.preferences.toolbox_folded;
         let width = if folded {
             TOOLBOX_FOLDED_WIDTH
         } else {
-            self.toolbox_width
+            self.preferences.toolbox_width
         };
         let available =
-            (self.toolbox_width - TOOLBOX_PADDING * 2. - TOOLBOX_SCROLLBAR_ALLOWANCE).max(0.);
+            (self.preferences.toolbox_width - TOOLBOX_PADDING * 2. - TOOLBOX_SCROLLBAR_ALLOWANCE)
+                .max(0.);
         let columns = (((available + TOOLBOX_GAP) / (TOOLBOX_MIN_BUTTON_WIDTH + TOOLBOX_GAP))
             .floor() as usize)
             .clamp(1, TOOLBOX_MAX_COLUMNS);
@@ -626,7 +644,7 @@ impl Workspace {
     }
 
     fn toolbox_header(&self, cx: &Context<Self>) -> Div {
-        let folded = self.toolbox_folded;
+        let folded = self.preferences.toolbox_folded;
         let toggle = div()
             .id("fold-toolbox")
             .flex()
@@ -644,7 +662,7 @@ impl Workspace {
                 "Collapse toolbox"
             }))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.toolbox_folded = !this.toolbox_folded;
+                this.preferences.toolbox_folded = !this.preferences.toolbox_folded;
                 this.toolbox_drag = None;
                 cx.notify();
             }))
@@ -689,7 +707,7 @@ impl Workspace {
             .bg(rgb(CHROME))
             .cursor_pointer()
             .when_else(
-                self.tool == tool,
+                self.preferences.tool == tool,
                 |button| button.bg(rgb(SELECTED)).text_color(rgb(ACCENT)),
                 |button| button.hover(|button| button.bg(rgb(HOVER))),
             )
@@ -760,7 +778,7 @@ impl Workspace {
     }
 
     fn begin_toolbox_resize(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        self.toolbox_drag = Some((f32::from(event.position.x), self.toolbox_width));
+        self.toolbox_drag = Some((f32::from(event.position.x), self.preferences.toolbox_width));
         cx.notify();
     }
 
@@ -770,8 +788,8 @@ impl Workspace {
         };
         let width = (start_width + f32::from(position.x) - start_x)
             .clamp(TOOLBOX_MIN_WIDTH, TOOLBOX_MAX_WIDTH);
-        if (width - self.toolbox_width).abs() > 0.5 {
-            self.toolbox_width = width;
+        if (width - self.preferences.toolbox_width).abs() > 0.5 {
+            self.preferences.toolbox_width = width;
             cx.notify();
         }
     }
@@ -783,7 +801,7 @@ impl Workspace {
     }
 
     fn color_box(&self, folded: bool) -> Div {
-        let [foreground, background] = self.colors;
+        let [foreground, background] = self.color_memory.swatches;
         let panel = div().flex_shrink_0().border_b_1().border_color(rgb(BORDER));
         if folded {
             let swatch = (TOOLBOX_FOLDED_WIDTH - TOOLBOX_FOLDED_PADDING * 2.).min(36.);
@@ -799,7 +817,7 @@ impl Workspace {
                 .child(swap_button(flip))
                 .child(color_square("Background", background, swatch))
         } else {
-            let swatch = (self.toolbox_width * 0.18).clamp(26., 40.);
+            let swatch = (self.preferences.toolbox_width * 0.18).clamp(26., 40.);
             let offset = (swatch * 0.5).round();
             let block = swatch + offset;
             let flip = (offset - 1.).max(12.);
@@ -831,18 +849,20 @@ impl Workspace {
             .flex_col()
             .gap_2()
             .child(section_label("SHAPE"));
-        if self.tool == Tool::Select {
+        if self.preferences.tool == Tool::Select {
             options = options.child(self.selection_radius_row(cx));
         }
-        if self.tool == Tool::OvalSelect {
-            options = options.child(toggle_button("Circle", self.oval_circle).on_click(
-                cx.listener(|this, _, window, cx| {
-                    let circle = !this.oval_circle;
-                    this.set_oval_circle(circle, window, cx);
-                }),
-            ));
+        if self.preferences.tool == Tool::OvalSelect {
+            options = options.child(
+                toggle_button("Circle", self.preferences.oval_circle).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        let circle = !this.preferences.oval_circle;
+                        this.set_oval_circle(circle, window, cx);
+                    },
+                )),
+            );
         }
-        if !(self.tool == Tool::OvalSelect && self.oval_circle) {
+        if !(self.preferences.tool == Tool::OvalSelect && self.preferences.oval_circle) {
             options = options.child(self.aspect_options(false, cx));
         }
         if self.selection_shape_rect().is_some() {
@@ -865,34 +885,34 @@ impl Workspace {
         let antialias = self.active_selection_antialias();
         div().flex().flex_col().gap_2()
             .child(section_label("EDGES"))
-            .when(matches!(self.tool, Tool::Select | Tool::OvalSelect), |panel| panel.child(
+            .when(matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect), |panel| panel.child(
                 toggle_button("Antialias edges", antialias).on_click(cx.listener(
                     move |this, _, window, cx| this.set_selection_antialias(!antialias, window, cx),
                 ))
             ))
-            .when(self.tool == Tool::FreeSelect, |panel| panel.child(
-                toggle_button("Antialias edges", self.free_antialias)
+            .when(self.preferences.tool == Tool::FreeSelect, |panel| panel.child(
+                toggle_button("Antialias edges", self.preferences.free_antialias)
                     .tooltip(tooltip("Use subpixel coverage when a new free selection closes"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.free_antialias = !this.free_antialias;
+                        this.preferences.free_antialias = !this.preferences.free_antialias;
                         cx.notify();
                     }))
             ))
-            .when(self.tool == Tool::MagicWand, |panel| panel.child(
-                toggle_button("Antialias edges", self.wand_antialias)
+            .when(self.preferences.tool == Tool::MagicWand, |panel| panel.child(
+                toggle_button("Antialias edges", self.preferences.wand_antialias)
                     .tooltip(tooltip("Smooth new wand contours after region matching; keep the current selection unchanged"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.wand_antialias = !this.wand_antialias;
+                        this.preferences.wand_antialias = !this.preferences.wand_antialias;
                         cx.notify();
                     }))
             ))
-            .child(toggle_button("Feather new selections", self.selection_feather_enabled)
+            .child(toggle_button("Feather new selections", self.preferences.selection_feather_enabled)
                 .tooltip(tooltip("Soften new selections when completed; keep the current selection unchanged"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.selection_feather_enabled = !this.selection_feather_enabled;
+                    this.preferences.selection_feather_enabled = !this.preferences.selection_feather_enabled;
                     cx.notify();
                 })))
-            .when(self.selection_feather_enabled, |panel| panel.child(
+            .when(self.preferences.selection_feather_enabled, |panel| panel.child(
                 self.numeric_chip(NumericField::SelectionFeatherRadius, Some("Feather radius (px)"), cx)
             ))
     }
@@ -900,9 +920,9 @@ impl Workspace {
     fn aspect_options(&self, crop: bool, cx: &Context<Self>) -> Div {
         use crate::constraints::AspectRatio;
         let active = if crop {
-            self.crop_ratio
+            self.preferences.crop_ratio
         } else {
-            self.selection_ratio
+            self.preferences.selection_ratio
         };
         let image = self.active_tab().map(|tab| AspectRatio {
             width: tab.document.width(),
@@ -934,14 +954,14 @@ impl Workspace {
                 choice_button(label, active == ratio).on_click(cx.listener(
                     move |this, _, _, cx| {
                         if crop {
-                            this.crop_ratio = ratio;
+                            this.preferences.crop_ratio = ratio;
                             if let Some(ratio) = ratio {
-                                this.crop_ratio_value = ratio;
+                                this.preferences.crop_ratio_value = ratio;
                             }
                         } else {
-                            this.selection_ratio = ratio;
+                            this.preferences.selection_ratio = ratio;
                             if let Some(ratio) = ratio {
-                                this.selection_ratio_value = ratio;
+                                this.preferences.selection_ratio_value = ratio;
                             }
                         }
                         cx.notify();
@@ -1144,7 +1164,7 @@ impl Workspace {
                                 && !this.space_pan
                                 && ((!event.modifiers.control
                                     && this.begin_guide(event.position, window.scale_factor(), cx))
-                                    || (this.show_guides
+                                    || (this.preferences.show_guides
                                         && super::guide_ui::ruler_hit(
                                             this.viewport.get(),
                                             event.position,
@@ -1244,7 +1264,7 @@ impl Workspace {
                     .capture_any_mouse_up(cx.listener(Self::end_canvas_drag))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::end_canvas_drag))
                     .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::end_canvas_drag))
-                    .when(self.tool == Tool::Pan, |area| {
+                    .when(self.preferences.tool == Tool::Pan, |area| {
                         area.cursor(CursorStyle::OpenHand).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -1254,7 +1274,8 @@ impl Workspace {
                         )
                     })
                     .when(
-                        matches!(self.tool, Tool::Select | Tool::OvalSelect) && !tab.busy(),
+                        matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect)
+                            && !tab.busy(),
                         |area| {
                             area.cursor(self.selection_cursor(scale)).on_mouse_down(
                                 MouseButton::Left,
@@ -1269,7 +1290,7 @@ impl Workspace {
                             )
                         },
                     )
-                    .when(self.tool == Tool::Move && !tab.busy(), |area| {
+                    .when(self.preferences.tool == Tool::Move && !tab.busy(), |area| {
                         area.on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1278,8 +1299,10 @@ impl Workspace {
                         )
                     })
                     .when(
-                        matches!(self.tool, Tool::Rotate | Tool::Flip | Tool::Perspective)
-                            && !tab.busy(),
+                        matches!(
+                            self.preferences.tool,
+                            Tool::Rotate | Tool::Flip | Tool::Perspective
+                        ) && !tab.busy(),
                         |area| {
                             area.cursor(CursorStyle::Crosshair).on_mouse_down(
                                 MouseButton::Left,
@@ -1296,7 +1319,7 @@ impl Workspace {
                     )
                     .when(
                         matches!(
-                            self.tool,
+                            self.preferences.tool,
                             Tool::Pencil
                                 | Tool::Brush
                                 | Tool::Eraser
@@ -1308,7 +1331,9 @@ impl Workspace {
                             area.cursor(CursorStyle::Crosshair).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                    if this.tool == Tool::CloneStamp && event.modifiers.alt {
+                                    if this.preferences.tool == Tool::CloneStamp
+                                        && event.modifiers.alt
+                                    {
                                         this.set_clone_source(
                                             event.position,
                                             window.scale_factor(),
@@ -1327,15 +1352,23 @@ impl Workspace {
                             )
                         },
                     )
-                    .when(self.tool == Tool::ScaleLayer && !tab.busy(), |area| {
-                        area.cursor(self.scale_cursor(scale)).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_scale(event.position, window.scale_factor(), window, cx);
-                            }),
-                        )
-                    })
-                    .when(self.tool == Tool::Crop && !tab.busy(), |area| {
+                    .when(
+                        self.preferences.tool == Tool::ScaleLayer && !tab.busy(),
+                        |area| {
+                            area.cursor(self.scale_cursor(scale)).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_scale(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
+                        },
+                    )
+                    .when(self.preferences.tool == Tool::Crop && !tab.busy(), |area| {
                         area.cursor(self.crop_cursor(scale)).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1343,7 +1376,7 @@ impl Workspace {
                             }),
                         )
                     })
-                    .when(self.tool == Tool::Eyedropper, |area| {
+                    .when(self.preferences.tool == Tool::Eyedropper, |area| {
                         area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
                             |this, event: &gpui::ClickEvent, window, cx| {
                                 this.pick_color(
@@ -1355,7 +1388,7 @@ impl Workspace {
                             },
                         ))
                     })
-                    .when(self.tool == Tool::Zoom, |area| {
+                    .when(self.preferences.tool == Tool::Zoom, |area| {
                         area.cursor(CursorStyle::Crosshair)
                             .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
                                 let multiplier =
@@ -1385,54 +1418,60 @@ impl Workspace {
                                 }),
                             )
                     })
-                    .when(self.tool == Tool::FreeSelect && !tab.busy(), |area| {
-                        let over_node = self.canvas_cursor.position.get().is_some_and(|pointer| {
-                            PreviewGeometry::for_tab(tab, self.viewport.get(), scale).is_some_and(
-                                |geometry| {
-                                    super::selection::free_node_at(
-                                        &self.free_points,
-                                        &self.free_nodes,
-                                        &geometry,
-                                        pointer,
-                                    )
-                                    .is_some()
-                                },
+                    .when(
+                        self.preferences.tool == Tool::FreeSelect && !tab.busy(),
+                        |area| {
+                            let over_node =
+                                self.canvas_cursor.position.get().is_some_and(|pointer| {
+                                    PreviewGeometry::for_tab(tab, self.viewport.get(), scale)
+                                        .is_some_and(|geometry| {
+                                            super::selection::free_node_at(
+                                                &self.free_points,
+                                                &self.free_nodes,
+                                                &geometry,
+                                                pointer,
+                                            )
+                                            .is_some()
+                                        })
+                                });
+                            area.cursor(if self.free_node_drag.is_some() {
+                                CursorStyle::ClosedHand
+                            } else if over_node {
+                                CursorStyle::OpenHand
+                            } else {
+                                CursorStyle::Crosshair
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_free(
+                                        event.position,
+                                        &event.modifiers,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
+                                }),
                             )
-                        });
-                        area.cursor(if self.free_node_drag.is_some() {
-                            CursorStyle::ClosedHand
-                        } else if over_node {
-                            CursorStyle::OpenHand
-                        } else {
-                            CursorStyle::Crosshair
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_free(
-                                    event.position,
-                                    &event.modifiers,
-                                    window.scale_factor(),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        )
-                    })
-                    .when(self.tool == Tool::MagicWand && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
-                            |this, event: &gpui::ClickEvent, window, cx| {
-                                this.wand_at(
-                                    event.position(),
-                                    &event.modifiers(),
-                                    window.scale_factor(),
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ))
-                    })
-                    .when(self.tool == Tool::Text && !tab.busy(), |area| {
+                        },
+                    )
+                    .when(
+                        self.preferences.tool == Tool::MagicWand && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
+                                |this, event: &gpui::ClickEvent, window, cx| {
+                                    this.wand_at(
+                                        event.position(),
+                                        &event.modifiers(),
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                        },
+                    )
+                    .when(self.preferences.tool == Tool::Text && !tab.busy(), |area| {
                         area.cursor(CursorStyle::IBeam).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1446,7 +1485,7 @@ impl Workspace {
                             }),
                         )
                     })
-                    .when(self.tool == Tool::Path && !tab.busy(), |area| {
+                    .when(self.preferences.tool == Tool::Path && !tab.busy(), |area| {
                         area.cursor(CursorStyle::Crosshair).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1460,26 +1499,32 @@ impl Workspace {
                             }),
                         )
                     })
-                    .when(self.tool == Tool::Gradient && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                this.begin_gradient(
-                                    event.position,
-                                    window.scale_factor(),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        )
-                    })
-                    .when(self.tool == Tool::BucketFill && !tab.busy(), |area| {
-                        area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
-                            |this, event: &gpui::ClickEvent, window, cx| {
-                                this.fill_at(event.position(), window, cx);
-                            },
-                        ))
-                    })
+                    .when(
+                        self.preferences.tool == Tool::Gradient && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.begin_gradient(
+                                        event.position,
+                                        window.scale_factor(),
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
+                        },
+                    )
+                    .when(
+                        self.preferences.tool == Tool::BucketFill && !tab.busy(),
+                        |area| {
+                            area.cursor(CursorStyle::Crosshair).on_click(cx.listener(
+                                |this, event: &gpui::ClickEvent, window, cx| {
+                                    this.fill_at(event.position(), window, cx);
+                                },
+                            ))
+                        },
+                    )
                     .when(self.pan_drag.is_some(), |area| {
                         area.cursor(CursorStyle::ClosedHand)
                     })
@@ -1502,12 +1547,12 @@ impl Workspace {
                         tab,
                         self.viewport.clone(),
                         CanvasDecorations {
-                            show_grid: self.show_grid,
-                            show_guides: self.show_guides,
-                            grid_spacing: self.grid_spacing,
+                            show_grid: self.preferences.show_grid,
+                            show_guides: self.preferences.show_guides,
+                            grid_spacing: self.preferences.grid_spacing,
                             guides: self.displayed_guides(),
                             crop: self.crop,
-                            layer_bounds: if self.show_layer_bounds {
+                            layer_bounds: if self.preferences.show_layer_bounds {
                                 tab.document.content.layer(tab.active_layer).map(|layer| {
                                     let offset = self
                                         .move_drag
@@ -1528,7 +1573,10 @@ impl Workspace {
                                 .selection_preview
                                 .clone()
                                 .unwrap_or_else(|| tab.selection.clone()),
-                            show_handles: matches!(self.tool, Tool::Select | Tool::OvalSelect),
+                            show_handles: matches!(
+                                self.preferences.tool,
+                                Tool::Select | Tool::OvalSelect
+                            ),
                             move_layer: self.move_paint(),
                             warp: self.warp_frame(),
                             gradient: self.gradient_frame(),
@@ -1536,12 +1584,12 @@ impl Workspace {
                             free_path: self.free_points.clone(),
                             free_nodes: self.free_nodes.clone(),
                             free_node_drag: self.free_node_drag.map(|(index, _)| index),
-                            polygon: self.tool == Tool::FreeSelect,
+                            polygon: self.preferences.tool == Tool::FreeSelect,
                             paths: self.displayed_paths(),
                             active_path: self.displayed_active_path(),
-                            path_handles: self.tool == Tool::Path,
+                            path_handles: self.preferences.tool == Tool::Path,
                             selected_path_anchors: self.path_selection.clone(),
-                            text_caret: if self.tool == Tool::Text {
+                            text_caret: if self.preferences.tool == Tool::Text {
                                 self.text_caret()
                             } else {
                                 None
@@ -1563,11 +1611,11 @@ impl Workspace {
                         // be moved or resized needs that pointer, so the hand and arrows show.
                         let guide_cursor = self.guide_cursor(scale);
                         let native_cursor = guide_cursor.is_some()
-                            || (matches!(self.tool, Tool::Select | Tool::OvalSelect)
+                            || (matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect)
                                 && self.selection_cursor(scale) != CursorStyle::Crosshair)
-                            || (self.tool == Tool::Crop
+                            || (self.preferences.tool == Tool::Crop
                                 && self.crop_cursor(scale) != CursorStyle::Crosshair)
-                            || (self.tool == Tool::ScaleLayer
+                            || (self.preferences.tool == Tool::ScaleLayer
                                 && self.scale_cursor(scale) != CursorStyle::Crosshair);
                         if native_cursor {
                             self.canvas_cursor.show_native(true);
@@ -1579,7 +1627,7 @@ impl Workspace {
                             .when(!native_cursor, |area| {
                                 let brush = self.brush_cursor(tab, scale);
                                 area.child(tool_cursor(
-                                    self.tool,
+                                    self.preferences.tool,
                                     self.canvas_cursor.clone(),
                                     brush,
                                 ))
@@ -1661,7 +1709,7 @@ impl Workspace {
     }
 
     fn inspector(&self, cx: &Context<Self>) -> Div {
-        let tool = self.tool.info();
+        let tool = self.preferences.tool.info();
         div()
             .w(px(INSPECTOR_WIDTH))
             .flex_shrink_0()
@@ -1670,7 +1718,31 @@ impl Workspace {
             .border_l_1()
             .border_color(rgb(BORDER))
             .track_focus(&self.numeric_focus)
-            .child(panel_header("Tool Options"))
+            .child(
+                panel_header("Tool Options")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        icon_button("reset")
+                            .id("reset-current-tool")
+                            .tooltip(tooltip_with_detail("Reset Current Tool", self.current_tool_reset_blocker().unwrap_or("Restore this tool's defaults, including shared options. Existing artwork is unchanged.")))
+                            // Do not let a disabled reset commit an inline edit
+                            // through the root's ordinary mouse-down handler.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .when_else(self.current_tool_reset_blocker().is_none(), |button| {
+                                button.tab_index(0).cursor_pointer()
+                                    .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ResetCurrentTool), cx))
+                                    .on_key_down(|event, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            window.dispatch_action(Box::new(ResetCurrentTool), cx);
+                                            cx.stop_propagation();
+                                        }
+                                    })
+                            }, |button| button.opacity(0.4)),
+                    ),
+            )
             .child(
                 div()
                     .id("inspector-scroll")
@@ -1694,7 +1766,7 @@ impl Workspace {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(icon(tool.icon, 16.))
                                     .child(div().flex_1().min_w_0().text_ellipsis().child(tool.label))
-                                    .when_some(self.tool.shortcut_label(), |row, shortcut| {
+                                    .when_some(self.preferences.tool.shortcut_label(), |row, shortcut| {
                                         row.child(
                                             div()
                                                 .text_size(px(12.))
@@ -1703,15 +1775,15 @@ impl Workspace {
                                                 .child(shortcut),
                                         )
                                     })
-                                    .child(help_icon("tool-options-help", tool.label, self.tool.help())),
+                                    .child(help_icon("tool-options-help", tool.label, self.preferences.tool.help())),
                             )
                             .when(
-                                matches!(self.tool, Tool::Select | Tool::OvalSelect),
+                                matches!(self.preferences.tool, Tool::Select | Tool::OvalSelect),
                                 |panel| panel.child(self.selection_numeric_options(cx)),
                             )
                             .when(
                                 matches!(
-                                    self.tool,
+                                    self.preferences.tool,
                                     Tool::Select
                                         | Tool::OvalSelect
                                         | Tool::FreeSelect
@@ -1732,16 +1804,16 @@ impl Workspace {
                                 },
                             )
                             .when(
-                                self.tool == Tool::MagicWand || (self.tool == Tool::BucketFill && self.fill_mode == crate::document::FillMode::Connected),
+                                self.preferences.tool == Tool::MagicWand || (self.preferences.tool == Tool::BucketFill && self.preferences.fill_mode == crate::document::FillMode::Connected),
                                 |panel| {
                                     panel
                                         .child(section_label("MATCH"))
                                         .child(region_match_controls(self, cx))
                                 },
                             )
-                            .when(self.tool == Tool::BucketFill, |panel| {
-                                let mode = self.fill_mode;
-                                let sample_all = self.sample_all;
+                            .when(self.preferences.tool == Tool::BucketFill, |panel| {
+                                let mode = self.preferences.fill_mode;
+                                let sample_all = self.preferences.sample_all;
                                 panel
                                     .child(section_label("FILL"))
                                     .child(segmented([
@@ -1766,30 +1838,30 @@ impl Workspace {
                                         ),
                                     ))
                             })
-                            .when(self.tool == Tool::CloneStamp, |panel| {
-                                let aligned = self.clone_aligned;
+                            .when(self.preferences.tool == Tool::CloneStamp, |panel| {
+                                let aligned = self.preferences.clone_aligned;
                                 panel.child(section_label("SOURCE"))
-                                .child(toggle_button("Sample All Layers", self.clone_sample_all).on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_clone_sampling(!this.clone_sample_all, cx);
+                                .child(toggle_button("Sample All Layers", self.preferences.clone_sample_all).on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_clone_sampling(!this.preferences.clone_sample_all, cx);
                                 })))
-                                .child(toggle_button("Show Source", self.clone_show_source).on_click(cx.listener(|this, _, _, cx| {
-                                    this.clone_show_source = !this.clone_show_source;
+                                .child(toggle_button("Show Source", self.preferences.clone_show_source).on_click(cx.listener(|this, _, _, cx| {
+                                    this.preferences.clone_show_source = !this.preferences.clone_show_source;
                                     cx.notify();
                                 })))
                                 .child(toggle_button("Aligned", aligned).on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_clone_aligned(!aligned, cx);
                                 })))
                             })
-                            .when(self.tool == Tool::MagicWand, |panel| {
-                                let sample_all = self.wand_sample_all;
+                            .when(self.preferences.tool == Tool::MagicWand, |panel| {
+                                let sample_all = self.preferences.wand_sample_all;
                                 panel.child(toggle_button("Sample All Layers", sample_all).on_click(
-                                    cx.listener(move |this, _, _, cx| { this.wand_sample_all = !sample_all; cx.notify(); }),
+                                    cx.listener(move |this, _, _, cx| { this.preferences.wand_sample_all = !sample_all; cx.notify(); }),
                                 ))
                             })
-                            .when(self.tool == Tool::Text, |panel| self.text_options(panel, cx))
-                            .when(self.tool == Tool::Gradient, |panel| {
-                                let shape = self.gradient_shape;
-                                let blend = self.gradient_blend;
+                            .when(self.preferences.tool == Tool::Text, |panel| self.text_options(panel, cx))
+                            .when(self.preferences.tool == Tool::Gradient, |panel| {
+                                let shape = self.preferences.gradient_shape;
+                                let blend = self.preferences.gradient_blend;
                                 let can_apply = self.can_apply_gradient();
                                 panel
                                     .child(section_label("GRADIENT"))
@@ -1810,24 +1882,24 @@ impl Workspace {
                                     .child(segmented([
                                         gradient_blend_button(
                                             "FG → BG",
-                                            !self.gradient_use_custom && blend
+                                            !self.preferences.gradient_use_custom && blend
                                                 == crate::paint::GradientBlend::ForegroundToBackground,
                                             crate::paint::GradientBlend::ForegroundToBackground,
                                             cx,
                                         ),
                                         gradient_blend_button(
                                             "FG → Clear",
-                                            !self.gradient_use_custom && blend
+                                            !self.preferences.gradient_use_custom && blend
                                                 == crate::paint::GradientBlend::ForegroundToTransparent,
                                             crate::paint::GradientBlend::ForegroundToTransparent,
                                             cx,
                                         )
                                         .tooltip(tooltip("Foreground to Transparent")),
-                                        choice_button("Custom", self.gradient_use_custom).on_click(cx.listener(|this, _, window, cx| {
+                                        choice_button("Custom", self.preferences.gradient_use_custom).on_click(cx.listener(|this, _, window, cx| {
                                             this.set_gradient_custom(window, cx);
                                         })),
                                     ]))
-                                    .child(toggle_button("Reverse", self.gradient_reverse).on_click(cx.listener(|this, _, window, cx| {
+                                    .child(toggle_button("Reverse", self.preferences.gradient_reverse).on_click(cx.listener(|this, _, window, cx| {
                                         this.reverse_gradient(window, cx);
                                     })))
                                     .when(self.gradient.is_some(), |panel| {
@@ -1855,9 +1927,9 @@ impl Workspace {
                                         ]))
                                     })
                             })
-                            .when(self.tool == Tool::Gradient, |panel| panel.child(self.gradient_palette_options(cx)))
-                            .when(self.tool == Tool::Path, |panel| panel.child(self.path_edit_options(cx)))
-                            .when(self.tool == Tool::Crop, |panel| panel.child(self.aspect_options(true, cx)))
+                            .when(self.preferences.tool == Tool::Gradient, |panel| panel.child(self.gradient_palette_options(cx)))
+                            .when(self.preferences.tool == Tool::Path, |panel| panel.child(self.path_edit_options(cx)))
+                            .when(self.preferences.tool == Tool::Crop, |panel| panel.child(self.aspect_options(true, cx)))
                             .when_some(self.crop, |panel, _| {
                                 panel
                                     .child(section_label("CROP"))
@@ -1875,7 +1947,7 @@ impl Workspace {
                                         ),
                                     ]))
                             })
-                            .when(self.tool == Tool::Move, |panel| {
+                            .when(self.preferences.tool == Tool::Move, |panel| {
                                 let enabled = self.geometry_enabled() && !self.active_move_locked();
                                 let offset = self.move_offset();
                                 panel
@@ -1894,10 +1966,10 @@ impl Workspace {
                                             .child(self.move_snapping_options(cx))
                                     })
                             })
-                            .when(self.tool == Tool::ScaleLayer && self.scale_drag.is_some(), |panel| {
+                            .when(self.preferences.tool == Tool::ScaleLayer && self.scale_drag.is_some(), |panel| {
                                 let size = self.scale_size();
-                                let locked = self.scale_lock;
-                                let resample = self.warp_resample;
+                                let locked = self.preferences.scale_lock;
+                                let resample = self.preferences.warp_resample;
                                 panel
                                     .when_some(size, |panel, _| {
                                         panel
@@ -1911,12 +1983,12 @@ impl Workspace {
                                             )
                                     })
                                     .child(toggle_button("Lock aspect ratio", locked).on_click(cx.listener(move |this, _, _, cx| {
-                                        this.scale_lock = !locked;
+                                        this.preferences.scale_lock = !locked;
                                         cx.notify();
                                     })))
                                     .child(div().flex().items_center().justify_between().gap_2()
                                         .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Size anchor"))
-                                        .child(transform_point_grid(TransformPointControl::Scale, Some(self.scale_anchor.grid_index()), cx))
+                                        .child(transform_point_grid(TransformPointControl::Scale, Some(self.preferences.scale_anchor.grid_index()), cx))
                                         .id("scale-anchor-options").tooltip(tooltip("Anchor for typed Width/Height changes. Handle drags keep their opposite edge or corner.")))
                                     .child(button("scale", "Fit Layer to Canvas")
                                         .id("fit-layer-to-canvas")
@@ -1938,7 +2010,7 @@ impl Workspace {
                             .when_some(self.warp_status(), |panel, status| {
                                 let horizontal = status.horizontal;
                                 let resample = status.resample;
-                                let show_resample = self.tool != Tool::Flip;
+                                let show_resample = self.preferences.tool != Tool::Flip;
                                 let can_apply = self.can_apply_warp();
                                 panel
                                     .when(status.applying, |panel| {
@@ -1947,11 +2019,11 @@ impl Workspace {
                                     .when_some(status.degrees, |panel, _| {
                                         panel.child(self.numeric_chip(NumericField::RotateAngle, Some("Angle °"), cx)).child(self.rotation_pivot_options(cx))
                                     })
-                                    .when(self.tool == Tool::Perspective, |panel| panel.child(self.perspective_corner_options(cx)))
+                                    .when(self.preferences.tool == Tool::Perspective, |panel| panel.child(self.perspective_corner_options(cx)))
                                     .when_some(status.error, |panel, error| {
                                         panel.child(div().text_color(rgb(0xffb4ab)).child(error))
                                     })
-                                    .when(self.tool == Tool::Flip, |panel| {
+                                    .when(self.preferences.tool == Tool::Flip, |panel| {
                                         panel
                                             .child(section_label("MIRROR"))
                                             .child(segmented([
@@ -1997,7 +2069,7 @@ impl Workspace {
                             })
                             .when(
                                 matches!(
-                                    self.tool,
+                                    self.preferences.tool,
                                     Tool::Pencil
                                         | Tool::Brush
                                         | Tool::Eraser
@@ -2020,7 +2092,7 @@ impl Workspace {
                                             super::paint_ui::BrushField::Spacing,
                                             cx,
                                         ))
-                                        .when(self.tool != Tool::Pencil, |panel| {
+                                        .when(self.preferences.tool != Tool::Pencil, |panel| {
                                             panel.child(brush_row(
                                                 self,
                                                 "Hardness",
@@ -2030,7 +2102,7 @@ impl Workspace {
                                         })
                                         .child(brush_row(
                                             self,
-                                            if matches!(self.tool, Tool::Blur | Tool::Sharpen) { "Strength" } else { "Opacity" },
+                                            if matches!(self.preferences.tool, Tool::Blur | Tool::Sharpen) { "Strength" } else { "Opacity" },
                                             super::paint_ui::BrushField::Opacity,
                                             cx,
                                         ))
@@ -2043,7 +2115,7 @@ impl Workspace {
                                             super::paint_ui::BrushField::Flow,
                                             cx,
                                         )))
-                                        .when(self.tool != Tool::Pencil, |panel| {
+                                        .when(self.preferences.tool != Tool::Pencil, |panel| {
                                             use crate::paint::smoothing::Smoothing;
                                             let selected = self.brush_smoothing();
                                             panel.child(div().flex().flex_col().gap_1()
@@ -2064,10 +2136,10 @@ impl Workspace {
 
     fn gradient_palette_options(&self, cx: &Context<Self>) -> Div {
         let mut panel = div().flex().flex_col().gap_2();
-        if self.gradient_use_custom
-            && let Some(ramp) = self.gradient_custom
+        if self.preferences.gradient_use_custom
+            && let Some(ramp) = self.preferences.gradient_custom
         {
-            let selected = self.gradient_selected_stop;
+            let selected = self.preferences.gradient_selected_stop;
             let interior = selected > 0 && selected + 1 < ramp.stops().len();
             panel = panel
                 .child(section_label("COLOR STOPS"))
@@ -2134,10 +2206,11 @@ impl Workspace {
         let can_save = self.gradient_store.ready()
             && self.gradient_library.presets().len() < crate::gradient::library::MAX_PRESETS;
         let selected = self
+            .preferences
             .gradient_selected_preset
             .and_then(|id| self.gradient_library.get(id));
         let can_edit = self.gradient_store.ready() && selected.is_some();
-        let expanded = self.gradient_presets_expanded;
+        let expanded = self.preferences.gradient_presets_expanded;
         let label = selected.map_or_else(
             || {
                 format!(
@@ -2176,7 +2249,8 @@ impl Workspace {
                             .child(label),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.gradient_presets_expanded = !this.gradient_presets_expanded;
+                        this.preferences.gradient_presets_expanded =
+                            !this.preferences.gradient_presets_expanded;
                         cx.notify();
                     })),
             )
@@ -2199,11 +2273,13 @@ impl Workspace {
                                 .items_center()
                                 .px_2()
                                 .rounded_sm()
-                                .bg(rgb(if self.gradient_selected_preset == Some(id) {
-                                    SELECTED
-                                } else {
-                                    CANVAS
-                                }))
+                                .bg(rgb(
+                                    if self.preferences.gradient_selected_preset == Some(id) {
+                                        SELECTED
+                                    } else {
+                                        CANVAS
+                                    },
+                                ))
                                 .text_size(px(12.))
                                 .cursor_pointer()
                                 .child(
@@ -2288,8 +2364,8 @@ impl Workspace {
     }
 
     fn move_snapping_options(&self, cx: &Context<Self>) -> Div {
-        let expanded = self.move_snapping_expanded;
-        let status = match (self.snap_grid, self.snap_guides) {
+        let expanded = self.preferences.move_snapping_expanded;
+        let status = match (self.preferences.snap_grid, self.preferences.snap_guides) {
             (false, false) => "Off",
             (true, false) => "Grid",
             (false, true) => "Guides",
@@ -2316,7 +2392,8 @@ impl Workspace {
                         "Expand snapping options"
                     }))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.move_snapping_expanded = !this.move_snapping_expanded;
+                        this.preferences.move_snapping_expanded =
+                            !this.preferences.move_snapping_expanded;
                         cx.notify();
                     }))
                     .child(icon(
@@ -2334,20 +2411,20 @@ impl Workspace {
             .when(expanded, |panel| {
                 panel
                     .child(
-                        toggle_button("Snap to Grid", self.snap_grid).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.snap_grid = !this.snap_grid;
+                        toggle_button("Snap to Grid", self.preferences.snap_grid).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.preferences.snap_grid = !this.preferences.snap_grid;
                                 cx.notify();
-                            },
-                        )),
+                            }),
+                        ),
                     )
                     .child(
-                        toggle_button("Snap to Guides", self.snap_guides).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.snap_guides = !this.snap_guides;
+                        toggle_button("Snap to Guides", self.preferences.snap_guides).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.preferences.snap_guides = !this.preferences.snap_guides;
                                 cx.notify();
-                            },
-                        )),
+                            }),
+                        ),
                     )
                     .child(self.numeric_chip(
                         NumericField::GridSpacing,
@@ -2358,7 +2435,7 @@ impl Workspace {
     }
 
     fn inspector_tabs(&self, cx: &Context<Self>) -> Div {
-        let selected = self.inspector_tab;
+        let selected = self.preferences.inspector_tab;
         let tab = |label: &'static str, target: super::InspectorTab, cx: &Context<Self>| {
             let active = selected == target;
             div()
@@ -2381,8 +2458,8 @@ impl Workspace {
                 })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.inspector_tab != target {
-                        this.inspector_tab = target;
+                    if this.preferences.inspector_tab != target {
+                        this.preferences.inspector_tab = target;
                         cx.notify();
                     }
                 }))
@@ -2514,6 +2591,16 @@ impl Workspace {
             } else {
                 format!("{count} images open")
             })
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .ml_4()
+                    .px_2()
+                    .py(px(2.))
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+            )
             .children(crate::updates::badge(cx))
     }
 
@@ -3600,7 +3687,7 @@ fn resample_choice(
 }
 
 fn region_match_controls(workspace: &Workspace, cx: &Context<super::Workspace>) -> Div {
-    let wand = workspace.tool == Tool::MagicWand;
+    let wand = workspace.preferences.tool == Tool::MagicWand;
     let fields = if wand {
         (NumericField::WandTolerance, NumericField::WandGapRadius)
     } else {

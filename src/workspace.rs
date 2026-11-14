@@ -22,8 +22,10 @@ mod pdf_ui;
 mod recovery_ui;
 mod scale_ui;
 mod selection;
+mod settings_ui;
 mod stroke_ui;
 mod text_ui;
+mod tool_reset;
 mod tooltip;
 mod transform_ui;
 mod view;
@@ -35,8 +37,7 @@ use gpui::{Bounds, Context, FocusHandle, Pixels, Point, RenderImage, ScrollHandl
 
 use crate::commands::{Tool, Zoom};
 use crate::document::{
-    CropRect, DEFAULT_JPEG_QUALITY, Document, DocumentContent, FillMode, LayerId, RenderedCanvas,
-    build_level, file_name,
+    CropRect, Document, DocumentContent, LayerId, RenderedCanvas, build_level, file_name,
 };
 use crate::preview::{self, Dirty};
 use crate::selection::Selection;
@@ -46,9 +47,6 @@ use self::{
     dialogs::Form,
     history::{History, LIMITS, State},
 };
-
-const DEFAULT_COLORS: [u32; 2] = [0x000000, 0xffffff];
-const RECENT_COLOR_LIMIT: usize = 12;
 
 type PreparedChange = (
     DocumentContent,
@@ -186,7 +184,7 @@ impl Tab {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum InspectorTab {
     #[default]
     Layers,
@@ -260,16 +258,10 @@ pub struct Workspace {
     recovery: recovery_ui::Recovery,
     active: Option<usize>,
     next_id: usize,
-    tool: Tool,
-    colors: [u32; 2],
-    recent_colors: Vec<u32>,
-    show_grid: bool,
-    show_guides: bool,
+    preferences: settings_ui::Preferences,
+    color_memory: crate::color_memory::Memory,
+    settings_store: settings_ui::Storage,
     guide_drag: Option<guide_ui::GuideDrag>,
-    snap_grid: bool,
-    snap_guides: bool,
-    grid_spacing: u32,
-    show_layer_bounds: bool,
     viewport: Rc<Cell<Bounds<Pixels>>>,
     canvas_cursor: Rc<CanvasCursor>,
     pan_drag: Option<(gpui::MouseButton, Point<Pixels>)>,
@@ -278,19 +270,6 @@ pub struct Workspace {
     crop: Option<CropRect>,
     selection_drag: Option<selection::SelectionGesture>,
     selection_preview: Option<Selection>,
-    oval_circle: bool,
-    selection_radius: u32,
-    selection_antialias: bool,
-    free_antialias: bool,
-    wand_antialias: bool,
-    selection_feather_enabled: bool,
-    selection_feather_radius: u32,
-    selection_ratio: Option<crate::constraints::AspectRatio>,
-    selection_ratio_value: crate::constraints::AspectRatio,
-    crop_ratio: Option<crate::constraints::AspectRatio>,
-    crop_ratio_value: crate::constraints::AspectRatio,
-    wand_match: crate::selection::RegionMatch,
-    fill_match: crate::selection::RegionMatch,
     free_points: Vec<Point<f32>>,
     free_nodes: Vec<usize>,
     free_node_drag: Option<(usize, Point<f32>)>,
@@ -303,8 +282,6 @@ pub struct Workspace {
     scale_drag: Option<scale_ui::ScaleDrag>,
     scale_overlay: Option<layers::MovePaint>,
     scale_token: u64,
-    scale_lock: bool,
-    scale_anchor: crate::transform::Anchor,
     move_settled: Option<(i32, i32)>,
     move_token: u64,
     pending_nudge: Option<layers::PendingNudge>,
@@ -315,27 +292,10 @@ pub struct Workspace {
     warp_dirty: bool,
     warp_applying: bool,
     warp_error: Option<&'static str>,
-    warp_resample: crate::transform::Resample,
-    brushes: paint_ui::BrushSettings,
-    fill_mode: FillMode,
-    sample_all: bool,
-    wand_sample_all: bool,
-    gradient_shape: crate::paint::GradientShape,
-    gradient_blend: crate::paint::GradientBlend,
-    gradient_custom: Option<crate::gradient::ColorRamp>,
-    gradient_use_custom: bool,
-    gradient_reverse: bool,
-    gradient_selected_stop: usize,
     gradient_revision: u64,
     gradient_library: crate::gradient::library::Library,
     gradient_store: gradient_ui::PresetStorage,
-    gradient_presets_expanded: bool,
-    gradient_selected_preset: Option<u64>,
     clone_source: Option<paint_ui::CloneSource>,
-    clone_aligned: bool,
-    clone_sample_all: bool,
-    clone_show_source: bool,
-    inspector_tab: InspectorTab,
     gradient: Option<gradient_ui::GradientSession>,
     gradient_overlay: Option<layers::MovePaint>,
     gradient_token: u64,
@@ -359,8 +319,6 @@ pub struct Workspace {
     path_gesture: Option<path_ui::PathGesture>,
     path_hold: Option<crate::paths::VectorPath>,
     path_selection: Option<path_ui::AnchorSelection>,
-    path_handle_mode: crate::paths::HandleMode,
-    path_stroke_style: stroke_ui::PathStrokeStyle,
     stroke: Option<paint_ui::StrokeSession>,
     stroke_token: u64,
     stroke_commit_preview: Option<(usize, Vec<paint_ui::StrokePaint>)>,
@@ -373,7 +331,6 @@ pub struct Workspace {
     // The tab whose committed text still shows the preview until its patch lands.
     text_settled: Option<usize>,
     text_continuation: Option<(usize, text_ui::TextContinuation)>,
-    text_defaults: text_ui::TextDefaults,
     font_families: Option<Arc<crate::text::FontFamilies>>,
     font_loading: bool,
     font_list_open: bool,
@@ -387,7 +344,6 @@ pub struct Workspace {
     paste_token: u64,
     pdf_import_token: u64,
     pdf_job: Option<pdf_ui::PdfJob>,
-    pdf_preferences: pdf_ui::PdfPreferences,
     pdf_previews: pdf_preview::PdfPreviews,
     pending_opens: std::collections::VecDeque<pdf_ui::PendingOpen>,
     open_scheduled: bool,
@@ -399,12 +355,7 @@ pub struct Workspace {
     pending: usize,
     errors: Vec<String>,
     history_clock: u64,
-    jpeg_quality: u8,
-    pdf_export_dpi: u32,
     opacity_drag: Option<layers::OpacityDrag>,
-    toolbox_width: f32,
-    toolbox_folded: bool,
-    move_snapping_expanded: bool,
     toolbox_drag: Option<(f32, f32)>,
 }
 
@@ -435,7 +386,7 @@ impl Workspace {
                 workspace.selection_preview = None;
                 workspace.opacity_drag = None;
                 workspace.toolbox_drag = None;
-                if workspace.tool == Tool::FreeSelect {
+                if workspace.preferences.tool == Tool::FreeSelect {
                     workspace.clear_free_draft();
                 }
                 workspace.cancel_path_gesture(cx);
@@ -551,16 +502,10 @@ impl Workspace {
             recovery: Default::default(),
             active: None,
             next_id: 0,
-            tool: Tool::Move,
-            colors: DEFAULT_COLORS,
-            recent_colors: Vec::new(),
-            show_grid: false,
-            show_guides: false,
+            preferences: Default::default(),
+            color_memory: Default::default(),
+            settings_store: Default::default(),
             guide_drag: None,
-            snap_grid: false,
-            snap_guides: false,
-            grid_spacing: 16,
-            show_layer_bounds: false,
             viewport: Rc::default(),
             canvas_cursor: Rc::default(),
             pan_drag: None,
@@ -569,19 +514,6 @@ impl Workspace {
             crop: None,
             selection_drag: None,
             selection_preview: None,
-            oval_circle: false,
-            selection_radius: 0,
-            selection_antialias: false,
-            free_antialias: false,
-            wand_antialias: false,
-            selection_feather_enabled: false,
-            selection_feather_radius: 8,
-            selection_ratio: None,
-            selection_ratio_value: crate::constraints::AspectRatio::SQUARE,
-            crop_ratio: None,
-            crop_ratio_value: crate::constraints::AspectRatio::SQUARE,
-            wand_match: Default::default(),
-            fill_match: Default::default(),
             free_points: Vec::new(),
             free_nodes: Vec::new(),
             free_node_drag: None,
@@ -594,8 +526,6 @@ impl Workspace {
             scale_drag: None,
             scale_overlay: None,
             scale_token: 0,
-            scale_lock: true,
-            scale_anchor: crate::transform::Anchor::Center,
             move_settled: None,
             move_token: 0,
             pending_nudge: None,
@@ -606,27 +536,10 @@ impl Workspace {
             warp_dirty: false,
             warp_applying: false,
             warp_error: None,
-            warp_resample: crate::transform::Resample::Bilinear,
-            brushes: paint_ui::BrushSettings::default(),
-            fill_mode: FillMode::Connected,
-            sample_all: false,
-            wand_sample_all: false,
-            gradient_shape: crate::paint::GradientShape::Linear,
-            gradient_blend: crate::paint::GradientBlend::ForegroundToBackground,
-            gradient_custom: None,
-            gradient_use_custom: false,
-            gradient_reverse: false,
-            gradient_selected_stop: 0,
             gradient_revision: 0,
             gradient_library: Default::default(),
             gradient_store: Default::default(),
-            gradient_presets_expanded: false,
-            gradient_selected_preset: None,
             clone_source: None,
-            clone_aligned: true,
-            clone_sample_all: false,
-            clone_show_source: true,
-            inspector_tab: InspectorTab::Layers,
             gradient: None,
             gradient_overlay: None,
             gradient_token: 0,
@@ -650,8 +563,6 @@ impl Workspace {
             path_gesture: None,
             path_hold: None,
             path_selection: None,
-            path_handle_mode: crate::paths::HandleMode::Independent,
-            path_stroke_style: stroke_ui::PathStrokeStyle::Brush,
             stroke: None,
             stroke_token: 0,
             stroke_commit_preview: None,
@@ -663,7 +574,6 @@ impl Workspace {
             text_overlay: None,
             text_settled: None,
             text_continuation: None,
-            text_defaults: text_ui::TextDefaults::default(),
             font_families: None,
             font_loading: false,
             font_list_open: false,
@@ -677,7 +587,6 @@ impl Workspace {
             paste_token: 0,
             pdf_import_token: 0,
             pdf_job: None,
-            pdf_preferences: Default::default(),
             pdf_previews: Default::default(),
             pending_opens: Default::default(),
             open_scheduled: false,
@@ -689,27 +598,12 @@ impl Workspace {
             pending: 0,
             errors: Vec::new(),
             history_clock: 0,
-            jpeg_quality: DEFAULT_JPEG_QUALITY,
-            pdf_export_dpi: crate::pdf::export::DEFAULT_DPI,
             opacity_drag: None,
-            toolbox_width: view::TOOLBOX_DEFAULT_WIDTH,
-            toolbox_folded: false,
-            move_snapping_expanded: false,
             toolbox_drag: None,
         };
         workspace.load_gradient_library(window, cx);
+        workspace.load_settings(window, cx);
         workspace
-    }
-
-    fn set_color(&mut self, swatch: usize, color: u32) {
-        self.colors[swatch] = color;
-        self.remember_color(color);
-    }
-
-    fn remember_color(&mut self, color: u32) {
-        self.recent_colors.retain(|&recent| recent != color);
-        self.recent_colors.insert(0, color);
-        self.recent_colors.truncate(RECENT_COLOR_LIMIT);
     }
 
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -1000,6 +894,7 @@ impl Workspace {
         }
         let published = self.publish_change(id, generation, change, result, window, cx);
         self.effect_memory.finish(id, generation, published);
+        self.preferences.effects = self.effect_memory.preferences();
         self.finish_clone_alignment(id, generation, published);
         if let Some(index) = self.tab_index(id)
             && self.tabs[index].settle_text_commit(published)

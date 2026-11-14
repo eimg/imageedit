@@ -4,9 +4,10 @@ pub mod library;
 
 pub const MAX_STOPS: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColorStop {
     pub position: u16,
+    #[serde(with = "crate::settings::rgba")]
     pub color: Rgba<u8>,
 }
 
@@ -22,6 +23,19 @@ impl PartialEq for ColorRamp {
     }
 }
 impl Eq for ColorRamp {}
+
+impl serde::Serialize for ColorRamp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(self.stops(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ColorRamp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stops = <Vec<ColorStop> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_stops(&stops).ok_or_else(|| serde::de::Error::custom("Invalid gradient stops"))
+    }
+}
 
 impl ColorRamp {
     pub fn from_stops(stops: &[ColorStop]) -> Option<Self> {

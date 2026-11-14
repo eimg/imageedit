@@ -120,7 +120,8 @@ fn matches_font(label: &str, family: &str, query: &str) -> bool {
 }
 
 /// The style the next new text starts with. Editing a draft updates it too.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct TextDefaults {
     family: String,
     face: FontFace,
@@ -138,6 +139,18 @@ impl Default for TextDefaults {
             spacing: Spacing::default(),
             layout: TextLayout::default(),
         }
+    }
+}
+
+impl TextDefaults {
+    pub(super) fn valid(&self) -> bool {
+        !self.family.is_empty()
+            && self.family.chars().count() <= crate::text::MAX_FAMILY_CHARS
+            && !self.family.chars().any(char::is_control)
+            && self.size.is_finite()
+            && (MIN_PIXEL_SIZE..=MAX_PIXEL_SIZE).contains(&self.size)
+            && self.spacing.allowed()
+            && self.layout.allowed()
     }
 }
 
@@ -664,12 +677,12 @@ impl Workspace {
 
     pub(super) fn text_options(&self, panel: Div, cx: &Context<Self>) -> Div {
         let draft = self.text_draft.as_ref();
-        let family = draft.map_or(self.text_defaults.family.clone(), |draft| {
+        let family = draft.map_or(self.preferences.text_defaults.family.clone(), |draft| {
             draft.family.clone()
         });
-        let face = draft.map_or(self.text_defaults.face, |draft| draft.face);
+        let face = draft.map_or(self.preferences.text_defaults.face, |draft| draft.face);
         let color = draft.map_or_else(
-            || self.colors[0],
+            || self.color_memory.swatches[0],
             |draft| {
                 let [red, green, blue, _] = draft.color.0;
                 u32::from_be_bytes([0, red, green, blue])
@@ -914,7 +927,7 @@ impl Workspace {
         let family = self
             .text_draft
             .as_ref()
-            .map_or(self.text_defaults.family.as_str(), |draft| {
+            .map_or(self.preferences.text_defaults.family.as_str(), |draft| {
                 draft.family.as_str()
             });
         self.font_search.selected = self
@@ -1377,14 +1390,14 @@ impl Workspace {
     pub(super) fn text_layout(&self) -> TextLayout {
         self.text_draft
             .as_ref()
-            .map_or(self.text_defaults.layout, |draft| draft.layout)
+            .map_or(self.preferences.text_defaults.layout, |draft| draft.layout)
     }
 
     fn set_text_layout(&mut self, layout: TextLayout, window: &mut Window, cx: &mut Context<Self>) {
         if !layout.allowed() {
             return;
         }
-        self.text_defaults.layout = layout;
+        self.preferences.text_defaults.layout = layout;
         self.change_text(window, cx, |draft| {
             if draft.layout == layout {
                 return false;
@@ -1417,19 +1430,21 @@ impl Workspace {
     pub(super) fn text_size(&self) -> f32 {
         self.text_draft
             .as_ref()
-            .map_or(self.text_defaults.size, |draft| draft.size)
+            .map_or(self.preferences.text_defaults.size, |draft| draft.size)
     }
 
     pub(super) fn text_line_spacing(&self) -> f32 {
         self.text_draft
             .as_ref()
-            .map_or(self.text_defaults.spacing.line, |draft| draft.spacing.line)
+            .map_or(self.preferences.text_defaults.spacing.line, |draft| {
+                draft.spacing.line
+            })
     }
 
     pub(super) fn text_letter_spacing(&self) -> f32 {
         self.text_draft
             .as_ref()
-            .map_or(self.text_defaults.spacing.letter, |draft| {
+            .map_or(self.preferences.text_defaults.spacing.letter, |draft| {
                 draft.spacing.letter
             })
     }
@@ -1447,7 +1462,7 @@ impl Workspace {
 
     pub(super) fn set_text_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
         let size = size.round().clamp(MIN_PIXEL_SIZE, MAX_PIXEL_SIZE);
-        self.text_defaults.size = size;
+        self.preferences.text_defaults.size = size;
         self.change_text(window, cx, |draft| {
             if draft.size == size {
                 return false;
@@ -1467,7 +1482,7 @@ impl Workspace {
         let letter = self
             .text_draft
             .as_ref()
-            .map_or(self.text_defaults.spacing.letter, |draft| {
+            .map_or(self.preferences.text_defaults.spacing.letter, |draft| {
                 draft.spacing.letter
             });
         self.set_text_spacing(Spacing { letter, line }, window, cx);
@@ -1483,7 +1498,9 @@ impl Workspace {
         let current = self
             .text_draft
             .as_ref()
-            .map_or(self.text_defaults.spacing, |draft| draft.spacing);
+            .map_or(self.preferences.text_defaults.spacing, |draft| {
+                draft.spacing
+            });
         let next = Spacing {
             letter: (current.letter + letter)
                 .round()
@@ -1495,7 +1512,7 @@ impl Workspace {
     }
 
     fn set_text_spacing(&mut self, spacing: Spacing, window: &mut Window, cx: &mut Context<Self>) {
-        self.text_defaults.spacing = spacing;
+        self.preferences.text_defaults.spacing = spacing;
         self.change_text(window, cx, |draft| {
             if draft.spacing == spacing {
                 return false;
@@ -1507,7 +1524,7 @@ impl Workspace {
 
     fn set_text_family(&mut self, family: String, window: &mut Window, cx: &mut Context<Self>) {
         let family = text::normalize_family(&family);
-        self.text_defaults.family = family.clone();
+        self.preferences.text_defaults.family = family.clone();
         self.change_text(window, cx, |draft| {
             if draft.family == family {
                 return false;
@@ -1521,13 +1538,13 @@ impl Workspace {
         let mut face = self
             .text_draft
             .as_ref()
-            .map_or(self.text_defaults.face, |draft| draft.face);
+            .map_or(self.preferences.text_defaults.face, |draft| draft.face);
         if bold {
             face.bold = !face.bold;
         } else {
             face.italic = !face.italic;
         }
-        self.text_defaults.face = face;
+        self.preferences.text_defaults.face = face;
         self.change_text(window, cx, |draft| {
             draft.face = face;
             true
@@ -1719,10 +1736,10 @@ impl Workspace {
                 tab.document
                     .content
                     .mode()
-                    .constrain(document::solid_color(self.colors[0]))
+                    .constrain(document::solid_color(self.color_memory.swatches[0]))
             })
-            .unwrap_or(document::solid_color(self.colors[0]));
-        let defaults = self.text_defaults.clone();
+            .unwrap_or(document::solid_color(self.color_memory.swatches[0]));
+        let defaults = self.preferences.text_defaults.clone();
         self.open_draft(
             None,
             anchor,
@@ -1866,7 +1883,7 @@ impl Workspace {
         let Some(draft) = self.text_draft.as_ref() else {
             return false;
         };
-        self.text_defaults = TextDefaults {
+        self.preferences.text_defaults = TextDefaults {
             family: draft.family.clone(),
             face: draft.face,
             size: draft.size,
@@ -1935,7 +1952,7 @@ impl Workspace {
             return;
         };
         draft.generation = self.tabs[index].history.generation();
-        self.tool = crate::commands::Tool::Text;
+        self.preferences.tool = crate::commands::Tool::Text;
         self.text_draft = Some(draft);
         self.caret_shown_at = std::time::Instant::now();
         self.start_caret_blink(window, cx);
@@ -2122,7 +2139,7 @@ impl Workspace {
                             workspace.caret_blinking = false;
                             return false;
                         }
-                        if workspace.tool == crate::commands::Tool::Text {
+                        if workspace.preferences.tool == crate::commands::Tool::Text {
                             cx.notify();
                         }
                         true

@@ -54,8 +54,8 @@ enum SelectionHit {
 
 impl Workspace {
     fn creation_feather_radius(&self) -> u32 {
-        if self.selection_feather_enabled {
-            self.selection_feather_radius
+        if self.preferences.selection_feather_enabled {
+            self.preferences.selection_feather_radius
         } else {
             0
         }
@@ -72,15 +72,15 @@ impl Workspace {
             }
             Some(Selection::RoundedRect(shape)) => shape.radius(),
             Some(Selection::Rect(_)) => 0,
-            _ => self.selection_radius,
+            _ => self.preferences.selection_radius,
         }
     }
 
     pub(super) fn effective_selection_ratio(&self) -> Option<crate::constraints::AspectRatio> {
-        if self.tool == Tool::OvalSelect && self.oval_circle {
+        if self.preferences.tool == Tool::OvalSelect && self.preferences.oval_circle {
             Some(crate::constraints::AspectRatio::SQUARE)
         } else {
-            self.selection_ratio
+            self.preferences.selection_ratio
         }
     }
 
@@ -93,7 +93,7 @@ impl Workspace {
                         Selection::Ellipse(_) | Selection::RoundedRect(_)
                     )
             })
-            .map_or(self.selection_antialias, |tab| {
+            .map_or(self.preferences.selection_antialias, |tab| {
                 tab.selection.is_antialiased()
             })
     }
@@ -104,7 +104,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.selection_antialias = antialias;
+        self.preferences.selection_antialias = antialias;
         let Some(tab) = self.active_tab().filter(|tab| !tab.busy()) else {
             cx.notify();
             return;
@@ -141,8 +141,6 @@ impl Workspace {
         if self.active_tab().is_none_or(|tab| tab.busy()) {
             return;
         }
-        self.selection_antialias = self.active_selection_antialias();
-        self.selection_radius = self.active_selection_radius();
         self.clear_selection_gesture();
         let Some(selection) = self.active_tab().map(|tab| tab.selection.clone()) else {
             return;
@@ -228,14 +226,14 @@ impl Workspace {
                 if f32::from(delta.x).abs().max(f32::from(delta.y).abs()) < 4. {
                     None
                 } else {
-                    let shape = if self.tool == Tool::Select {
+                    let shape = if self.preferences.tool == Tool::Select {
                         SelectionShape::Rectangle
-                    } else if self.oval_circle {
+                    } else if self.preferences.oval_circle {
                         SelectionShape::Circle
                     } else {
                         SelectionShape::Ellipse
                     };
-                    let radius = self.selection_radius;
+                    let radius = self.preferences.selection_radius;
                     self.unclamped_pointer_pixel(position, scale).map(|end| {
                         Selection::shape_drag(
                             shape,
@@ -243,7 +241,7 @@ impl Workspace {
                             end,
                             (width, height),
                             radius,
-                            self.selection_antialias,
+                            self.preferences.selection_antialias,
                             self.effective_selection_ratio(),
                         )
                     })
@@ -608,7 +606,7 @@ impl Workspace {
         let Some(geometry) = PreviewGeometry::for_tab(tab, self.viewport.get(), scale) else {
             return;
         };
-        if self.tool != Tool::FreeSelect {
+        if self.preferences.tool != Tool::FreeSelect {
             return;
         }
         let point = geometry.fraction(position);
@@ -637,7 +635,7 @@ impl Workspace {
         scale: f32,
         cx: &mut Context<Self>,
     ) {
-        if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
+        if self.preferences.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
         let Some(origin) = self.free_drag_origin else {
@@ -675,7 +673,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tool != Tool::FreeSelect || self.free_points.is_empty() {
+        if self.preferences.tool != Tool::FreeSelect || self.free_points.is_empty() {
             return;
         }
         if self.free_drag_origin.is_none() {
@@ -707,7 +705,7 @@ impl Workspace {
         let points = std::mem::take(&mut self.free_points);
         self.clear_free_draft();
         let op = self.free_op;
-        let antialias = self.free_antialias;
+        let antialias = self.preferences.free_antialias;
         let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, (width, height)| {
@@ -756,9 +754,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let matching = if wand {
-            &mut self.wand_match
+            &mut self.preferences.wand_match
         } else {
-            &mut self.fill_match
+            &mut self.preferences.fill_match
         };
         let (value, max) = if gap {
             (&mut matching.gap_radius, crate::selection::MAX_GAP_RADIUS)
@@ -786,7 +784,7 @@ impl Workspace {
         if tab.busy() {
             return;
         }
-        let sample_all = self.wand_sample_all;
+        let sample_all = self.preferences.wand_sample_all;
         if !sample_all
             && wand_source(&tab.document.content, tab.active_layer, false, (x, y)).is_none()
         {
@@ -796,8 +794,8 @@ impl Workspace {
         let content = tab.document.content.clone();
         let layer = tab.active_layer;
         let op = selection_op(modifiers);
-        let matching = self.wand_match;
-        let antialias = self.wand_antialias;
+        let matching = self.preferences.wand_match;
+        let antialias = self.preferences.wand_antialias;
         let feather = self.creation_feather_radius();
         self.update_selection(
             move |current, size| {
@@ -854,7 +852,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.oval_circle = circle;
+        self.preferences.oval_circle = circle;
         if circle {
             let state = self
                 .active_tab()
@@ -891,7 +889,7 @@ impl Workspace {
             |rect| rect.width.min(rect.height) / 2,
         );
         let max = max.min(i32::MAX as u32) as i32;
-        self.selection_radius =
+        self.preferences.selection_radius =
             (self.active_selection_radius() as i32 + delta).clamp(0, max) as u32;
         let selection = self
             .selection_preview
@@ -904,13 +902,16 @@ impl Workspace {
             let (width, height) = tab.document.content.size();
             let shape = Selection::rounded_rect_quality(
                 rect,
-                self.selection_radius,
+                self.preferences.selection_radius,
                 width,
                 height,
                 selection
                     .as_ref()
                     .filter(|selection| matches!(selection, Selection::RoundedRect(_)))
-                    .map_or(self.selection_antialias, Selection::is_antialiased),
+                    .map_or(
+                        self.preferences.selection_antialias,
+                        Selection::is_antialiased,
+                    ),
             );
             self.commit_placed_selection(shape, window, cx);
         }
@@ -1256,6 +1257,32 @@ pub(super) enum SelectionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_defaults_make_new_regions_hard_without_flattening_existing_curves() {
+        let mut preferences = super::super::settings_ui::Preferences {
+            selection_antialias: true,
+            selection_radius: 5,
+            ..Default::default()
+        };
+        let existing =
+            Selection::rounded_rect_quality(PixelRect::new(10, 10, 24, 18), 5, 64, 64, true);
+        preferences.reset_tool(Tool::Select);
+        let resized = placed_selection(existing, PixelRect::new(20, 20, 30, 24), 64, 64);
+        assert!(resized.is_antialiased());
+        assert!(matches!(resized, Selection::RoundedRect(shape) if shape.radius() == 5));
+        let created = Selection::shape_drag(
+            SelectionShape::Rectangle,
+            (10, 10),
+            (33, 27),
+            (64, 64),
+            preferences.selection_radius,
+            preferences.selection_antialias,
+            preferences.selection_ratio,
+        );
+        assert!(matches!(created, Selection::Rect(_)));
+        assert!(!created.is_antialiased());
+    }
 
     #[test]
     fn wand_soft_edges_feather_before_combination_and_undo_without_dirtying_pixels() {

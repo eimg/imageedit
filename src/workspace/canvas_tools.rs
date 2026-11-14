@@ -243,7 +243,7 @@ impl Workspace {
             }
             Some((_, CropHit::Outside)) | None => {
                 self.clear_crop();
-                self.canvas_pixel(position, scale, false)
+                self.canvas_pixel(position, scale, true)
                     .map(|start| CropDrag::Create {
                         origin: position,
                         start,
@@ -272,7 +272,7 @@ impl Workspace {
                 self.canvas_pixel(position, scale, true)
                     .filter(|_| f32::from(delta.x).abs().max(f32::from(delta.y).abs()) >= 3.)
                     .map(|end| {
-                        if let Some(ratio) = self.crop_ratio {
+                        if let Some(ratio) = self.preferences.crop_ratio {
                             let rect = ratio.drag(
                                 (i64::from(start.0), i64::from(start.1)),
                                 (i64::from(end.0), i64::from(end.1)),
@@ -297,7 +297,7 @@ impl Workspace {
                 edges,
                 anchor,
             } => self.unclamped_pointer_pixel(position, scale).map(|pixel| {
-                if let Some(ratio) = self.crop_ratio {
+                if let Some(ratio) = self.preferences.crop_ratio {
                     let rect = ratio.resize(
                         crate::preview::PixelRect::new(
                             i64::from(crop.x),
@@ -455,12 +455,12 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let color = solid_color(self.colors[0]);
+        let color = solid_color(self.color_memory.swatches[0]);
         let request = crate::document::FillRequest {
-            mode: self.fill_mode,
-            sample_all: self.sample_all,
-            tolerance: self.fill_match.tolerance,
-            gap_radius: self.fill_match.gap_radius,
+            mode: self.preferences.fill_mode,
+            sample_all: self.preferences.sample_all,
+            tolerance: self.preferences.fill_match.tolerance,
+            gap_radius: self.preferences.fill_match.gap_radius,
         };
         self.edit_content(
             move |content, _, selection| {
@@ -487,7 +487,7 @@ impl Workspace {
         if let Some(document) = self.active_document() {
             let [r, g, b, alpha] = document.canvas.pixels.get_pixel(x, y).0;
             if alpha > 0 {
-                self.set_color(0, u32::from_be_bytes([0, r, g, b]));
+                self.set_color(0, u32::from_be_bytes([0, r, g, b]), window, cx);
                 self.refresh_gradient(window, cx);
             }
         }
@@ -502,19 +502,7 @@ impl Workspace {
         let tab = self.active_tab()?;
         let viewport = self.viewport.get();
         let geometry = PreviewGeometry::for_tab(tab, viewport, scale)?;
-        if !clamp && (!viewport.contains(&position) || !geometry.bounds.contains(&position)) {
-            return None;
-        }
-        let position = point(
-            position.x.clamp(viewport.left(), viewport.right()),
-            position.y.clamp(viewport.top(), viewport.bottom()),
-        );
-        let fraction = geometry.fraction(position);
-        let pixel = |value: f32, edge: u32| ((value * edge as f32) as u32).min(edge - 1);
-        Some((
-            pixel(fraction.x, tab.document.width()),
-            pixel(fraction.y, tab.document.height()),
-        ))
+        geometry.canvas_pixel(position, viewport, tab.document.content.size(), clamp)
     }
 }
 
@@ -684,6 +672,25 @@ impl PreviewGeometry {
         )
     }
 
+    fn canvas_pixel(
+        &self,
+        position: Point<Pixels>,
+        viewport: Bounds<Pixels>,
+        canvas: (u32, u32),
+        clamp: bool,
+    ) -> Option<(u32, u32)> {
+        if !clamp && (!viewport.contains(&position) || !self.bounds.contains(&position)) {
+            return None;
+        }
+        let position = point(
+            position.x.clamp(viewport.left(), viewport.right()),
+            position.y.clamp(viewport.top(), viewport.bottom()),
+        );
+        let fraction = self.fraction(position);
+        let pixel = |value: f32, edge: u32| ((value * edge as f32) as u32).min(edge - 1);
+        Some((pixel(fraction.x, canvas.0), pixel(fraction.y, canvas.1)))
+    }
+
     pub(super) fn project(&self, fraction: Point<f32>) -> Point<Pixels> {
         self.bounds.origin
             + point(
@@ -703,6 +710,59 @@ fn constrain_pan(pan: Point<Pixels>, limit: Point<Pixels>) -> Point<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outside_crop_starts_clamp_to_image_edges_while_sampling_stays_inside() {
+        let canvas = (100, 80);
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        for scale in [1., 2.] {
+            let geometry =
+                PreviewGeometry::new(100, 80, Zoom::Percent(100.), viewport, scale).unwrap();
+            for (fraction, expected) in [
+                ((-0.5, 0.5), (0, 40)),
+                ((1.5, 0.5), (99, 40)),
+                ((0.5, -0.5), (50, 0)),
+                ((0.5, 1.5), (50, 79)),
+                ((-0.5, -0.5), (0, 0)),
+                ((1.5, 1.5), (99, 79)),
+            ] {
+                let position = geometry.project(point(fraction.0, fraction.1));
+                assert!(viewport.contains(&position));
+                assert_eq!(
+                    geometry.canvas_pixel(position, viewport, canvas, false),
+                    None
+                );
+                let start = geometry
+                    .canvas_pixel(position, viewport, canvas, true)
+                    .unwrap();
+                assert_eq!(start, expected);
+                let end = geometry
+                    .canvas_pixel(geometry.project(point(0.25, 0.25)), viewport, canvas, true)
+                    .unwrap();
+                let free = CropRect::between(start, end);
+                assert!(free.x + free.width <= canvas.0);
+                assert!(free.y + free.height <= canvas.1);
+                let square = crate::constraints::AspectRatio::SQUARE.drag(
+                    (i64::from(start.0), i64::from(start.1)),
+                    (i64::from(end.0), i64::from(end.1)),
+                    Some(canvas),
+                );
+                assert!(square.x >= 0 && square.y >= 0);
+                assert!(square.right() <= i64::from(canvas.0));
+                assert!(square.bottom() <= i64::from(canvas.1));
+                assert_eq!(square.width, square.height);
+            }
+            let outside = point(viewport.left() - px(20.), viewport.top() - px(20.));
+            assert_eq!(
+                geometry.canvas_pixel(outside, viewport, canvas, false),
+                None
+            );
+            assert_eq!(
+                geometry.canvas_pixel(outside, viewport, canvas, true),
+                Some((0, 0))
+            );
+        }
+    }
 
     #[test]
     fn crop_moves_and_resizes_inside_the_canvas() {

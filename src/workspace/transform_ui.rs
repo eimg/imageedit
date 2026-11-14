@@ -371,7 +371,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tool == Tool::ScaleLayer {
+        if self.preferences.tool == Tool::ScaleLayer {
             self.cancel_scale(window, cx);
             self.begin_scale_numeric(window, cx);
         } else {
@@ -380,7 +380,7 @@ impl Workspace {
     }
 
     pub(super) fn begin_warp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = warp_kind(self.tool) else {
+        let Some(kind) = warp_kind(self.preferences.tool) else {
             return;
         };
         if self.active_tab().is_none_or(|tab| tab.busy()) {
@@ -470,7 +470,7 @@ impl Workspace {
         let mask = session.mask.clone();
         let offset = session.offset;
         let layer = session.layer;
-        let resample = self.warp_resample;
+        let resample = self.preferences.warp_resample;
         self.warp_dirty = false;
         self.warp_applying = true;
         cx.notify();
@@ -778,10 +778,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.warp_applying || self.warp_resample == resample {
+        if self.warp_applying || self.preferences.warp_resample == resample {
             return;
         }
-        self.warp_resample = resample;
+        self.preferences.warp_resample = resample;
         if self.warp.is_some() {
             self.request_warp_preview(window, cx);
         }
@@ -965,7 +965,7 @@ impl Workspace {
             error: self.warp_error,
             horizontal: session.mirror == Mirror::Horizontal,
             applying: self.warp_applying,
-            resample: self.warp_resample,
+            resample: self.preferences.warp_resample,
         })
     }
 
@@ -1038,7 +1038,7 @@ impl Workspace {
         let offset = session.offset;
         let opacity = session.opacity;
         let layer = session.layer;
-        let resample = self.warp_resample;
+        let resample = self.preferences.warp_resample;
         let job = cx.background_executor().spawn(async move {
             let placed = transform::warp_layer(&source, offset, warp, resample, Some(PREVIEW_EDGE));
             let (below, above, sprite) = match placed {

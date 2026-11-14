@@ -136,8 +136,8 @@ impl Workspace {
         scale: f32,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.show_guides
-            || self.tool != Tool::Move
+        if !self.preferences.show_guides
+            || self.preferences.tool != Tool::Move
             || self.space_pan
             || self.move_drag.is_some()
             || self.numeric_edit.is_some()
@@ -275,7 +275,7 @@ impl Workspace {
     }
 
     pub(super) fn guide_cursor(&self, scale: f32) -> Option<CursorStyle> {
-        if !self.show_guides {
+        if !self.preferences.show_guides {
             return None;
         }
         if let Some(drag) = &self.guide_drag {
@@ -287,10 +287,11 @@ impl Workspace {
         let position = self.canvas_cursor.position.get()?;
         let viewport = self.viewport.get();
         let ruler = ruler_axis(viewport, position);
-        if ruler_hit(viewport, position) && (self.tool != Tool::Move || ruler.is_none()) {
+        if ruler_hit(viewport, position) && (self.preferences.tool != Tool::Move || ruler.is_none())
+        {
             return Some(CursorStyle::Arrow);
         }
-        if self.tool != Tool::Move {
+        if self.preferences.tool != Tool::Move {
             return None;
         }
         let tab = self.active_tab()?;

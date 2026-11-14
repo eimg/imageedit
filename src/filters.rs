@@ -8,7 +8,7 @@ pub enum FilterStop {
     TooLarge,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FilterSpec {
     Blur {
         radius: u32,
@@ -21,6 +21,7 @@ pub enum FilterSpec {
         radius: u32,
         offset: (i32, i32),
         opacity: u8,
+        #[serde(with = "crate::settings::rgba")]
         color: Rgba<u8>,
     },
 }

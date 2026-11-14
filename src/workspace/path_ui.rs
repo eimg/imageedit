@@ -173,8 +173,8 @@ impl Workspace {
             .child(section_label("HANDLE DRAG"))
             .child(segmented([
                 ("Independent", HandleMode::Independent), ("Aligned", HandleMode::Aligned), ("Symmetric", HandleMode::Symmetric),
-            ].map(|(label, mode)| choice_button(label, self.path_handle_mode == mode).on_click(cx.listener(move |this, _, _, cx| {
-                if this.path_gesture.is_none() { this.path_handle_mode = mode; cx.notify(); }
+            ].map(|(label, mode)| choice_button(label, self.preferences.path_handle_mode == mode).on_click(cx.listener(move |this, _, _, cx| {
+                if this.path_gesture.is_none() { this.preferences.path_handle_mode = mode; cx.notify(); }
             })))))
             .child(div().flex().justify_between().child(section_label("SELECTED ANCHORS")).child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(count.to_string())))
             .child(div().flex().gap_2().children([
@@ -382,9 +382,9 @@ impl Workspace {
                     .content
                     .layer(tab.active_layer)
                     .is_some_and(|layer| layer.visible && layer.text.is_none())
-                && self.brushes.outline.opacity > 0
+                && self.preferences.brushes.outline.opacity > 0
         });
-        let style = self.path_stroke_style;
+        let style = self.preferences.path_stroke_style;
         let selection = tab.is_some_and(|tab| {
             !tab.busy()
                 && tab.document.content.paths().len() < crate::paths::MAX_PATHS
@@ -447,13 +447,23 @@ impl Workspace {
                 self.numeric_stepper(
                     NumericField::PathStrokeSize,
                     step_button("path-stroke-down", "−").on_click(cx.listener(|this, _, _, cx| {
-                        this.brushes.outline.diameter =
-                            this.brushes.outline.diameter.saturating_sub(1).max(1);
+                        this.preferences.brushes.outline.diameter = this
+                            .preferences
+                            .brushes
+                            .outline
+                            .diameter
+                            .saturating_sub(1)
+                            .max(1);
                         cx.notify();
                     })),
                     step_button("path-stroke-up", "+").on_click(cx.listener(|this, _, _, cx| {
-                        this.brushes.outline.diameter =
-                            this.brushes.outline.diameter.saturating_add(1).min(500);
+                        this.preferences.brushes.outline.diameter = this
+                            .preferences
+                            .brushes
+                            .outline
+                            .diameter
+                            .saturating_add(1)
+                            .min(500);
                         cx.notify();
                     })),
                     cx,
@@ -624,7 +634,7 @@ impl Workspace {
                     anchor,
                     incoming,
                     grab: (at.0 - point.0, at.1 - point.1),
-                    mode: self.path_handle_mode,
+                    mode: self.preferences.path_handle_mode,
                 },
                 Target::Anchor { anchor, .. } => {
                     let bases = self

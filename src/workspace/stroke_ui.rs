@@ -12,7 +12,7 @@ pub(super) enum StrokeSource {
     Selection,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum PathStrokeStyle {
     Pencil,
     #[default]
@@ -66,7 +66,7 @@ impl Workspace {
                 .content
                 .layer(tab.active_layer)
                 .is_some_and(|layer| layer.visible && layer.text.is_none())
-                && self.brushes.outline.opacity > 0
+                && self.preferences.brushes.outline.opacity > 0
         });
         let path = ready.is_some_and(|tab| {
             tab.document
@@ -90,8 +90,8 @@ impl Workspace {
     }
 
     pub(super) fn set_path_stroke_style(&mut self, style: PathStrokeStyle, cx: &mut Context<Self>) {
-        if self.path_stroke_style != style {
-            self.path_stroke_style = style;
+        if self.preferences.path_stroke_style != style {
+            self.preferences.path_stroke_style = style;
             cx.notify();
         }
     }
@@ -135,7 +135,7 @@ impl Workspace {
         if !layer.visible {
             return Some(OutlineRequest::Hidden);
         }
-        if self.brushes.outline.opacity == 0 {
+        if self.preferences.brushes.outline.opacity == 0 {
             return None;
         }
         let outline = match source {
@@ -164,9 +164,9 @@ impl Workspace {
         Some(OutlineRequest::Ready {
             layer: layer.id,
             outline,
-            color: solid_color(self.colors[0]),
-            kind: self.path_stroke_style.kind(),
-            brush: self.brushes.outline,
+            color: solid_color(self.color_memory.swatches[0]),
+            kind: self.preferences.path_stroke_style.kind(),
+            brush: self.preferences.brushes.outline,
         })
     }
 }

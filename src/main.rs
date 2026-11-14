@@ -7,6 +7,7 @@ mod adjustments;
 #[cfg(test)]
 mod capability_tests;
 mod color_management;
+mod color_memory;
 mod commands;
 mod constraints;
 mod document;
@@ -28,6 +29,7 @@ mod preview;
 mod project;
 mod recovery;
 mod selection;
+mod settings;
 mod text;
 mod theme;
 mod transform;

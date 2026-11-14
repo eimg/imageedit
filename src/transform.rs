@@ -18,7 +18,7 @@ pub enum Mirror {
     Vertical,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Resample {
     Nearest,
     Bilinear,
@@ -26,7 +26,7 @@ pub enum Resample {
 }
 
 // Where the existing canvas stays put when the canvas grows or shrinks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Anchor {
     NorthWest,
     North,

@@ -32,6 +32,7 @@ Windows downloads are unsigned. The macOS app is ad hoc signed and not notarized
 - **Layers** — masks, blend modes, opacity, locks, and linked movement.
 - **Selections and transforms** — rectangle, oval, freehand, magic wand, crop, scale, rotate, and perspective.
 - **Painting** — pencil, brush, eraser, clone stamp, gradients, and bucket fill.
+  Per-tool settings and recent colors survive app restarts.
 - **Text and paths** — editable text, font controls, wrapping, and editable vector paths.
 - **Color and effects** — levels, curves, blur, sharpen, drop shadows, and editable layer effects.
 - **PDF and recovery** — import selected PDF pages, export a flattened PDF, and recover interrupted work.
@@ -40,6 +41,13 @@ Windows downloads are unsigned. The macOS app is ad hoc signed and not notarized
 
 Open an image or PDF, or create a new image. Choose a tool and adjust its options
 beside the canvas. Hover the **?** for gestures and shortcuts.
+
+Crop and paint strokes can start outside the canvas; crop stays within the image.
+The status bar shows the current app version.
+
+Use the reset arrow in **Tool Options** or **Tools → Reset Current Tool** to restore
+that tool's defaults. **Tools → Reset All Tool Settings…** resets every tool after
+confirmation. Resets preserve artwork, colors, and saved gradient presets.
 
 Save as **`.lime`** to keep layers and editable content. Use **Export** for a
 flattened PNG, JPEG, WebP, or PDF copy.

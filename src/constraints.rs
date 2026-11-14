@@ -1,6 +1,6 @@
 use crate::preview::PixelRect;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AspectRatio {
     pub width: u32,
     pub height: u32,

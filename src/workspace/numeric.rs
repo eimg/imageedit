@@ -443,12 +443,18 @@ impl Workspace {
         match field {
             NumericField::SelectionX => rect.map(|rect| rect.x),
             NumericField::SelectionY => rect.map(|rect| rect.y),
-            NumericField::SelectionRatioWidth => Some(i64::from(self.selection_ratio_value.width)),
-            NumericField::SelectionRatioHeight => {
-                Some(i64::from(self.selection_ratio_value.height))
+            NumericField::SelectionRatioWidth => {
+                Some(i64::from(self.preferences.selection_ratio_value.width))
             }
-            NumericField::CropRatioWidth => Some(i64::from(self.crop_ratio_value.width)),
-            NumericField::CropRatioHeight => Some(i64::from(self.crop_ratio_value.height)),
+            NumericField::SelectionRatioHeight => {
+                Some(i64::from(self.preferences.selection_ratio_value.height))
+            }
+            NumericField::CropRatioWidth => {
+                Some(i64::from(self.preferences.crop_ratio_value.width))
+            }
+            NumericField::CropRatioHeight => {
+                Some(i64::from(self.preferences.crop_ratio_value.height))
+            }
             NumericField::SelectionRadius => Some(i64::from(self.active_selection_radius())),
             NumericField::SelectionWidth => rect.map(|rect| i64::from(rect.width)),
             NumericField::SelectionHeight => rect.map(|rect| i64::from(rect.height)),
@@ -483,16 +489,18 @@ impl Workspace {
                         .round() as i64
                 })
             }
-            NumericField::WandTolerance => Some(i64::from(self.wand_match.tolerance)),
-            NumericField::FillTolerance => Some(i64::from(self.fill_match.tolerance)),
-            NumericField::WandGapRadius => Some(i64::from(self.wand_match.gap_radius)),
-            NumericField::FillGapRadius => Some(i64::from(self.fill_match.gap_radius)),
+            NumericField::WandTolerance => Some(i64::from(self.preferences.wand_match.tolerance)),
+            NumericField::FillTolerance => Some(i64::from(self.preferences.fill_match.tolerance)),
+            NumericField::WandGapRadius => Some(i64::from(self.preferences.wand_match.gap_radius)),
+            NumericField::FillGapRadius => Some(i64::from(self.preferences.fill_match.gap_radius)),
             NumericField::BrushSize => Some(i64::from(self.brush_value(BrushField::Size))),
             NumericField::BrushSpacing => Some(i64::from(self.brush_value(BrushField::Spacing))),
             NumericField::BrushHardness => Some(i64::from(self.brush_value(BrushField::Hardness))),
             NumericField::BrushOpacity => Some(i64::from(self.brush_value(BrushField::Opacity))),
             NumericField::BrushFlow => Some(i64::from(self.brush_value(BrushField::Flow))),
-            NumericField::PathStrokeSize => Some(i64::from(self.brushes.outline.diameter)),
+            NumericField::PathStrokeSize => {
+                Some(i64::from(self.preferences.brushes.outline.diameter))
+            }
             NumericField::ScaleWidth => self.scale_size().map(|size| i64::from(size.0)),
             NumericField::ScaleHeight => self.scale_size().map(|size| i64::from(size.1)),
             NumericField::RotateAngle => self
@@ -501,8 +509,10 @@ impl Workspace {
                 .map(|degrees| (degrees * 10.).round() as i64),
             NumericField::MoveX => self.move_offset().map(|offset| i64::from(offset.0)),
             NumericField::MoveY => self.move_offset().map(|offset| i64::from(offset.1)),
-            NumericField::GridSpacing => Some(i64::from(self.grid_spacing)),
-            NumericField::SelectionFeatherRadius => Some(i64::from(self.selection_feather_radius)),
+            NumericField::GridSpacing => Some(i64::from(self.preferences.grid_spacing)),
+            NumericField::SelectionFeatherRadius => {
+                Some(i64::from(self.preferences.selection_feather_radius))
+            }
             NumericField::GradientStopPosition => self
                 .selected_gradient_stop()
                 .map(|stop| i64::from(stop.position)),
@@ -713,10 +723,10 @@ impl Workspace {
                     },
                     |rect| rect.width.min(rect.height) / 2,
                 );
-                self.selection_radius = value.min(max);
-                if let Some(selection) =
-                    rect.and_then(|rect| self.selection_for_rect(rect, Some(self.selection_radius)))
-                {
+                self.preferences.selection_radius = value.min(max);
+                if let Some(selection) = rect.and_then(|rect| {
+                    self.selection_for_rect(rect, Some(self.preferences.selection_radius))
+                }) {
                     self.selection_preview = Some(selection);
                 }
             }
@@ -800,7 +810,7 @@ impl Workspace {
                     width.saturating_sub(crop.x).max(1),
                     height.saturating_sub(crop.y).max(1),
                 );
-                if let Some(ratio) = self.crop_ratio {
+                if let Some(ratio) = self.preferences.crop_ratio {
                     (crop.width, crop.height) =
                         ratio.fit(field == NumericField::CropWidth, value, limits);
                 } else if field == NumericField::CropWidth {
@@ -884,7 +894,7 @@ impl Workspace {
             return;
         };
         let settled_generation = tab.history.generation();
-        let tool = self.tool;
+        let tool = self.preferences.tool;
         let entity = cx.weak_entity();
         // Menu availability and key contexts must render the settled edit first.
         // Dispatch outside the entity update so keystroke interceptors can borrow it.
@@ -894,7 +904,7 @@ impl Workspace {
                     if this.form.is_some()
                         || this.dialog_open
                         || this.numeric_edit.is_some()
-                        || this.tool != tool
+                        || this.preferences.tool != tool
                         || this.active_tab().is_none_or(|tab| {
                             tab.id != id
                                 || tab.busy()
@@ -994,7 +1004,7 @@ impl Workspace {
                 self.set_text_line_spacing(original as f32 / 100.0, window, cx)
             }
             NumericField::SelectionRadius => {
-                self.selection_radius = original as u32;
+                self.preferences.selection_radius = original as u32;
                 self.selection_preview = None;
             }
             NumericField::SelectionWidth
@@ -1020,31 +1030,33 @@ impl Workspace {
     ) {
         let value = field.constrain(value);
         match field {
-            NumericField::WandTolerance => self.wand_match.tolerance = value as u8,
-            NumericField::FillTolerance => self.fill_match.tolerance = value as u8,
-            NumericField::WandGapRadius => self.wand_match.gap_radius = value as u8,
-            NumericField::FillGapRadius => self.fill_match.gap_radius = value as u8,
-            NumericField::GridSpacing => self.grid_spacing = value as u32,
-            NumericField::SelectionFeatherRadius => self.selection_feather_radius = value as u32,
+            NumericField::WandTolerance => self.preferences.wand_match.tolerance = value as u8,
+            NumericField::FillTolerance => self.preferences.fill_match.tolerance = value as u8,
+            NumericField::WandGapRadius => self.preferences.wand_match.gap_radius = value as u8,
+            NumericField::FillGapRadius => self.preferences.fill_match.gap_radius = value as u8,
+            NumericField::GridSpacing => self.preferences.grid_spacing = value as u32,
+            NumericField::SelectionFeatherRadius => {
+                self.preferences.selection_feather_radius = value as u32
+            }
             NumericField::GradientStopPosition => self.move_gradient_stop(value as u16, window, cx),
             NumericField::GradientStopOpacity => {
                 self.set_gradient_stop_alpha(value as u8, window, cx)
             }
             NumericField::SelectionRatioWidth | NumericField::SelectionRatioHeight => {
                 if field == NumericField::SelectionRatioWidth {
-                    self.selection_ratio_value.width = value as u32;
+                    self.preferences.selection_ratio_value.width = value as u32;
                 } else {
-                    self.selection_ratio_value.height = value as u32;
+                    self.preferences.selection_ratio_value.height = value as u32;
                 }
-                self.selection_ratio = Some(self.selection_ratio_value);
+                self.preferences.selection_ratio = Some(self.preferences.selection_ratio_value);
             }
             NumericField::CropRatioWidth | NumericField::CropRatioHeight => {
                 if field == NumericField::CropRatioWidth {
-                    self.crop_ratio_value.width = value as u32;
+                    self.preferences.crop_ratio_value.width = value as u32;
                 } else {
-                    self.crop_ratio_value.height = value as u32;
+                    self.preferences.crop_ratio_value.height = value as u32;
                 }
-                self.crop_ratio = Some(self.crop_ratio_value);
+                self.preferences.crop_ratio = Some(self.preferences.crop_ratio_value);
             }
             NumericField::BrushSize => self.set_brush_value(BrushField::Size, value as u32, cx),
             NumericField::BrushSpacing => {
@@ -1057,7 +1069,9 @@ impl Workspace {
                 self.set_brush_value(BrushField::Opacity, value as u32, cx)
             }
             NumericField::BrushFlow => self.set_brush_value(BrushField::Flow, value as u32, cx),
-            NumericField::PathStrokeSize => self.brushes.outline.diameter = value as u32,
+            NumericField::PathStrokeSize => {
+                self.preferences.brushes.outline.diameter = value as u32
+            }
             NumericField::RotateAngle => self.set_warp_angle(value as f64 / 10., window, cx),
             NumericField::RotatePivotX | NumericField::RotatePivotY => {
                 if let Some(mut pivot) = self.rotation_pivot() {
@@ -1125,7 +1139,7 @@ impl Workspace {
                     if matches!(current, Selection::RoundedRect(_)) {
                         current.is_antialiased()
                     } else {
-                        self.selection_antialias
+                        self.preferences.selection_antialias
                     },
                 ))
             }

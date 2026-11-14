@@ -95,24 +95,27 @@ struct GradientPreview {
 impl Workspace {
     fn gradient_value(&self, start: (f64, f64), end: (f64, f64)) -> Gradient {
         Gradient {
-            shape: self.gradient_shape,
-            blend: self.gradient_blend,
+            shape: self.preferences.gradient_shape,
+            blend: self.preferences.gradient_blend,
             start,
             end,
-            foreground: document::solid_color(self.colors[0]),
-            background: document::solid_color(self.colors[1]),
+            foreground: document::solid_color(self.color_memory.swatches[0]),
+            background: document::solid_color(self.color_memory.swatches[1]),
             ramp: self
+                .preferences
                 .gradient_use_custom
-                .then_some(self.gradient_custom)
+                .then_some(self.preferences.gradient_custom)
                 .flatten(),
-            reverse: self.gradient_reverse,
+            reverse: self.preferences.gradient_reverse,
         }
     }
 
     fn dynamic_ramp(&self) -> crate::gradient::ColorRamp {
-        let start = document::solid_color(self.colors[0]);
-        let end = match self.gradient_blend {
-            GradientBlend::ForegroundToBackground => document::solid_color(self.colors[1]),
+        let start = document::solid_color(self.color_memory.swatches[0]);
+        let end = match self.preferences.gradient_blend {
+            GradientBlend::ForegroundToBackground => {
+                document::solid_color(self.color_memory.swatches[1])
+            }
             GradientBlend::ForegroundToTransparent => {
                 image::Rgba([start[0], start[1], start[2], 0])
             }
@@ -122,35 +125,36 @@ impl Workspace {
 
     fn gradient_settings_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.gradient_revision = self.gradient_revision.wrapping_add(1);
-        self.gradient_selected_preset = None;
+        self.preferences.gradient_selected_preset = None;
         self.refresh_gradient(window, cx);
         cx.notify();
     }
 
     pub(super) fn set_gradient_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.gradient_use_custom {
+        if self.preferences.gradient_use_custom {
             return;
         }
-        if self.gradient_custom.is_none() {
-            self.gradient_custom = Some(self.dynamic_ramp());
+        if self.preferences.gradient_custom.is_none() {
+            self.preferences.gradient_custom = Some(self.dynamic_ramp());
         }
-        self.gradient_use_custom = true;
+        self.preferences.gradient_use_custom = true;
         self.gradient_settings_changed(window, cx);
     }
 
     pub(super) fn reverse_gradient(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.gradient_reverse = !self.gradient_reverse;
+        self.preferences.gradient_reverse = !self.preferences.gradient_reverse;
         self.gradient_settings_changed(window, cx);
     }
 
     pub(super) fn selected_gradient_stop(&self) -> Option<crate::gradient::ColorStop> {
-        if !self.gradient_use_custom {
+        if !self.preferences.gradient_use_custom {
             return None;
         }
-        self.gradient_custom
+        self.preferences
+            .gradient_custom
             .as_ref()?
             .stops()
-            .get(self.gradient_selected_stop)
+            .get(self.preferences.gradient_selected_stop)
             .copied()
     }
 
@@ -162,33 +166,37 @@ impl Workspace {
     ) {
         self.commit_numeric_edit(window, cx);
         if self
+            .preferences
             .gradient_custom
             .as_ref()
             .is_some_and(|ramp| index < ramp.stops().len())
         {
-            self.gradient_selected_stop = index;
+            self.preferences.gradient_selected_stop = index;
             cx.notify();
         }
     }
 
     pub(super) fn add_gradient_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self
+            .preferences
             .gradient_custom
             .as_mut()
             .and_then(|ramp| ramp.add_stop())
         {
-            self.gradient_selected_stop = index;
+            self.preferences.gradient_selected_stop = index;
             self.gradient_settings_changed(window, cx);
         }
     }
 
     pub(super) fn remove_gradient_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
+            .preferences
             .gradient_custom
             .as_mut()
-            .is_some_and(|ramp| ramp.remove_stop(self.gradient_selected_stop))
+            .is_some_and(|ramp| ramp.remove_stop(self.preferences.gradient_selected_stop))
         {
-            self.gradient_selected_stop = self.gradient_selected_stop.saturating_sub(1);
+            self.preferences.gradient_selected_stop =
+                self.preferences.gradient_selected_stop.saturating_sub(1);
             self.gradient_settings_changed(window, cx);
         }
     }
@@ -200,9 +208,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self
+            .preferences
             .gradient_custom
             .as_mut()
-            .is_some_and(|ramp| ramp.move_stop(self.gradient_selected_stop, position))
+            .is_some_and(|ramp| ramp.move_stop(self.preferences.gradient_selected_stop, position))
         {
             self.gradient_settings_changed(window, cx);
         }
@@ -219,9 +228,10 @@ impl Workspace {
         };
         stop.color[3] = alpha;
         if self
+            .preferences
             .gradient_custom
             .as_mut()
-            .is_some_and(|ramp| ramp.set_color(self.gradient_selected_stop, stop.color))
+            .is_some_and(|ramp| ramp.set_color(self.preferences.gradient_selected_stop, stop.color))
         {
             self.gradient_settings_changed(window, cx);
         }
@@ -235,10 +245,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if revision != self.gradient_revision || !self.gradient_use_custom {
+        if revision != self.gradient_revision || !self.preferences.gradient_use_custom {
             return;
         }
-        let Some(ramp) = self.gradient_custom.as_mut() else {
+        let Some(ramp) = self.preferences.gradient_custom.as_mut() else {
             return;
         };
         let Some(stop) = ramp.stops().get(index) else {
@@ -247,20 +257,22 @@ impl Workspace {
         let mut rgba = document::solid_color(color);
         rgba[3] = stop.color[3];
         if ramp.set_color(index, rgba) {
-            self.remember_color(color);
             self.gradient_settings_changed(window, cx);
         }
+        self.remember_color(color, window, cx);
     }
 
     pub(super) fn current_gradient_preset(&self) -> PresetValue {
         PresetValue {
-            ramp: if self.gradient_use_custom {
-                self.gradient_custom.unwrap_or_else(|| self.dynamic_ramp())
+            ramp: if self.preferences.gradient_use_custom {
+                self.preferences
+                    .gradient_custom
+                    .unwrap_or_else(|| self.dynamic_ramp())
             } else {
                 self.dynamic_ramp()
             },
-            shape: self.gradient_shape,
-            reverse: self.gradient_reverse,
+            shape: self.preferences.gradient_shape,
+            reverse: self.preferences.gradient_reverse,
         }
     }
 
@@ -291,8 +303,7 @@ impl Workspace {
                         this.gradient_library = library;
                         this.gradient_store.original = bytes;
                         this.gradient_store.blocked = false;
-                        this.gradient_selected_preset = None;
-                        this.gradient_presets_expanded = false;
+                        this.reconcile_gradient_preset();
                     }
                     Err(error) => this.gradient_store.error = Some(library_error(error)),
                 }
@@ -335,12 +346,12 @@ impl Workspace {
                     Ok(bytes) => {
                         this.gradient_library = candidate;
                         this.gradient_store.original = Some(bytes);
-                        this.gradient_selected_preset = selected.filter(|id| {
+                        this.preferences.gradient_selected_preset = selected.filter(|id| {
                             this.gradient_library.get(*id).is_some_and(|preset| {
                                 preset.value == this.current_gradient_preset()
                             })
                         });
-                        this.gradient_presets_expanded = false;
+                        this.preferences.gradient_presets_expanded = false;
                         if let Some(quit) = requested_exit
                             && this.request_exit(quit, window, cx)
                         {
@@ -380,21 +391,21 @@ impl Workspace {
         let Some(value) = self.gradient_library.get(id).map(|preset| preset.value) else {
             return;
         };
-        self.gradient_custom = Some(value.ramp);
-        self.gradient_use_custom = true;
-        self.gradient_shape = value.shape;
-        self.gradient_reverse = value.reverse;
-        self.gradient_selected_stop = 0;
+        self.preferences.gradient_custom = Some(value.ramp);
+        self.preferences.gradient_use_custom = true;
+        self.preferences.gradient_shape = value.shape;
+        self.preferences.gradient_reverse = value.reverse;
+        self.preferences.gradient_selected_stop = 0;
         self.gradient_settings_changed(window, cx);
-        self.gradient_selected_preset = Some(id);
-        self.gradient_presets_expanded = false;
+        self.preferences.gradient_selected_preset = Some(id);
+        self.preferences.gradient_presets_expanded = false;
     }
 
     pub(super) fn delete_gradient_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.gradient_store.ready() {
             return;
         }
-        let Some(id) = self.gradient_selected_preset else {
+        let Some(id) = self.preferences.gradient_selected_preset else {
             return;
         };
         let mut candidate = self.gradient_library.clone();
@@ -549,10 +560,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.gradient_shape == shape {
+        if self.preferences.gradient_shape == shape {
             return;
         }
-        self.gradient_shape = shape;
+        self.preferences.gradient_shape = shape;
         self.gradient_settings_changed(window, cx);
     }
 
@@ -562,24 +573,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.gradient_blend == blend && !self.gradient_use_custom {
+        if self.preferences.gradient_blend == blend && !self.preferences.gradient_use_custom {
             return;
         }
-        self.gradient_blend = blend;
-        self.gradient_use_custom = false;
+        self.preferences.gradient_blend = blend;
+        self.preferences.gradient_use_custom = false;
         self.gradient_settings_changed(window, cx);
     }
 
     pub(super) fn set_fill_mode(&mut self, mode: FillMode, cx: &mut Context<Self>) {
-        if self.fill_mode != mode {
-            self.fill_mode = mode;
+        if self.preferences.fill_mode != mode {
+            self.preferences.fill_mode = mode;
             cx.notify();
         }
     }
 
     pub(super) fn set_sample_all(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.sample_all != enabled {
-            self.sample_all = enabled;
+        if self.preferences.sample_all != enabled {
+            self.preferences.sample_all = enabled;
             cx.notify();
         }
     }

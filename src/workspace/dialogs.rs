@@ -590,7 +590,7 @@ impl Workspace {
             };
             color
         } else {
-            self.colors[swatch]
+            self.color_memory.swatches[swatch]
         };
         self.show_form(
             FormKind::Color {
@@ -613,7 +613,7 @@ impl Workspace {
             FormKind::Color {
                 target: ColorTarget::GradientStop {
                     revision: self.gradient_revision,
-                    index: self.gradient_selected_stop,
+                    index: self.preferences.gradient_selected_stop,
                 },
                 hex: Field::new(format!("{initial:06X}")),
                 hsv: Hsv::from_rgb(initial),
@@ -629,7 +629,7 @@ impl Workspace {
             return;
         }
         if self.active_tab().is_some_and(|tab| !tab.busy()) {
-            let quality = Field::new(self.jpeg_quality.to_string());
+            let quality = Field::new(self.preferences.jpeg_quality.to_string());
             self.show_form(FormKind::JpegQuality { quality }, window, cx);
         }
     }
@@ -653,7 +653,7 @@ impl Workspace {
             return;
         };
         let canvas = tab.document.content.size();
-        let dpi = Field::new(self.pdf_export_dpi.to_string());
+        let dpi = Field::new(self.preferences.pdf_export_dpi.to_string());
         self.show_form(FormKind::PdfExport { dpi, canvas }, window, cx);
     }
 
@@ -708,6 +708,7 @@ impl Workspace {
         }
         let (id, value, name) = if rename {
             let Some(preset) = self
+                .preferences
                 .gradient_selected_preset
                 .and_then(|id| self.gradient_library.get(id))
             else {
@@ -869,7 +870,7 @@ impl Workspace {
         self.show_form(
             FormKind::PdfImport {
                 path,
-                dpi: Field::new(self.pdf_preferences.dpi.to_string()),
+                dpi: Field::new(self.preferences.pdf_preferences.dpi.to_string()),
                 page_selection: Field::new(if source.info.pages == 1 {
                     "1".into()
                 } else {
@@ -878,12 +879,12 @@ impl Workspace {
                 page_scroll: gpui::ScrollHandle::new(),
                 all_pages: true,
                 mode: if target == PdfTarget::NewDocument {
-                    self.pdf_preferences.mode
+                    self.preferences.pdf_preferences.mode
                 } else {
                     PdfMode::Layers
                 },
-                background: self.pdf_preferences.background,
-                canvas: self.pdf_preferences.canvas,
+                background: self.preferences.pdf_preferences.background,
+                canvas: self.preferences.pdf_preferences.canvas,
                 target,
                 source,
                 active: 0,
@@ -1080,7 +1081,7 @@ impl Workspace {
     }
 
     fn use_shadow_foreground(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let foreground = solid_color(self.colors[0]);
+        let foreground = solid_color(self.color_memory.swatches[0]);
         let Some(form) = self.form.as_mut() else {
             return;
         };
@@ -1096,6 +1097,7 @@ impl Workspace {
         let Some(spec) = form.kind.filter_value() else {
             return;
         };
+        self.remember_color(self.color_memory.swatches[0], window, cx);
         self.set_filter(spec, window, cx);
         cx.notify();
     }
@@ -1218,7 +1220,7 @@ impl Workspace {
                 let background = if *transparent {
                     image::Rgba([0; 4])
                 } else {
-                    solid_color(self.colors[1])
+                    solid_color(self.color_memory.swatches[1])
                 };
                 self.dismiss_form(window, cx);
                 self.create_image(width, height, background, window, cx);
@@ -1245,14 +1247,16 @@ impl Workspace {
                         if let Some(spec) =
                             self.form.as_ref().and_then(|form| form.kind.filter_value())
                         {
+                            self.remember_color(color, window, cx);
                             self.set_filter(spec, window, cx);
                         }
                     }
                     ColorTarget::Swatch(swatch) if swatch == super::text_ui::TEXT_SWATCH => {
+                        self.remember_color(color, window, cx);
                         self.recolor_text(color, window, cx)
                     }
                     ColorTarget::Swatch(swatch) => {
-                        self.set_color(swatch, color);
+                        self.set_color(swatch, color, window, cx);
                         self.refresh_gradient(window, cx);
                     }
                     ColorTarget::GradientStop { revision, index } => {
@@ -1267,7 +1271,7 @@ impl Workspace {
                     cx.notify();
                     return;
                 };
-                self.jpeg_quality = quality;
+                self.preferences.jpeg_quality = quality;
                 self.dismiss_form(window, cx);
                 self.export(
                     ExportFormat::Raster {
@@ -1285,7 +1289,7 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
-                self.pdf_export_dpi = dpi;
+                self.preferences.pdf_export_dpi = dpi;
                 self.dismiss_form(window, cx);
                 self.export(ExportFormat::Pdf { dpi }, window, cx);
             }
@@ -1304,8 +1308,8 @@ impl Workspace {
                 let name = name.to_owned();
                 let fill = match *fill {
                     LayerFill::Transparent => image::Rgba([0; 4]),
-                    LayerFill::Foreground => solid_color(self.colors[0]),
-                    LayerFill::Background => solid_color(self.colors[1]),
+                    LayerFill::Foreground => solid_color(self.color_memory.swatches[0]),
+                    LayerFill::Background => solid_color(self.color_memory.swatches[1]),
                 };
                 let above = self.active_tab().map(|tab| tab.active_layer);
                 self.dismiss_form(window, cx);
@@ -2422,7 +2426,7 @@ impl Workspace {
                         .gap_1()
                         .child(div().text_color(rgb(MUTED)).child("Recent colors"))
                         .when_else(
-                            self.recent_colors.is_empty(),
+                            self.color_memory.recent.is_empty(),
                             |row| {
                                 row.child(
                                     div()
@@ -2434,7 +2438,7 @@ impl Workspace {
                             },
                             |row| {
                                 row.child(div().flex().gap_1().children(
-                                    self.recent_colors.iter().copied().map(|value| {
+                                    self.color_memory.recent.iter().copied().map(|value| {
                                         div()
                                             .id(("recent-color", value as usize))
                                             .size(px(23.))
