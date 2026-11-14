@@ -21,8 +21,8 @@ pub fn display_edge(canvas: (u32, u32), bounds: (f32, f32), scale: f32) -> u32 {
     }
 }
 
-// An immutable dialog snapshot. Work and allocations are bounded by the preview
-// edge, even when a layer is much larger than (or far outside) the canvas.
+// An immutable dialog snapshot. Area reduction visits visible source pixels in
+// background work; scratch space is bounded to source/preview rows, never a full canvas.
 pub struct EffectPreview {
     content: DocumentContent,
     layer: LayerId,
@@ -111,27 +111,9 @@ impl EffectPreview {
             color,
         } = spec
         {
-            let Some(mut region) = self.region(radius, offset) else {
+            let Some(region) = self.region(radius, offset, true) else {
                 return self.original().clone();
             };
-            if let Some(layer) = self.content.layer(self.layer)
-                && let Some(mask) = &layer.mask
-                && mask.enabled
-            {
-                for (x, y, pixel) in region.pixels.enumerate_pixels_mut() {
-                    let sx = (region.origin.0 - i64::from(layer.offset.0) - i64::from(offset.0)
-                        + ((f64::from(x) + 0.5) / region.scale).floor() as i64)
-                        .clamp(0, i64::from(mask.pixels.width()) - 1)
-                        as u32;
-                    let sy = (region.origin.1 - i64::from(layer.offset.1) - i64::from(offset.1)
-                        + ((f64::from(y) + 0.5) / region.scale).floor() as i64)
-                        .clamp(0, i64::from(mask.pixels.height()) - 1)
-                        as u32;
-                    pixel[3] = ((u16::from(pixel[3]) * u16::from(mask.pixels.get_pixel(sx, sy)[3])
-                        + 127)
-                        / 255) as u8;
-                }
-            }
             let shadow = filters::render_shadow(
                 &region.pixels,
                 (f64::from(radius) * region.scale).round() as u32,
@@ -149,7 +131,7 @@ impl EffectPreview {
             FilterSpec::Blur { radius } | FilterSpec::Sharpen { radius, .. } => radius,
             _ => 0,
         };
-        let Some(region) = self.region(radius, (0, 0)) else {
+        let Some(region) = self.region(radius, (0, 0), false) else {
             return self.original().clone();
         };
         let radius = (f64::from(radius) * region.scale).round() as u32;
@@ -197,7 +179,7 @@ impl EffectPreview {
     // Retain the visible source plus the filter's complete sampling halo. This
     // avoids squeezing a huge layer into a tiny preview of a small canvas, and
     // includes off-canvas pixels that can blur or cast a shadow onto the canvas.
-    fn region(&self, radius: u32, offset: (i32, i32)) -> Option<Region> {
+    fn region(&self, radius: u32, offset: (i32, i32), masked: bool) -> Option<Region> {
         let layer = self.content.layer(self.layer)?;
         let canvas = self.content.size();
         let scale = f64::from(self.sampling_size.0.max(self.sampling_size.1))
@@ -218,11 +200,19 @@ impl EffectPreview {
         }
         let w = ((right - left) as f64 * scale).ceil().max(1.) as u32;
         let h = ((bottom - top) as f64 * scale).ceil().max(1.) as u32;
-        let pixels = RgbaImage::from_fn(w, h, |x, y| {
-            let sx = (left + ((f64::from(x) + 0.5) / scale).floor() as i64).min(right - 1) as u32;
-            let sy = (top + ((f64::from(y) + 0.5) / scale).floor() as i64).min(bottom - 1) as u32;
-            *layer.pixels.get_pixel(sx, sy)
-        });
+        let pixels = reduce_area(
+            ((right - left) as u32, (bottom - top) as u32),
+            (w, h),
+            |y, row| {
+                for (x, pixel) in row.iter_mut().enumerate() {
+                    let (sx, sy) = (left as u32 + x as u32, top as u32 + y);
+                    *pixel = *layer.pixels.get_pixel(sx, sy);
+                    if masked {
+                        *pixel = layer.masked(*pixel, sx, sy);
+                    }
+                }
+            },
+        );
         Some(Region {
             pixels,
             origin: (origin.0 + left, origin.1 + top),
@@ -240,81 +230,128 @@ impl EffectPreview {
         map: impl Fn(Rgba<u8>, i64, i64) -> Rgba<u8>,
         shadow: Option<&ShadowPreview>,
     ) -> RgbaImage {
-        let (w, h) = self.sampling_size;
         let canvas = self.content.size();
-        let mut image = RgbaImage::new(w, h);
-        for layer in self.content.layers() {
-            // A committed shadow is a separate, fully opaque layer immediately
-            // below its source. Neither source opacity nor the selection clips it.
-            if layer.id == self.layer
-                && let Some(shadow) = shadow
-            {
-                for y in 0..h {
-                    for x in 0..w {
-                        let cx = i64::from(sample(x, w, canvas.0)) - shadow.origin.0;
-                        let cy = i64::from(sample(y, h, canvas.1)) - shadow.origin.1;
-                        let sx =
-                            (cx as f64 * shadow.scale).floor() as i64 + i64::from(shadow.image.pad);
-                        let sy =
-                            (cy as f64 * shadow.scale).floor() as i64 + i64::from(shadow.image.pad);
-                        if sx >= 0
-                            && sy >= 0
-                            && sx < i64::from(shadow.image.pixels.width())
-                            && sy < i64::from(shadow.image.pixels.height())
-                        {
-                            let destination = image.get_pixel_mut(x, y);
-                            *destination = document::source_over(
-                                *destination,
-                                *shadow.image.pixels.get_pixel(sx as u32, sy as u32),
-                                255,
-                            );
+        reduce_area(canvas, self.size, |cy, row| {
+            row.fill(Rgba([0; 4]));
+            for layer in self.content.layers() {
+                // Shadows are independent of source visibility/opacity and selection.
+                if layer.id == self.layer
+                    && let Some(shadow) = shadow
+                {
+                    let sy = ((i64::from(cy) - shadow.origin.1) as f64 * shadow.scale).floor()
+                        as i64
+                        + i64::from(shadow.image.pad);
+                    if (0..i64::from(shadow.image.pixels.height())).contains(&sy) {
+                        for (cx, pixel) in row.iter_mut().enumerate() {
+                            let sx = ((cx as i64 - shadow.origin.0) as f64 * shadow.scale).floor()
+                                as i64
+                                + i64::from(shadow.image.pad);
+                            if (0..i64::from(shadow.image.pixels.width())).contains(&sx) {
+                                *pixel = document::source_over(
+                                    *pixel,
+                                    *shadow.image.pixels.get_pixel(sx as u32, sy as u32),
+                                    255,
+                                );
+                            }
                         }
                     }
                 }
-            }
-            if !layer.visible || layer.opacity == 0 {
-                continue;
-            }
-            for y in 0..h {
-                let cy = i64::from(sample(y, h, canvas.1));
-                let sy = cy - i64::from(layer.offset.1);
-                if sy < 0 || sy >= i64::from(layer.pixels.height()) {
+                if !layer.visible || layer.opacity == 0 {
                     continue;
                 }
-                for x in 0..w {
-                    let cx = i64::from(sample(x, w, canvas.0));
-                    let sx = cx - i64::from(layer.offset.0);
-                    if sx < 0 || sx >= i64::from(layer.pixels.width()) {
-                        continue;
-                    }
-                    let mut pixel = *layer.pixels.get_pixel(sx as u32, sy as u32);
+                let sy = i64::from(cy) - i64::from(layer.offset.1);
+                if !(0..i64::from(layer.pixels.height())).contains(&sy) {
+                    continue;
+                }
+                let left = i64::from(layer.offset.0).clamp(0, i64::from(canvas.0)) as usize;
+                let right = (i64::from(layer.offset.0) + i64::from(layer.pixels.width()))
+                    .clamp(0, i64::from(canvas.0)) as usize;
+                for (cx, destination) in row.iter_mut().enumerate().take(right).skip(left) {
+                    let sx = (cx as i64 - i64::from(layer.offset.0)) as u32;
+                    let mut pixel = *layer.pixels.get_pixel(sx, sy as u32);
                     if layer.id == self.layer {
-                        pixel = map(pixel, cx, cy);
+                        pixel = map(pixel, cx as i64, i64::from(cy));
                     }
-                    pixel = layer.masked(pixel, sx as u32, sy as u32);
-                    let destination = image.get_pixel_mut(x, y);
+                    pixel = layer.masked(pixel, sx, sy as u32);
                     *destination =
                         document::blend(*destination, pixel, layer.opacity, layer.blend_mode);
                 }
             }
-        }
-        if image.dimensions() == self.size {
-            image
-        } else {
-            // Reduce the completed composition, including selection/mask edges, in
-            // premultiplied alpha so invisible RGB cannot tint visible edges.
-            crate::transform::scale_pixels(
-                &image,
-                self.size.0,
-                self.size.1,
-                crate::transform::Resample::Bilinear,
-            )
-        }
+        })
     }
 }
 
-fn sample(index: u32, source: u32, target: u32) -> u32 {
-    ((2 * u64::from(index) + 1) * u64::from(target) / (2 * u64::from(source.max(1)))) as u32
+// Exact box-area reduction with premultiplied color. Every contributing source
+// pixel is read before decimation, so periodic fine detail cannot alias away.
+// Cache one horizontal row across adjacent output rows; memory is O(source width
+// + output width), besides the output bitmap. Native-size paths retain exact bytes.
+fn reduce_area(
+    source: (u32, u32),
+    target: (u32, u32),
+    mut render_row: impl FnMut(u32, &mut [Rgba<u8>]),
+) -> RgbaImage {
+    let mut output = RgbaImage::new(target.0, target.1);
+    let mut row = vec![Rgba([0; 4]); source.0 as usize];
+    if source == target {
+        for y in 0..source.1 {
+            render_row(y, &mut row);
+            for (x, pixel) in row.iter().enumerate() {
+                output.put_pixel(x as u32, y, *pixel);
+            }
+        }
+        return output;
+    }
+    let mut horizontal = vec![[0_f64; 4]; target.0 as usize];
+    let mut vertical = horizontal.clone();
+    let mut cached_y = None;
+    let dx = f64::from(source.0) / f64::from(target.0);
+    let dy = f64::from(source.1) / f64::from(target.1);
+    for oy in 0..target.1 {
+        vertical.fill([0.; 4]);
+        let (top, bottom) = (f64::from(oy) * dy, f64::from(oy + 1) * dy);
+        for sy in top.floor() as u32..(bottom.ceil() as u32).min(source.1) {
+            if cached_y != Some(sy) {
+                render_row(sy, &mut row);
+                for ox in 0..target.0 {
+                    let (left, right) = (f64::from(ox) * dx, f64::from(ox + 1) * dx);
+                    let mut sum = [0.; 4];
+                    for sx in left.floor() as u32..(right.ceil() as u32).min(source.0) {
+                        let weight =
+                            (right.min(f64::from(sx + 1)) - left.max(f64::from(sx))).max(0.);
+                        let p = row[sx as usize];
+                        let alpha = f64::from(p[3]) * weight;
+                        for c in 0..3 {
+                            sum[c] += f64::from(p[c]) * alpha;
+                        }
+                        sum[3] += alpha;
+                    }
+                    horizontal[ox as usize] = sum.map(|v| v / dx);
+                }
+                cached_y = Some(sy);
+            }
+            let weight = (bottom.min(f64::from(sy + 1)) - top.max(f64::from(sy))).max(0.);
+            for (sum, source) in vertical.iter_mut().zip(&horizontal) {
+                for c in 0..4 {
+                    sum[c] += source[c] * weight;
+                }
+            }
+        }
+        for (ox, sum) in vertical.iter().enumerate() {
+            let alpha = (sum[3] / dy).round().clamp(0., 255.) as u8;
+            let pixel = if alpha == 0 {
+                Rgba([0; 4])
+            } else {
+                Rgba([
+                    (sum[0] / sum[3]).round() as u8,
+                    (sum[1] / sum[3]).round() as u8,
+                    (sum[2] / sum[3]).round() as u8,
+                    alpha,
+                ])
+            };
+            output.put_pixel(ox as u32, oy, pixel);
+        }
+    }
+    output
 }
 
 pub fn checker(image: &RgbaImage) -> RgbaImage {
@@ -388,6 +425,167 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn display_resolution_fits_retina_portrait_and_large_screens_without_upscaling_sources() {
+        assert_eq!(display_edge((1280, 720), (296., 180.), 1.), 296);
+        assert_eq!(display_edge((1280, 720), (296., 180.), 2.), 592);
+        assert_eq!(display_edge((720, 1280), (296., 180.), 2.), 360);
+        assert_eq!(
+            display_edge((4000, 3000), (4000., 3000.), 4.),
+            MAX_DISPLAY_EDGE
+        );
+        let preview = EffectPreview::new(scene(), LayerId(1), Selection::Full, 592);
+        assert_eq!(preview.original().dimensions(), (12, 9));
+        assert!(preview.resized(1024).is_none());
+    }
+
+    #[test]
+    fn downsampling_preserves_detail_and_cannot_mix_hidden_rgb_into_edges() {
+        let pixels = RgbaImage::from_fn(64, 64, |x, y| {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            Rgba([value, value, value, 255])
+        });
+        let content = DocumentContent::single_layer("Detail".into(), pixels.clone());
+        let preview = EffectPreview::new(content, LayerId(0), Selection::Full, 32);
+        assert_eq!(
+            *preview.original(),
+            RgbaImage::from_pixel(32, 32, Rgba([128, 128, 128, 255]))
+        );
+        assert!(
+            preview
+                .original()
+                .pixels()
+                .all(|p| (120..=135).contains(&p[0]))
+        );
+
+        let pixels = RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 0])
+            }
+        });
+        let content = DocumentContent::single_layer("Transparent edge".into(), pixels);
+        let preview = EffectPreview::new(content, LayerId(0), Selection::Full, 1);
+        assert_eq!(*preview.original().get_pixel(0, 0), Rgba([255, 0, 0, 128]));
+        assert_eq!(
+            *preview.adjustment(Adjustment::Invert).get_pixel(0, 0),
+            Rgba([0, 255, 255, 128])
+        );
+    }
+
+    fn half_size_reference(image: &RgbaImage) -> RgbaImage {
+        RgbaImage::from_fn(image.width() / 2, image.height() / 2, |x, y| {
+            let pixels = [
+                image.get_pixel(x * 2, y * 2),
+                image.get_pixel(x * 2 + 1, y * 2),
+                image.get_pixel(x * 2, y * 2 + 1),
+                image.get_pixel(x * 2 + 1, y * 2 + 1),
+            ];
+            let alpha: u32 = pixels.iter().map(|p| u32::from(p[3])).sum();
+            if alpha == 0 {
+                return Rgba([0; 4]);
+            }
+            let channel = |c: usize| {
+                ((pixels
+                    .iter()
+                    .map(|p| u32::from(p[c]) * u32::from(p[3]))
+                    .sum::<u32>()
+                    + alpha / 2)
+                    / alpha) as u8
+            };
+            Rgba([channel(0), channel(1), channel(2), ((alpha + 2) / 4) as u8])
+        })
+    }
+
+    #[test]
+    fn periodic_detail_is_averaged_before_large_and_fractional_reductions() {
+        for phase in [0, 1] {
+            for checker in [false, true] {
+                let pixels = RgbaImage::from_fn(64, 64, |x, y| {
+                    let v = if (x + if checker { y } else { 0 } + phase) % 2 == 0 {
+                        0
+                    } else {
+                        255
+                    };
+                    Rgba([v, v, v, 255])
+                });
+                let content = DocumentContent::single_layer("Stripes".into(), pixels);
+                for edge in [16, 8, 5] {
+                    let preview =
+                        EffectPreview::new(content.clone(), LayerId(0), Selection::Full, edge);
+                    for image in [
+                        preview.original().clone(),
+                        preview.adjustment(Adjustment::Invert),
+                        preview.filter(FilterSpec::Blur { radius: 4 }),
+                    ] {
+                        assert!(
+                            image
+                                .pixels()
+                                .all(|p| p[0].abs_diff(128) <= 10 && p[3] == 255)
+                        );
+                    }
+                    let region = preview.region(0, (0, 0), false).unwrap();
+                    assert!(region.pixels.pixels().all(|p| p[0].abs_diff(128) <= 10));
+                }
+            }
+        }
+        // Nonintegral footprint weights preserve area and include partial source pixels.
+        let reduced = reduce_area((3, 1), (2, 1), |_, row| {
+            row.copy_from_slice(&[
+                Rgba([0, 0, 0, 255]),
+                Rgba([255, 255, 255, 255]),
+                Rgba([0, 0, 0, 255]),
+            ])
+        });
+        assert!(reduced.pixels().all(|p| *p == Rgba([85, 85, 85, 255])));
+    }
+
+    #[test]
+    #[ignore = "release performance measurement"]
+    fn effect_preview_benchmark() {
+        let content = DocumentContent::single_layer(
+            "4K".into(),
+            RgbaImage::from_fn(3840, 2160, |x, y| Rgba([x as u8, y as u8, 90, 255])),
+        );
+        let preview = EffectPreview::new(content, LayerId(0), Selection::Full, 592);
+        let start = std::time::Instant::now();
+        std::hint::black_box(preview.original());
+        let before = start.elapsed();
+        let start = std::time::Instant::now();
+        std::hint::black_box(preview.adjustment(Adjustment::Invert));
+        eprintln!(
+            "4K area preview: before {} ms, adjustment {} ms",
+            before.as_millis(),
+            start.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn reduced_adjustments_map_source_pixels_before_averaging_the_composition() {
+        let mut content = scene();
+        content
+            .resize_canvas(12, 10, crate::transform::Anchor::NorthWest)
+            .unwrap();
+        let original = content.composite();
+        let selection = Selection::ellipse_rect_quality(PixelRect::new(0, 1, 7, 6), 12, 10, true);
+        let preview = EffectPreview::new(content.clone(), LayerId(1), selection.clone(), 6);
+        let adjustment = Adjustment::BrightnessContrast {
+            brightness: 20,
+            contrast: 65,
+        };
+        let mut committed = content.clone();
+        committed.apply_adjustment(LayerId(1), adjustment, &selection);
+        assert_eq!(
+            preview.adjustment(adjustment),
+            half_size_reference(&committed.composite())
+        );
+        let resized = preview.resized(9).unwrap();
+        assert_eq!(resized.original().dimensions(), (9, 8));
+        assert_eq!(preview.original().dimensions(), (6, 5));
+        assert_eq!(*content.composite(), *original);
     }
 
     #[test]
@@ -576,16 +774,15 @@ mod tests {
         let content = DocumentContent::from_layers(16_384, 2, vec![layer]).unwrap();
         let preview = EffectPreview::new(content.clone(), LayerId(1), Selection::Full, 256);
         assert_eq!(preview.original().dimensions(), (256, 1));
-        let mut committed = content.clone();
-        committed.apply_adjustment(LayerId(1), Adjustment::Invert, &Selection::Full);
-        let flat = committed.composite();
-        let expected = RgbaImage::from_fn(256, 1, |x, _| *flat.get_pixel(x * 64, 0));
-        assert_eq!(preview.adjustment(Adjustment::Invert), expected);
+        let adjusted = preview.adjustment(Adjustment::Invert);
+        assert!(adjusted.get_pixel(0, 0)[3] > 0);
+        assert!(adjusted.pixels().skip(1).all(|p| p[3] == 0));
+        assert_ne!(adjusted, *preview.original());
         let max_pad = filters::kernel_support(filters::MAX_RADIUS);
         for offset in [(0, 0), (i32::MIN, i32::MAX), (i32::MAX, i32::MIN)] {
-            if let Some(region) = preview.region(filters::MAX_RADIUS, offset) {
-                assert!(region.pixels.width() <= 256 + 2 * max_pad + 1);
-                assert!(region.pixels.height() <= 256 + 2 * max_pad + 1);
+            if let Some(region) = preview.region(filters::MAX_RADIUS, offset, false) {
+                assert!(region.pixels.width() <= 512 + 2 * max_pad + 1);
+                assert!(region.pixels.height() <= 512 + 2 * max_pad + 1);
             }
         }
         let blur = preview.filter(FilterSpec::Blur { radius: 1 });
@@ -596,7 +793,7 @@ mod tests {
         large_layer.offset = (-200, -200);
         let content = DocumentContent::from_layers(128, 128, vec![large_layer]).unwrap();
         let preview = EffectPreview::new(content, LayerId(1), Selection::Full, 32);
-        let region = preview.region(filters::MAX_RADIUS, (0, 0)).unwrap();
+        let region = preview.region(filters::MAX_RADIUS, (0, 0), false).unwrap();
         // Filter inputs use twice the display resolution.
         assert_eq!(region.pixels.dimensions(), (160, 160));
         assert_eq!(

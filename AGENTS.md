@@ -301,7 +301,9 @@ word boundaries; Shift extends those selections. Normal moves/deletes use
 graphemes, preserving combining characters and emoji clusters. Home/End move
 within a line, Windows Ctrl+Home/End and macOS Cmd+Up/Down move through the
 document, and macOS Cmd+Left/Right move to line edges. Typing history retains
-selection anchors. Pointer selection uses the latest matching caret map;
+selection anchors and caret affinity. Wrapped boundaries preserve upstream/downstream
+visual placement through pointer hits, Home/End, arrows, and typing undo/redo.
+Pointer selection uses the latest matching caret map;
 late layout may resolve a released drag, but edits/navigation invalidate its
 old pending hit. Deactivation ends a pointer drag. Modified navigation in the
 font filter remains in that filter and cannot affect canvas text. Styles still
@@ -502,8 +504,15 @@ document is a single plain layer without paths, guides, or editable text.
   the latest slider position. Apply writes the layer, or inserts the shadow
   beneath it, in the background.
 - `src/effect_preview.rs` takes an immutable document/selection snapshot and
-  composites canvas-space samples into a preview bounded to 256 px. Adjustments
-  use the same prepared mapper/coverage blend as commit. Filter scratch data
+  composites canvas-space samples into a display-aware preview, fitted to the
+  dialog's image box and screen scale, with a 1024-pixel output edge cap and no
+  source upscaling. Streaming box-area reduction averages all contributing source
+  pixels in premultiplied color before decimation, avoiding periodic-detail aliasing
+  and hidden-RGB fringes. Composition and reduction use source/preview row buffers,
+  never a full-canvas scratch bitmap. Source visits run in the coalesced background
+  job. Adjustments map source pixels before reduction using the same prepared
+  mapper/coverage blend as commit. Filter input also uses area reduction, capped
+  to a source-bounded 2× preview grid. Filter scratch data
   covers only the visible source region plus its full sampling halo, including
   off-canvas pixels; radius and source samples scale for a reduced preview.
   Subpixel blur/sharpen radii leave the original preview unchanged. Shadows
@@ -511,8 +520,10 @@ document is a single plain layer without paths, guides, or editable text.
   independently of selection/source-layer opacity. Full-resolution preview tests
   compare these paths to real commits; larger-image filter previews are approximate.
   `EffectImages` keeps a checker-backed Before/After pair. Replaced, canceled,
-  and stale pairs release both GPUI images. Preview generation gates publication
-  and supplies the dialogs' updating status. Reset uses built-in form defaults,
+  and stale pairs release both GPUI images. Layout/screen-scale changes replace
+  the immutable preview snapshot and invalidate earlier jobs through the existing
+  coalesced background queue. Preview generation gates publication and supplies
+  the dialogs' updating status. Reset uses built-in form defaults,
   independently of remembered parameters; neither comparison nor reset edits pixels
   or history.
 - `src/workspace/effects.rs` shares the normal/repeated effect commit path and
@@ -864,6 +875,13 @@ From the repository root, use a recent Rust toolchain and Xcode. Run
 `cargo fmt --check`, `cargo clippy --locked -- -D warnings`, and
 `cargo test --locked`. Keep `Cargo.lock` tracked. GPUI on macOS uses
 `font-kit` for text and compiles its Metal shaders at runtime.
+
+`.github/workflows/macos.yml` runs formatting, Clippy including test targets, the
+full suite, release rendering/stroke/area-preview benchmarks, the release app
+bundle/signature and arm64 checks, and the bundled executable's headless PDF
+checks on macos-15. Branch/PR/manual runs and v* tag pushes are supported. The app
+artifact is first archived with ditto to preserve executable bits and bundle
+metadata; CI never launches GPUI or Finder and does not create the Finder DMG.
 
 `.github/workflows/pdf.yml` runs PDF tests and the actual non-test executable's
 headless worker on macOS and Windows. `scripts/check-pdf-worker.py --binary

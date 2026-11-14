@@ -390,7 +390,11 @@ returns to After. Cancel leaves the document unchanged. Colors adjustment dialog
 wider layout with the preview beside the settings when space allows, and stack
 on narrow windows. Levels pairs its black/white input and output controls to
 reduce height. The dialog title and action buttons stay visible while settings
-scroll in shorter windows.
+scroll in shorter windows. Preview resolution follows the image box and screen
+scaling, including Retina displays. Source detail is area-averaged before shrinking
+so thin patterns do not disappear through sparse sampling. Transparent edges use
+premultiplied color to avoid fringes; reduced filter previews remain approximations. Apply and export
+continue to use the original image resolution.
 
 Each adjustment and filter remembers its last successfully applied parameters
 for this app session, shared across tabs. Canceled, failed, and unchanged edits
@@ -410,7 +414,8 @@ geometry to commit; unfinished canvas previews must be applied or canceled first
 Shadow repeats use the whole layer silhouette, as they do in the dialog, and
 check the destination's layer budget before applying.
 
-These fitted previews are limited to 256 pixels on their longest side. Filters
+These fitted previews are capped at 1024 pixels on their longest side and never
+upscale the source. Filters
 keep nearby off-canvas pixels that can influence the visible result, and shadows
 preview beneath their source just as they will be inserted. Small filter radii
 can disappear at this reduced scale; Apply always processes the full resolution.
@@ -449,6 +454,8 @@ range. Copy/Cut use that range; typing and Paste replace it. Selection highlight
 follow individual lines. Option+Left/Right and Option+Backspace/Delete on macOS
 (Ctrl on Windows) move or delete by word; Shift extends word selections. Normal
 arrows and deletion keep combining characters and emoji sequences together.
+A caret at a wrapped line end stays on that visual side of the boundary when
+clicked or reached with Home/End, arrows, and typing Undo/Redo.
 Font/style controls still affect the entire text layer. Undo/Redo restore typing
 and its selection before falling through to document history.
 

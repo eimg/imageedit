@@ -428,6 +428,14 @@ fn line_height(pixel_size: f32, spacing: Spacing) -> f32 {
     (pixel_size * spacing.line).max(1.0)
 }
 
+/// Which visual side of a shared wrap boundary owns the caret.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaretAffinity {
+    Upstream,
+    #[default]
+    Downstream,
+}
+
 /// A caret position in layout coordinates, where the text anchor is the origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaretStop {
@@ -503,11 +511,32 @@ impl CaretMap {
         index.checked_sub(1).map(|index| self.stops[index])
     }
 
-    /// The byte offset nearest to a layout point.
-    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+    pub fn at_affinity(&self, byte: usize, affinity: CaretAffinity) -> Option<CaretStop> {
+        if affinity == CaretAffinity::Upstream {
+            let first = self.stops.partition_point(|stop| stop.byte < byte);
+            if let Some(stop) = self.stops.get(first).filter(|stop| stop.byte == byte) {
+                return Some(*stop);
+            }
+        }
+        self.at(byte)
+    }
+
+    fn position(&self, stop: CaretStop) -> (usize, CaretAffinity) {
+        let affinity = if self
+            .at(stop.byte)
+            .is_some_and(|last| last.line != stop.line)
+        {
+            CaretAffinity::Upstream
+        } else {
+            CaretAffinity::Downstream
+        };
+        (stop.byte, affinity)
+    }
+
+    pub fn hit_position(&self, x: f32, y: f32) -> Option<(usize, CaretAffinity)> {
         let last = self.stops.last()?;
-        let line = if self.line_height > 0.0 && y.is_finite() {
-            ((y / self.line_height).floor().max(0.0) as usize).min(last.line)
+        let line = if self.line_height > 0. && y.is_finite() {
+            ((y / self.line_height).floor().max(0.) as usize).min(last.line)
         } else {
             0
         };
@@ -515,23 +544,32 @@ impl CaretMap {
             .iter()
             .filter(|stop| stop.line == line)
             .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
-            .map(|stop| stop.byte)
+            .map(|stop| self.position(*stop))
     }
 
-    pub fn line_edge(&self, byte: usize, end: bool) -> Option<usize> {
-        let current = self.at(byte)?;
+    pub fn line_edge_position(
+        &self,
+        byte: usize,
+        affinity: CaretAffinity,
+        end: bool,
+    ) -> Option<(usize, CaretAffinity)> {
+        let current = self.at_affinity(byte, affinity)?;
         let stops = self.stops.iter().filter(|stop| stop.line == current.line);
-        if end {
+        let stop = if end {
             stops.max_by(|a, b| a.x.total_cmp(&b.x))
         } else {
             stops.min_by(|a, b| a.x.total_cmp(&b.x))
-        }
-        .map(|stop| stop.byte)
+        }?;
+        Some(self.position(*stop))
     }
 
-    /// The byte offset on the line above or below at the same x.
-    pub fn vertical(&self, byte: usize, down: bool) -> Option<usize> {
-        let current = self.at(byte)?;
+    pub fn vertical_position(
+        &self,
+        byte: usize,
+        affinity: CaretAffinity,
+        down: bool,
+    ) -> Option<(usize, CaretAffinity)> {
+        let current = self.at_affinity(byte, affinity)?;
         let line = if down {
             current.line.checked_add(1)?
         } else {
@@ -541,7 +579,18 @@ impl CaretMap {
             .iter()
             .filter(|stop| stop.line == line)
             .min_by(|a, b| (a.x - current.x).abs().total_cmp(&(b.x - current.x).abs()))
-            .map(|stop| stop.byte)
+            .map(|stop| self.position(*stop))
+    }
+
+    #[cfg(test)]
+    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.hit_position(x, y).map(|position| position.0)
+    }
+
+    #[cfg(test)]
+    pub fn vertical(&self, byte: usize, down: bool) -> Option<usize> {
+        self.vertical_position(byte, CaretAffinity::Downstream, down)
+            .map(|position| position.0)
     }
 }
 

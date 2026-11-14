@@ -21,9 +21,9 @@ use crate::commands::{
 use crate::document::{self, LayerId};
 use crate::preview::Dirty;
 use crate::text::{
-    self, CaretMap, FontFace, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE, MAX_TEXT_CHARS,
-    MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextAlign, TextError,
-    TextLayout, TextSpec,
+    self, CaretAffinity, CaretMap, FontFace, MAX_LETTER_SPACING, MAX_LINE_SPACING, MAX_PIXEL_SIZE,
+    MAX_TEXT_CHARS, MIN_LETTER_SPACING, MIN_LINE_SPACING, MIN_PIXEL_SIZE, Spacing, TextAlign,
+    TextError, TextLayout, TextSpec,
 };
 
 fn text_command_key(key: &Keystroke, windows: bool) -> bool {
@@ -167,6 +167,7 @@ pub(super) struct TextDraft {
     anchor: (i32, i32),
     source: String,
     cursor: usize,
+    cursor_affinity: CaretAffinity,
     selection_anchor: Option<usize>,
     family: String,
     face: FontFace,
@@ -191,6 +192,7 @@ pub(super) struct TextDraft {
 struct TextEdit {
     source: String,
     cursor: usize,
+    cursor_affinity: CaretAffinity,
     selection_anchor: Option<usize>,
     family: String,
     face: FontFace,
@@ -265,6 +267,101 @@ impl TextDraft {
             self.selection_anchor = None;
         }
         self.cursor = byte;
+        self.cursor_affinity = CaretAffinity::Downstream;
+    }
+
+    fn move_to_position(&mut self, position: (usize, CaretAffinity), extend: bool) {
+        if position.0 <= self.source.len() && self.source.is_char_boundary(position.0) {
+            self.move_to(position.0, extend);
+            self.cursor_affinity = position.1;
+        }
+    }
+
+    fn navigation_position(
+        &self,
+        key: &str,
+        word: bool,
+        command: bool,
+        extend: bool,
+    ) -> (usize, CaretAffinity) {
+        use CaretAffinity::{Downstream, Upstream};
+        if !extend
+            && !word
+            && !command
+            && let Some(range) = self.selected_range()
+        {
+            if key == "left" {
+                return (range.start, Downstream);
+            }
+            if key == "right" {
+                return (range.end, Upstream);
+            }
+        }
+        if (word && key == "home") || (command && key == "up") {
+            return (0, Downstream);
+        }
+        if (word && key == "end") || (command && key == "down") {
+            return (self.source.len(), Upstream);
+        }
+        let layout_valid = self.carets.matches(&self.spec());
+        if key == "home" || (command && key == "left") {
+            if self.layout.width.is_some() && layout_valid {
+                return self
+                    .carets
+                    .line_edge_position(self.cursor, self.cursor_affinity, false)
+                    .unwrap_or((self.cursor, self.cursor_affinity));
+            }
+            return (
+                self.source[..self.cursor]
+                    .rfind('\n')
+                    .map_or(0, |at| at + 1),
+                Downstream,
+            );
+        }
+        if key == "end" || (command && key == "right") {
+            if self.layout.width.is_some() && layout_valid {
+                return self
+                    .carets
+                    .line_edge_position(self.cursor, self.cursor_affinity, true)
+                    .unwrap_or((self.cursor, self.cursor_affinity));
+            }
+            return (
+                self.source[self.cursor..]
+                    .find('\n')
+                    .map_or(self.source.len(), |at| self.cursor + at),
+                Upstream,
+            );
+        }
+        if matches!(key, "up" | "down") {
+            return layout_valid
+                .then(|| {
+                    self.carets
+                        .vertical_position(self.cursor, self.cursor_affinity, key == "down")
+                })
+                .flatten()
+                .unwrap_or((self.cursor, self.cursor_affinity));
+        }
+        // Crossing a shared wrap boundary changes visual side before consuming
+        // another grapheme. Word navigation retains its existing byte semantics.
+        if !word && layout_valid {
+            let before = self.carets.at_affinity(self.cursor, Upstream);
+            let after = self.carets.at_affinity(self.cursor, Downstream);
+            if before.zip(after).is_some_and(|(a, b)| a.line != b.line) {
+                if key == "left" && self.cursor_affinity == Downstream {
+                    return (self.cursor, Upstream);
+                }
+                if key == "right" && self.cursor_affinity == Upstream {
+                    return (self.cursor, Downstream);
+                }
+            }
+        }
+        let forward = key == "right";
+        let byte = if word {
+            word_boundary(&self.source, self.cursor, forward)
+        } else {
+            grapheme_boundary(&self.source, self.cursor, forward)
+        };
+        (byte, if forward { Upstream } else { Downstream })
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -274,6 +371,7 @@ impl TextDraft {
             return false;
         };
         self.cursor = range.start;
+        self.cursor_affinity = CaretAffinity::Downstream;
         self.source.replace_range(range, "");
         self.selection_anchor = None;
         true
@@ -293,6 +391,7 @@ impl TextDraft {
         }
         let range = target.min(self.cursor)..target.max(self.cursor);
         self.cursor = range.start;
+        self.cursor_affinity = CaretAffinity::Downstream;
         self.source.replace_range(range, "");
         true
     }
@@ -301,6 +400,7 @@ impl TextDraft {
         self.delete_selection();
         self.source.insert_str(self.cursor, text);
         self.cursor += text.len();
+        self.cursor_affinity = CaretAffinity::Downstream;
     }
 
     fn stop_pointer(&mut self) {
@@ -319,13 +419,13 @@ impl TextDraft {
             return;
         }
         if let Some((x, y)) = self.pending_hit.take()
-            && let Some(byte) = self.carets.hit(x, y)
+            && let Some(byte) = self.carets.hit_position(x, y)
         {
-            self.move_to(byte, self.pending_extend);
+            self.move_to_position(byte, self.pending_extend);
             if let Some((x, y)) = self.pending_drag_hit.take()
-                && let Some(byte) = self.carets.hit(x, y)
+                && let Some(byte) = self.carets.hit_position(x, y)
             {
-                self.move_to(byte, true);
+                self.move_to_position(byte, true);
             }
         }
     }
@@ -358,6 +458,7 @@ impl TextDraft {
         TextEdit {
             source: self.source.clone(),
             cursor: self.cursor,
+            cursor_affinity: self.cursor_affinity,
             selection_anchor: self.selection_anchor,
             family: self.family.clone(),
             face: self.face,
@@ -372,6 +473,7 @@ impl TextDraft {
     fn restore(&mut self, state: TextEdit) {
         self.source = state.source;
         self.cursor = state.cursor;
+        self.cursor_affinity = state.cursor_affinity;
         self.selection_anchor = state.selection_anchor;
         self.family = state.family;
         self.face = state.face;
@@ -469,13 +571,18 @@ impl TextDraft {
         x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad
     }
 
+    #[cfg(test)]
     fn hit(&self, pixel: (i64, i64)) -> Option<usize> {
+        self.hit_position(pixel).map(|position| position.0)
+    }
+
+    fn hit_position(&self, pixel: (i64, i64)) -> Option<(usize, CaretAffinity)> {
         // Preview layout runs in the background. Its byte offsets may refer to
         // the previous source, including the middle of a new UTF-8 character.
         if !self.carets.matches(&self.spec()) {
             return None;
         }
-        self.carets.hit(
+        self.carets.hit_position(
             pixel.0 as f32 + 0.5 - self.anchor.0 as f32,
             pixel.1 as f32 + 0.5 - self.anchor.1 as f32,
         )
@@ -500,8 +607,8 @@ impl Workspace {
                 pixel.0 as f32 + 0.5 - draft.anchor.0 as f32,
                 pixel.1 as f32 + 0.5 - draft.anchor.1 as f32,
             ));
-        } else if let Some(byte) = draft.hit(pixel) {
-            draft.move_to(byte, true);
+        } else if let Some(byte) = draft.hit_position(pixel) {
+            draft.move_to_position(byte, true);
         }
         self.caret_shown_at = std::time::Instant::now();
         cx.notify();
@@ -1237,6 +1344,7 @@ impl Workspace {
             layer,
             anchor: saved.anchor,
             cursor: saved.source.len(),
+            cursor_affinity: CaretAffinity::Downstream,
             source: saved.source,
             selection_anchor: None,
             family: saved.family,
@@ -1463,7 +1571,9 @@ impl Workspace {
         } else {
             draft.size * draft.spacing.line
         };
-        let stop = draft.carets.at(draft.cursor);
+        let stop = draft
+            .carets
+            .at_affinity(draft.cursor, draft.cursor_affinity);
         let (x, top) = stop.map_or((0.0, 0.0), |stop| (stop.x, stop.top));
         let selection = if draft.carets.matches(&draft.spec()) {
             draft
@@ -1558,9 +1668,9 @@ impl Workspace {
         if let Some(draft) = self.text_draft.as_mut()
             && draft.contains(pixel, pad)
         {
-            if let Some(byte) = draft.hit(pixel) {
+            if let Some(byte) = draft.hit_position(pixel) {
                 draft.stop_pointer();
-                draft.move_to(byte, extend);
+                draft.move_to_position(byte, extend);
             } else {
                 draft.pending_hit = Some((
                     pixel.0 as f32 + 0.5 - draft.anchor.0 as f32,
@@ -1716,60 +1826,12 @@ impl Workspace {
             }),
             "left" | "right" | "home" | "end" | "up" | "down" => {
                 self.move_caret(key.modifiers.shift, cx, |draft| {
-                    let key_name = key.key.as_str();
-                    if !key.modifiers.shift
-                        && !word
-                        && !command_navigation
-                        && let Some(range) = draft.selected_range()
-                    {
-                        if key_name == "left" {
-                            return range.start;
-                        }
-                        if key_name == "right" {
-                            return range.end;
-                        }
-                    }
-                    if (word && key_name == "home") || (command_navigation && key_name == "up") {
-                        return 0;
-                    }
-                    if (word && key_name == "end") || (command_navigation && key_name == "down") {
-                        return draft.source.len();
-                    }
-                    if key_name == "home" || (command_navigation && key_name == "left") {
-                        if draft.layout.width.is_some() && draft.carets.matches(&draft.spec()) {
-                            return draft
-                                .carets
-                                .line_edge(draft.cursor, false)
-                                .unwrap_or(draft.cursor);
-                        }
-                        return draft.source[..draft.cursor]
-                            .rfind('\n')
-                            .map_or(0, |at| at + 1);
-                    }
-                    if key_name == "end" || (command_navigation && key_name == "right") {
-                        if draft.layout.width.is_some() && draft.carets.matches(&draft.spec()) {
-                            return draft
-                                .carets
-                                .line_edge(draft.cursor, true)
-                                .unwrap_or(draft.cursor);
-                        }
-                        return draft.source[draft.cursor..]
-                            .find('\n')
-                            .map_or(draft.source.len(), |at| draft.cursor + at);
-                    }
-                    if matches!(key_name, "up" | "down") {
-                        return draft
-                            .carets
-                            .matches(&draft.spec())
-                            .then(|| draft.carets.vertical(draft.cursor, key_name == "down"))
-                            .flatten()
-                            .unwrap_or(draft.cursor);
-                    }
-                    if word {
-                        word_boundary(&draft.source, draft.cursor, key_name == "right")
-                    } else {
-                        grapheme_boundary(&draft.source, draft.cursor, key_name == "right")
-                    }
+                    draft.navigation_position(
+                        &key.key,
+                        word,
+                        command_navigation,
+                        key.modifiers.shift,
+                    )
                 });
             }
             "enter" => self.insert_text("\n", window, cx),
@@ -1786,13 +1848,13 @@ impl Workspace {
         &mut self,
         extend: bool,
         cx: &mut Context<Self>,
-        target: impl FnOnce(&TextDraft) -> usize,
+        target: impl FnOnce(&TextDraft) -> (usize, CaretAffinity),
     ) {
         self.caret_shown_at = std::time::Instant::now();
         if let Some(draft) = self.text_draft.as_mut() {
             let byte = target(draft);
             draft.stop_pointer();
-            draft.move_to(byte, extend);
+            draft.move_to_position(byte, extend);
         }
         cx.notify();
     }
@@ -2013,6 +2075,7 @@ impl Workspace {
             anchor,
             source: rendered.style.source.clone(),
             cursor: rendered.style.source.len(),
+            cursor_affinity: CaretAffinity::Downstream,
             selection_anchor: None,
             family: rendered.style.family.clone(),
             face: rendered.style.face,
@@ -2151,6 +2214,7 @@ impl Workspace {
             draft.stop_pointer();
             draft.selection_anchor = Some(0);
             draft.cursor = draft.source.len();
+            draft.cursor_affinity = CaretAffinity::Downstream;
             cx.notify();
         }
     }
@@ -2389,6 +2453,7 @@ mod tests {
             anchor: (2, 3),
             source: rendered.style.source.clone(),
             cursor: rendered.style.source.len(),
+            cursor_affinity: CaretAffinity::Downstream,
             selection_anchor: None,
             family: "sans-serif".into(),
             face: FontFace::default(),
@@ -2544,6 +2609,78 @@ mod tests {
         assert_eq!(draft.source, "  ");
         assert_eq!(grapheme_boundary("a\u{301}b", 0, true), "a\u{301}".len());
         assert_eq!(grapheme_boundary("a\u{301}b", "a\u{301}".len(), false), 0);
+    }
+
+    #[test]
+    fn wrapped_caret_keeps_pointer_navigation_selection_and_history_affinity() {
+        use CaretAffinity::{Downstream, Upstream};
+        let mut draft = draft(None);
+        draft.source = "MMMMMMMMMMMMMMMMMMMM".into();
+        draft.layout = TextLayout {
+            width: Some(150),
+            height: Some(200),
+            align: TextAlign::Left,
+        };
+        draft.carets = Arc::new(text::caret_map(&draft.spec()).unwrap());
+        let pair = draft
+            .carets
+            .stops
+            .windows(2)
+            .find(|p| p[0].byte == p[1].byte && p[0].line != p[1].line)
+            .unwrap();
+        let (end, start) = (pair[0], pair[1]);
+        let position = draft
+            .carets
+            .hit_position(end.x, end.top + draft.carets.line_height / 2.)
+            .unwrap();
+        assert_eq!(position, (end.byte, Upstream));
+        draft.move_to_position(position, false);
+        assert_eq!(
+            draft
+                .carets
+                .at_affinity(draft.cursor, draft.cursor_affinity)
+                .unwrap(),
+            end
+        );
+        assert_eq!(
+            draft.navigation_position("end", false, false, false),
+            position
+        );
+        let home = draft.navigation_position("home", false, false, false);
+        assert_eq!(
+            draft.carets.at_affinity(home.0, home.1).unwrap().line,
+            end.line
+        );
+        let down = draft.navigation_position("down", false, false, false);
+        assert_eq!(
+            draft.carets.at_affinity(down.0, down.1).unwrap().line,
+            start.line
+        );
+        draft.move_to_position(
+            draft.navigation_position("right", false, false, false),
+            false,
+        );
+        assert_eq!(
+            (draft.cursor, draft.cursor_affinity),
+            (start.byte, Downstream)
+        );
+        draft.move_to_position(
+            draft.navigation_position("left", false, false, false),
+            false,
+        );
+        assert_eq!((draft.cursor, draft.cursor_affinity), position);
+        let previous = draft.state();
+        draft.replace_selection("X");
+        draft.record(previous);
+        assert!(draft.step_history(false));
+        assert_eq!((draft.cursor, draft.cursor_affinity), position);
+        draft.move_to_position(draft.navigation_position("home", false, false, true), true);
+        assert_eq!(draft.selected_range(), Some(home.0..end.byte));
+        // Pending layout hits must preserve the clicked side too, including after release.
+        draft.pending_hit = Some((end.x, end.top + draft.carets.line_height / 2.));
+        draft.pending_extend = false;
+        draft.resolve_pending_pointer();
+        assert_eq!((draft.cursor, draft.cursor_affinity), position);
     }
 
     #[test]
