@@ -14,11 +14,10 @@ portable ZIP. Releases distribute the EXE without an installer or file
 associations. The macOS DMG is currently Apple silicon only. See README.md
 for downloads and signing status.
 
-Linux x86_64 and ARM64 (`aarch64`) ship as experimental portable downloads.
-The maintainer approved the ARM64 Wayland UI on Arch Linux ARM/Hyprland with
-Mesa 26.2.6 software Vulkan in a VM. Automated X11/Wayland smoke checks also pass;
-native x86_64 desktop review remains outstanding. The final combined candidate
-must build and test both Linux architectures before publishing their assets.
+Linux x86_64 and ARM64 (`aarch64`) ship as portable downloads. The maintainer
+accepted device verification for 1.2.0, and the combined candidate passed CI for
+all four release targets. ARM64 Wayland was visually checked on Arch Linux ARM/Hyprland
+with Mesa 26.2.6 software Vulkan in a VM; X11/Wayland smoke checks also pass.
 GPUI's Linux target enables both Wayland and X11. `src/workspace/linux_menu.rs`
 renders an in-window menu bar from `commands::application_menus(false)` without
 introducing GTK or changing the macOS/Windows menu adapters. Menu navigation
@@ -49,6 +48,9 @@ architecture and editing contracts; [README.md](README.md) describes using the
 app. Update both when behavior changes. Completed plans, feedback queues, and
 review handoffs belong in Git history rather than separate living documents.
 Keep unrelated work and existing edits intact.
+README.md is a compact user-facing overview and download page. Keep detailed
+tool instructions, build/CI details, validation status, and release preparation
+notes out of it. The UI provides tool help; a dedicated guide website is planned.
 
 ## Current product scope
 
